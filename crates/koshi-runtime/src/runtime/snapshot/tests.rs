@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
+use koshi_core::attention::{Attention, AttentionReason};
 use koshi_core::command::GridPosition;
 use koshi_core::geometry::{
     PaneArea, Point, Rect, Size, SplitDirection, DEFAULT_FLOATING_PANE_SIZE,
@@ -1875,6 +1876,7 @@ fn a_floating_pane_of_two_panes_names_the_front_of_the_clients_focus_history_in_
             pane_id: logs_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::new(2).expect("2 is above 0"),
+            is_waiting: false,
         }]
     );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
@@ -1916,6 +1918,7 @@ fn floating_panes_list_every_floating_pane_in_the_order_it_was_created() {
                 pane_id: second_pane_id,
                 pane_title: None,
                 pane_count: NonZeroUsize::MIN,
+                is_waiting: false,
             },
             FloatingPane::Shown {
                 floating_pane_id: find_floating_pane_id(&server, session_id, third_pane_id),
@@ -1960,6 +1963,7 @@ fn a_minimized_floating_pane_gets_no_slot_and_no_content() {
             pane_id: htop_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         }]
     );
     assert_eq!(list_snapshot_pane_ids(&render_snapshot), [tiled_pane_id]);
@@ -2000,6 +2004,7 @@ fn a_minimized_floating_pane_keeps_its_title_in_the_floating_pane_list() {
             pane_id: htop_pane_id,
             pane_title: Some("htop".to_string()),
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         }]
     );
 }
@@ -2029,6 +2034,7 @@ fn a_floating_pane_the_client_never_focused_gets_no_slot_and_no_content() {
             pane_id: htop_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         }]
     );
 }
@@ -2333,4 +2339,192 @@ fn a_floating_pane_carries_its_content_at_the_clients_scroll_offset() {
             .view_row_offset,
         7
     );
+}
+
+/// A bell attention raised at the Unix epoch.
+fn build_bell_attention() -> Attention {
+    Attention {
+        raised_at: SystemTime::UNIX_EPOCH,
+        reason: AttentionReason::Bell,
+        withdrawable_notification_id: None,
+    }
+}
+
+/// Each tab of `render_snapshot`'s tab bar as its name and whether a pane of
+/// its layout tree waits for a person.
+fn list_tab_waiting_marks(render_snapshot: &RenderSnapshot) -> Vec<(String, bool)> {
+    render_snapshot
+        .session_snapshot
+        .tabs_metadata
+        .iter()
+        .map(|tab_metadata| (tab_metadata.tab_name.clone(), tab_metadata.has_waiting_pane))
+        .collect()
+}
+
+/// Whether the pane snapshot of `pane_id` waits for a person. `None` when the
+/// frame carries no snapshot of the pane.
+fn find_pane_waiting_mark(render_snapshot: &RenderSnapshot, pane_id: PaneId) -> Option<bool> {
+    render_snapshot
+        .find_pane_snapshot(pane_id)
+        .map(|pane_snapshot| pane_snapshot.is_waiting)
+}
+
+#[test]
+fn a_waiting_pane_in_the_viewed_tab_marks_its_snapshot_its_tab_and_the_count_with_or_without_an_engine(
+) {
+    for has_terminal_engine in [true, false] {
+        let mut server = build_test_runtime();
+        let (mut session, session_id, _tab_id, pane_id, client_id) =
+            build_session_with_client(Size {
+                column_count: 80,
+                row_count: 24,
+            });
+        assert_eq!(
+            session.set_pane_attention(pane_id, Some(build_bell_attention())),
+            None
+        );
+        server.session_by_id.insert(session_id, session);
+        if has_terminal_engine {
+            server.terminal_engine_by_pane_id.insert(
+                pane_id,
+                TerminalEngine::from_pty_size(PtySize {
+                    column_count: 80,
+                    row_count: 24,
+                }),
+            );
+        }
+
+        let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+        assert_eq!(
+            find_pane_waiting_mark(&render_snapshot, pane_id),
+            Some(true),
+            "has_terminal_engine {has_terminal_engine}"
+        );
+        assert_eq!(
+            list_tab_waiting_marks(&render_snapshot),
+            [("t".to_string(), true)]
+        );
+        assert_eq!(render_snapshot.session_snapshot.waiting_pane_count, 1);
+    }
+}
+
+#[test]
+fn a_waiting_pane_in_a_tab_the_client_does_not_view_marks_that_tab_and_the_count_only() {
+    let mut server = build_test_runtime();
+    let (mut session, session_id, _tab_id, pane_id, client_id) = build_session_with_client(Size {
+        column_count: 80,
+        row_count: 24,
+    });
+    let (logs_tab_id, logs_pane_id) = (TabId::new(), PaneId::new());
+    session
+        .panes
+        .register_pane_record(PaneRecord::from_terminal_pane(logs_pane_id))
+        .expect("unique pane id");
+    session.tabs.insert(
+        logs_tab_id,
+        build_tab(logs_tab_id, "logs", 1, LayoutNode::Pane(logs_pane_id)),
+    );
+    let _ = session.set_pane_attention(logs_pane_id, Some(build_bell_attention()));
+    server.session_by_id.insert(session_id, session);
+
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(
+        list_tab_waiting_marks(&render_snapshot),
+        [("t".to_string(), false), ("logs".to_string(), true)]
+    );
+    assert_eq!(render_snapshot.session_snapshot.waiting_pane_count, 1);
+    assert_eq!(list_snapshot_pane_ids(&render_snapshot), [pane_id]);
+    assert_eq!(
+        find_pane_waiting_mark(&render_snapshot, pane_id),
+        Some(false)
+    );
+}
+
+/// The floating pane holds `htop` and `logs` and shows `logs` on its strip;
+/// `htop`, the pane the strip does not name, waits.
+#[test]
+fn a_waiting_pane_in_a_minimized_floating_pane_marks_that_floating_pane_and_no_tab() {
+    let mut server = build_test_runtime();
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
+    let logs_pane_id = PaneId::new();
+    put_pane_beside_in_floating_pane(&mut session, htop_pane_id, logs_pane_id);
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    client.update_floating_pane_focused_pane(htop_floating_pane_id, logs_pane_id);
+    assert!(client.minimize_floating_pane(htop_floating_pane_id));
+    let _ = session.set_pane_attention(htop_pane_id, Some(build_bell_attention()));
+    server.session_by_id.insert(session_id, session);
+
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Minimized {
+            floating_pane_id: htop_floating_pane_id,
+            pane_id: logs_pane_id,
+            pane_title: None,
+            pane_count: NonZeroUsize::new(2).expect("2 is above 0"),
+            is_waiting: true,
+        }]
+    );
+    assert_eq!(
+        list_tab_waiting_marks(&render_snapshot),
+        [("t".to_string(), false)]
+    );
+    assert_eq!(render_snapshot.session_snapshot.waiting_pane_count, 1);
+    assert_eq!(
+        find_pane_waiting_mark(&render_snapshot, tiled_pane_id),
+        Some(false)
+    );
+}
+
+#[test]
+fn a_waiting_pane_in_a_shown_floating_pane_marks_its_pane_snapshot_and_no_tab() {
+    let mut server = build_test_runtime();
+    let htop_pane_id = PaneId::new();
+    let (mut session, session_id, _tab_id, tiled_pane_id, client_id, htop_floating_pane_id) =
+        build_session_with_floating_pane(
+            htop_pane_id,
+            Size {
+                column_count: 72,
+                row_count: 22,
+            },
+        );
+    let client = get_attached_client_mut(&mut session, client_id);
+    assert!(client.focus_floating_pane(htop_floating_pane_id));
+    let _ = session.set_pane_attention(htop_pane_id, Some(build_bell_attention()));
+    server.session_by_id.insert(session_id, session);
+
+    let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
+
+    assert_eq!(
+        render_snapshot.session_snapshot.floating_panes,
+        [FloatingPane::Shown {
+            floating_pane_id: htop_floating_pane_id,
+            pane_id: htop_pane_id,
+        }]
+    );
+    assert_eq!(
+        find_pane_waiting_mark(&render_snapshot, htop_pane_id),
+        Some(true)
+    );
+    assert_eq!(
+        find_pane_waiting_mark(&render_snapshot, tiled_pane_id),
+        Some(false)
+    );
+    assert_eq!(
+        list_tab_waiting_marks(&render_snapshot),
+        [("t".to_string(), false)]
+    );
+    assert_eq!(render_snapshot.session_snapshot.waiting_pane_count, 1);
 }

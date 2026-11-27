@@ -60,8 +60,13 @@ impl Server {
     /// the client's solve of its tree.
     /// `session_snapshot.floating_panes` lists every floating pane of the
     /// session, in the order they were created: `Shown` while the
-    /// client shows it, and `Minimized` with the title of its input pane and
-    /// its pane count while the client minimized it. `pane_snapshots` holds
+    /// client shows it, and `Minimized` with the title of its input pane, its
+    /// pane count and whether one of its panes waits for a person while the
+    /// client minimized it. Each tab entry says whether a pane of its tree
+    /// waits for a person, each pane snapshot whether its pane waits, and
+    /// `waiting_pane_count` counts every pane of the session that waits
+    /// ([`PaneRecord::attention`](koshi_pane::pane::state::PaneRecord::attention)
+    /// is `Some`). `pane_snapshots` holds
     /// one entry per tiled slot, then one per pane slot of each floating pane
     /// slot, back to front, then one per pane of the client's placement
     /// preview that neither lists
@@ -87,6 +92,13 @@ impl Server {
             ),
         };
 
+        let waiting_pane_ids: Vec<PaneId> = session
+            .panes
+            .list_pane_records()
+            .filter(|pane_record| pane_record.attention.is_some())
+            .map(|pane_record| pane_record.get_pane_id())
+            .collect();
+
         // Metadata for every tab in the session, in display (index) order.
         let mut tabs_metadata: Vec<TabMetadata> = session
             .tabs
@@ -96,6 +108,9 @@ impl Server {
                 tab_name: tab.get_tab_name().to_owned(),
                 tab_index: tab.get_tab_index(),
                 is_active: tab.get_tab_id() == active_tab_id,
+                has_waiting_pane: waiting_pane_ids
+                    .iter()
+                    .any(|&waiting_pane_id| tab.get_layout_tree().has_pane(waiting_pane_id)),
             })
             .collect();
         tabs_metadata.sort_by_key(|tab_metadata| tab_metadata.tab_index);
@@ -128,9 +143,13 @@ impl Server {
                             },
                         ),
                         pane_count: NonZeroUsize::new(floating_pane.list_pane_ids().len())?,
+                        is_waiting: waiting_pane_ids
+                            .iter()
+                            .any(|&waiting_pane_id| floating_pane.has_pane(waiting_pane_id)),
                     })
                 })
                 .collect(),
+            waiting_pane_count: waiting_pane_ids.len(),
             peers: self.list_peer_snapshots(session, client_id),
         };
 
@@ -170,6 +189,7 @@ impl Server {
                     pane_id,
                     client.get_scroll_offset(pane_id),
                     client.get_selection(pane_id),
+                    waiting_pane_ids.contains(&pane_id),
                 )
             })
             .collect();
@@ -243,20 +263,25 @@ impl Server {
     ///
     /// `pane_selection` is the viewing client's highlight in this pane,
     /// resolved here from absolute line numbers to the rows this frame shows.
+    /// `is_waiting` says whether the pane waits for a person.
     ///
     /// A pane with no terminal engine, one not yet spawned, gets
-    /// [`PaneSnapshot::from_empty_pane`]: no grid, a hidden cursor, and mouse
-    /// tracking off. The renderer draws no cells for it, and a wheel over it
-    /// asks nothing of a program.
+    /// [`PaneSnapshot::from_empty_pane`] with `is_waiting`: no grid, a hidden
+    /// cursor, and mouse tracking off. The renderer draws no cells for it, and
+    /// a wheel over it asks nothing of a program.
     #[allow(clippy::needless_pass_by_value)]
     fn build_pane_snapshot(
         &self,
         pane_id: PaneId,
         scrollback_offset: usize,
         pane_selection: Option<Selection>,
+        is_waiting: bool,
     ) -> PaneSnapshot {
         let Some(terminal_engine) = self.terminal_engine_by_pane_id.get(&pane_id) else {
-            return PaneSnapshot::from_empty_pane(pane_id);
+            return PaneSnapshot {
+                is_waiting,
+                ..PaneSnapshot::from_empty_pane(pane_id)
+            };
         };
 
         let terminal_state = terminal_engine.get_terminal_state();
@@ -290,6 +315,7 @@ impl Server {
                 shape: terminal_state.get_cursor_shape(),
             },
             has_selection: pane_selection.is_some(),
+            is_waiting,
             image_placement_snapshots,
             selection_spans: pane_selection.and_then(|pane_selection| {
                 compute_selection_spans(

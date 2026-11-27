@@ -2724,6 +2724,7 @@ fn a_session_carried_by_0_6_0_comes_back_with_both_clients_their_numbers_views_p
                         pane_id: percent_pane_id,
                         pane_title: percent_pane_title,
                         pane_count: NonZeroUsize::MIN,
+                        is_waiting: false,
                     }
                 ),
                 "client 10 shows the 60% floating pane minimized: {:?}",

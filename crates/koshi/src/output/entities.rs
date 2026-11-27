@@ -7,6 +7,7 @@
 //! serializes them, and the table cells read them.
 
 use super::*;
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::client::{compute_client_number, ClientOrigin};
 use koshi_core::geometry::PaneArea;
 use koshi_core::ids::LayoutAreaId;
@@ -253,6 +254,19 @@ struct PaneListingRow {
     session_id: String,
     /// That session's display name.
     session_name: String,
+    /// The kind of the reason the pane waits for a person and the time the
+    /// wait began, or `None` for a pane that waits for nobody.
+    attention: Option<PaneAttentionReport>,
+}
+
+/// A pane's wait for a person, as `list-panes` prints it: the reason's kind
+/// and the start of the wait, and never the notification's text.
+#[derive(Serialize)]
+struct PaneAttentionReport {
+    /// The reason's kind, as [`format_attention_reason_kind`] names it.
+    kind: &'static str,
+    /// When the pane began to wait, as [`format_utc_timestamp`] writes it.
+    raised_at: String,
 }
 
 /// One `list-clients` row, as both formats print it.
@@ -427,6 +441,12 @@ fn build_pane_listing_row(pane_row: &PaneRow) -> PaneListingRow {
         floating_pane_id,
         session_id: pane_row.session_id.to_string(),
         session_name: pane_row.session_name.clone(),
+        attention: pane_row
+            .attention
+            .map(|pane_attention| PaneAttentionReport {
+                kind: format_attention_reason_kind(pane_attention.reason_kind),
+                raised_at: format_utc_timestamp(pane_attention.raised_at),
+            }),
     }
 }
 
@@ -533,6 +553,7 @@ const PANE_ROW_HEADERS: &[&str] = &[
     "floating_pane",
     "session",
     "session_name",
+    "attention",
 ];
 
 /// Column headers for `list-clients`, matching [`format_client_row_cells`].
@@ -602,7 +623,8 @@ fn format_tab_row_cells(tab: &TabListingRow) -> Vec<String> {
 
 /// One [`PaneListingRow`] as table cells, in [`PANE_ROW_HEADERS`] order. A pane
 /// the child never titled prints `-`. A floating pane prints `-` as its tab and
-/// tab name, and a tiled pane prints `-` as its floating pane.
+/// tab name, and a tiled pane prints `-` as its floating pane. A pane that
+/// waits for nobody prints `-` as its attention.
 fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
     vec![
         pane.pane_id.clone(),
@@ -612,6 +634,7 @@ fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
         format_optional_cell(pane.floating_pane_id.as_ref()),
         pane.session_id.clone(),
         pane.session_name.clone(),
+        format_optional_cell(pane.attention.as_ref().map(|attention| &attention.kind)),
     ]
 }
 
@@ -766,6 +789,16 @@ pub(super) fn format_size_cell(size: Size) -> String {
 fn format_pane_lifecycle(pane_lifecycle: PaneLifecycle) -> &'static str {
     match pane_lifecycle {
         PaneLifecycle::Running => "running",
+    }
+}
+
+/// The kind of a pane's wait for a person, as both formats name it: `bell`,
+/// `notify` or `command-finished`.
+fn format_attention_reason_kind(attention_reason_kind: AttentionReasonKind) -> &'static str {
+    match attention_reason_kind {
+        AttentionReasonKind::Bell => "bell",
+        AttentionReasonKind::Notify => "notify",
+        AttentionReasonKind::CommandFinished => "command-finished",
     }
 }
 

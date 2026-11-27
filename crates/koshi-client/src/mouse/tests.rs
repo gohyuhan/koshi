@@ -157,10 +157,12 @@ pub(crate) fn build_mouse_frame(
                 tab_name: "one".to_owned(),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: false,
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         mouse_panes: mouse_panes.to_vec(),
         client_snapshot: ClientSnapshot {
@@ -678,6 +680,7 @@ fn build_overflowing_tab_strip_mouse_frame() -> MouseFrame {
                 tab_name: format!("long tab name number {tab_index}"),
                 tab_index,
                 is_active: false,
+                has_waiting_pane: false,
             });
     }
     mouse_frame

@@ -44,10 +44,12 @@ fn build_region_test_render_snapshot() -> RenderSnapshot {
                 tab_name: "first".to_string(),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: false,
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {

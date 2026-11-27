@@ -5,8 +5,8 @@
 //! nested groups), group order, pinned-first and hint-tier ordering,
 //! whole-item truncation, the shipped rows of every mode and of the `<C-p>`
 //! continuations at 40, 80 and 120 columns, the blanked row for a mode with
-//! nothing to hint, and the cells outside the given area that the bar leaves
-//! untouched.
+//! nothing to hint, the cells outside the given area that the bar leaves
+//! untouched, and the count of waiting panes at the right end of the row.
 
 use super::*;
 
@@ -95,6 +95,7 @@ fn paint_statusline(
         StatuslineInputs {
             keymap_hints,
             pending_key_sequence,
+            waiting_pane_count: 0,
         },
         theme,
         render_area,
@@ -1682,5 +1683,89 @@ fn a_partly_rebound_direction_family_folds_only_the_keys_that_keep_its_label() {
             " Ctrl +  p  +20  ▶  n  New Pane  x  Close Pane Tree  ←  Resize Pane ",
             " ↓↑→  Focus Pane  Tab  Focus Next Floating Pane …"
         )
+    );
+}
+
+/// Draw `keymap_hints` into a fresh one-row buffer of `column_count` cells,
+/// with `waiting_pane_count` waiting panes and no open sequence, in the
+/// default theme.
+fn render_statusline_with_waiting_count(
+    keymap_hints: &KeymapHints,
+    waiting_pane_count: usize,
+    column_count: u16,
+) -> Buffer {
+    let render_area = RatatuiRect {
+        x: 0,
+        y: 0,
+        width: column_count,
+        height: 1,
+    };
+    let mut render_buffer = Buffer::empty(render_area);
+    draw_statusline(
+        StatuslineInputs {
+            keymap_hints,
+            pending_key_sequence: None,
+            waiting_pane_count,
+        },
+        &Theme::default(),
+        render_area,
+        &mut render_buffer,
+    );
+    render_buffer
+}
+
+/// The cells ` 3 waiting ` takes on the bar: the attention style over the
+/// bar background.
+fn build_three_waiting_cells() -> Vec<Cell> {
+    let theme = Theme::default();
+    build_painted_cells(
+        " 3 waiting ",
+        compute_bar_style(&theme).patch(compute_attention_border_style(&theme)),
+    )
+}
+
+/// The cells of the single row of `render_buffer` from `start_column` up to
+/// `end_column`, `end_column` left out.
+fn list_row_cells(render_buffer: &Buffer, start_column: u16, end_column: u16) -> Vec<Cell> {
+    (start_column..end_column)
+        .map(|column_index| render_buffer[(column_index, 0)].clone())
+        .collect()
+}
+
+#[test]
+fn waiting_panes_draw_their_count_at_the_right_end_and_the_hints_end_before_it() {
+    let keymap_hints = build_pane_keymap_hints(false);
+
+    let render_buffer = render_statusline_with_waiting_count(&keymap_hints, 3, 80);
+
+    assert_eq!(
+        list_row_cells(&render_buffer, 69, 80),
+        build_three_waiting_cells()
+    );
+    assert_eq!(
+        list_row_cells(&render_buffer, 0, 69),
+        list_row_cells(&render_statusline(&keymap_hints, 69), 0, 69)
+    );
+}
+
+#[test]
+fn a_row_too_narrow_for_the_waiting_count_draws_the_hints_alone() {
+    let keymap_hints = build_pane_keymap_hints(false);
+
+    assert_eq!(
+        render_statusline_with_waiting_count(&keymap_hints, 3, 10),
+        render_statusline(&keymap_hints, 10)
+    );
+}
+
+#[test]
+fn a_row_exactly_as_wide_as_the_waiting_count_draws_the_count_alone() {
+    let keymap_hints = build_pane_keymap_hints(false);
+
+    let render_buffer = render_statusline_with_waiting_count(&keymap_hints, 3, 11);
+
+    assert_eq!(
+        list_row_cells(&render_buffer, 0, 11),
+        build_three_waiting_cells()
     );
 }

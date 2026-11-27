@@ -471,7 +471,7 @@ id line.
 | `koshi detach --all [NAME_OR_ID]` | Detach every terminal of that session |
 | `koshi kill-session [NAME_OR_ID]` | End that session, or the only running one |
 | `koshi list-tabs [--session <NAME_OR_ID>]` | List tab ids, names, and owning sessions |
-| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, floating pane, and session ids and names |
+| `koshi list-panes [--session <NAME_OR_ID>]` | List pane, tab, floating pane, and session ids and names, and why each pane waits |
 | `koshi list-clients [--session <NAME_OR_ID>]` | List client ids, numbers, labels, and owning sessions |
 | `koshi inspect session <NAME_OR_ID>` | Show one session's full record |
 | `koshi inspect tab <NAME_OR_ID>` | Show one tab's full record |
@@ -544,13 +544,20 @@ pane id. A `--pane` flag finds a floating pane's session from outside koshi
 too: `koshi close-pane --pane pane-…` closes that pane inside its floating
 pane.
 
-Example: `htop` and `top` share one floating pane, and `vim` is tiled.
+The `attention` column names the reason a pane waits for a person: `bell`,
+`notify` or `command-finished` ([koshi.md](koshi.md#attention)). A pane that
+waits for nobody prints `-`. `--format json` writes `"attention": null` for
+that pane, and else the same kind with the time of the first signal:
+`"attention": {"kind": "notify", "raised_at": "2025-01-01T00:00:00Z"}`.
+
+Example: `htop` and `top` share one floating pane, `vim` is tiled, and
+`htop` rang a bell.
 
 ```text
-id      name  tab    tab_name  floating_pane       session    session_name
-pane-…  vim   tab-…  editor    -                   session-…  work
-pane-…  htop  -      -         floating-pane-01a…  session-…  work
-pane-…  top   -      -         floating-pane-01a…  session-…  work
+id      name  tab    tab_name  floating_pane       session    session_name  attention
+pane-…  vim   tab-…  editor    -                   session-…  work          -
+pane-…  htop  -      -         floating-pane-01a…  session-…  work          bell
+pane-…  top   -      -         floating-pane-01a…  session-…  work          -
 ```
 
 `koshi list-sessions` names each session's machine in its `server` column:

@@ -100,6 +100,7 @@ fn theme_example_parses_without_warnings() {
                 border_focused: Some(default_palette.border_focused),
                 border_unfocused: Some(default_palette.border_unfocused),
                 border_hover: Some(default_palette.border_hover),
+                border_attention: Some(default_palette.border_attention),
                 stack_header_fg: Some(default_palette.stack_header_fg),
                 stack_header_bg: Some(default_palette.stack_header_bg),
                 letterbox: Some(default_palette.letterbox),
@@ -148,7 +149,7 @@ fn profile_example_parses() {
 }
 
 /// Every ready-made theme shipped in `themes-example/` declares `version 2`,
-/// parses with no warnings, and sets all thirteen color roles.
+/// parses with no warnings, and sets all fourteen color roles.
 ///
 /// The parser skips an unknown role name with a warning. An unset role keeps
 /// that part of the chrome at koshi's default color.
@@ -199,6 +200,7 @@ fn every_shipped_example_theme_is_complete_and_warning_free() {
             border_focused,
             border_unfocused,
             border_hover,
+            border_attention,
             stack_header_fg,
             stack_header_bg,
             letterbox,
@@ -217,6 +219,7 @@ fn every_shipped_example_theme_is_complete_and_warning_free() {
             ("border-focused", border_focused.is_some()),
             ("border-unfocused", border_unfocused.is_some()),
             ("border-hover", border_hover.is_some()),
+            ("border-attention", border_attention.is_some()),
             ("stack-header-fg", stack_header_fg.is_some()),
             ("stack-header-bg", stack_header_bg.is_some()),
             ("letterbox", letterbox.is_some()),

@@ -3,7 +3,8 @@
 //! title or the `+ new` text, a title cut with `…` where it does not fit, a
 //! tile of a floating pane that holds two panes or more with its pane count
 //! `[N]` at the right end and its title fitted before it, the
-//! lit, gray, `+ new`, selected and empty styles, the title of the tile under
+//! lit, gray, `+ new`, selected and empty styles, the attention style of a
+//! tile whose floating pane waits for a person, the title of the tile under
 //! the pointer in the titlebar, the tabline button in reverse video while the
 //! tray is open, and no cursor under the tray.
 
@@ -472,4 +473,51 @@ fn each_listed_row_draws_the_open_tray_as_a_frame_of_every_row_and_other_rows_ke
             );
         }
     }
+}
+
+/// Tile 0 shows `htop`, which the viewer shows and whose pane waits, and is
+/// selected. Tile 1 shows `logs`, which the viewer minimized and which waits.
+#[test]
+fn a_tile_whose_floating_pane_waits_draws_its_text_and_its_unselected_ring_in_the_attention_style()
+{
+    let theme = Theme::default();
+    let mut render_snapshot = build_htop_and_logs_render_snapshot();
+    let htop_pane_id = render_snapshot.session_snapshot.floating_pane_slots[0].pane_id;
+    render_snapshot
+        .pane_snapshots
+        .iter_mut()
+        .find(|pane_snapshot| pane_snapshot.pane_id == htop_pane_id)
+        .expect("the shown floating pane has a pane snapshot")
+        .is_waiting = true;
+    let FloatingPane::Minimized { is_waiting, .. } =
+        &mut render_snapshot.session_snapshot.floating_panes[1]
+    else {
+        panic!("tile 1 shows a minimized floating pane");
+    };
+    *is_waiting = true;
+
+    let render_buffer = render_tray_frame(&render_snapshot, build_open_tray_viewer_chrome(0));
+
+    let attention_color_and_modifier =
+        get_style_color_and_modifier(compute_attention_border_style(&theme));
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 9, 5),
+        attention_color_and_modifier
+    );
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 7, 4),
+        get_style_color_and_modifier(compute_hover_border_style(&theme))
+    );
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 20, 5),
+        attention_color_and_modifier
+    );
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 18, 4),
+        attention_color_and_modifier
+    );
+    assert_eq!(
+        get_cell_color_and_modifier(&render_buffer, 31, 5),
+        get_style_color_and_modifier(compute_placement_hover_border_style(&theme))
+    );
 }

@@ -21,7 +21,7 @@ use koshi_core::process::{ExitStatus, PtySize};
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
-use koshi_renderer::snapshot::Delivery;
+use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 use koshi_session::client::ClientRegistry;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::TerminalEngine;
@@ -31,6 +31,9 @@ use koshi_test_support::fixtures::build_spawn_spec;
 use crate::runtime::command::tests::{attach_client, build_in_session_source, build_tab};
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::pty_inbox::InboxSink;
+use crate::runtime::render_schedule::tests::{
+    mark_changed_views_then_compute_frame_wait, DEFAULT_FRAME_INTERVAL_DURATION,
+};
 
 use super::*;
 
@@ -1187,6 +1190,101 @@ fn switching_the_reason_off_leaves_a_waiting_pane_waiting_until_a_clear() {
             fixture.build_pane_id,
             fixture.code_tab_id,
             Some(bob_client_id)
+        )]
+    );
+}
+
+// ------------------------------------------------------------- frames ----
+
+/// Each tab of `render_snapshot`'s tab bar as its name and whether a pane of
+/// its layout tree waits for a person, then the session's count of waiting
+/// panes.
+fn list_waiting_marks(render_snapshot: &RenderSnapshot) -> (Vec<(String, bool)>, usize) {
+    let tab_waiting_marks = render_snapshot
+        .session_snapshot
+        .tabs_metadata
+        .iter()
+        .map(|tab_metadata| (tab_metadata.tab_name.clone(), tab_metadata.has_waiting_pane))
+        .collect();
+    (
+        tab_waiting_marks,
+        render_snapshot.session_snapshot.waiting_pane_count,
+    )
+}
+
+/// The waiting marks ([`list_waiting_marks`]) of every frame in
+/// `deliveries`, oldest first.
+fn list_delivered_frame_waiting_marks(
+    deliveries: Vec<Delivery>,
+) -> Vec<(Vec<(String, bool)>, usize)> {
+    deliveries
+        .iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::Frame(render_snapshot) => Some(list_waiting_marks(render_snapshot)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Alice views tab `docs`. Output in `build_pane_id`, in tab `code`, leaves
+/// her frame as it is, but a raise and a clear of its wait each repaint it.
+#[test]
+fn a_raise_and_a_clear_in_a_tab_the_client_does_not_view_repaint_its_frame() {
+    let mut fixture = build_attention_fixture();
+    let alice_client_id = fixture.alice_client_id;
+    let first_frame_time = Instant::now();
+    fixture.server.push_due_frames(first_frame_time);
+    let _ = fixture.take_alice_deliveries();
+
+    fixture.write_build_pane_output(b"hello", build_wall_time(1_000));
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(
+            &mut fixture.server,
+            alice_client_id,
+            first_frame_time
+        ),
+        None
+    );
+
+    fixture.write_build_pane_output(
+        b"\x1b]99;i=7:p=body;deploy done\x1b\\",
+        build_wall_time(1_001),
+    );
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(
+            &mut fixture.server,
+            alice_client_id,
+            first_frame_time
+        ),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+    );
+    let second_frame_time = first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
+    fixture.server.push_due_frames(second_frame_time);
+    assert_eq!(
+        list_delivered_frame_waiting_marks(fixture.take_alice_deliveries()),
+        [(
+            vec![("code".to_string(), true), ("docs".to_string(), false)],
+            1
+        )]
+    );
+
+    fixture.write_build_pane_output(b"\x1b]99;i=7:p=close;\x1b\\", build_wall_time(1_002));
+    assert_eq!(
+        mark_changed_views_then_compute_frame_wait(
+            &mut fixture.server,
+            alice_client_id,
+            second_frame_time
+        ),
+        Some(DEFAULT_FRAME_INTERVAL_DURATION)
+    );
+    fixture
+        .server
+        .push_due_frames(second_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
+    assert_eq!(
+        list_delivered_frame_waiting_marks(fixture.take_alice_deliveries()),
+        [(
+            vec![("code".to_string(), false), ("docs".to_string(), false)],
+            0
         )]
     );
 }

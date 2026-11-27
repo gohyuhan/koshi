@@ -57,6 +57,7 @@ both rows. `on-ramp` and `on-accent` color text drawn over filled blocks.
 | `border-focused` | `#RRGGBB` — border of the focused pane | `#00afd7` | ≥ 0.1.0 |
 | `border-unfocused` | `#RRGGBB` — border of the other panes | `#585858` | ≥ 0.1.0 |
 | `border-hover` | `#RRGGBB` — border of an unfocused pane whose content, top border or handle is under the pointer | `#af5fff` | ≥ 0.1.0 |
+| `border-attention` | `#RRGGBB` — a pane that waits for a person: its border, the `●` before its tab's name, the statusline's `N waiting` and its floating pane's tray tile | `#ffaf00` | ≥ 0.7.0 |
 | `stack-header-fg` | `#RRGGBB` — text of a collapsed stack member's header | `#f4f1fa` | ≥ 0.1.0 |
 | `stack-header-bg` | `#RRGGBB` — background of that header | `#300f4a` | ≥ 0.1.0 |
 | `letterbox` | `#RRGGBB` — the margin around a centered layout | `#585858` | ≥ 0.1.0 |
@@ -83,6 +84,7 @@ colors {
     border-focused "#00afd7"
     border-unfocused "#585858"
     border-hover "#af5fff"
+    border-attention "#ffaf00"
     stack-header-fg "#f4f1fa"
     stack-header-bg "#300f4a"
     letterbox "#585858"

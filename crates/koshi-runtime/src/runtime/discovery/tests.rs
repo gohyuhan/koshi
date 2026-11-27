@@ -16,9 +16,10 @@ use crate::runtime::command::tests::{
     put_pane_beside_in_floating_pane,
 };
 use crate::runtime::pty_inbox::InboxSink;
+use koshi_core::attention::{Attention, AttentionReason, AttentionReasonKind};
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPanePlacement};
-use koshi_core::discovery::PaneLifecycle;
+use koshi_core::discovery::{PaneAttentionDiscovery, PaneLifecycle};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, CommandId, LayoutAreaId, SessionId, TabId};
 use koshi_core::lock::LockMode;
@@ -611,4 +612,46 @@ fn floating_panes_follow_the_tiled_panes_and_name_their_floating_pane() {
     );
     assert_eq!(overview.session.pane_count, 4);
     assert_eq!(overview.tabs[0].pane_count, 1);
+}
+
+#[test]
+fn a_waiting_pane_reports_the_kind_and_the_start_of_its_wait_and_a_quiet_pane_none() {
+    let session_id = SessionId::new();
+    let mut session = build_empty_session(session_id);
+    let build_pane_id = register_session_tab_with_pane(&mut session, TabId::new(), "build", 0);
+    let docs_pane_id = register_session_tab_with_pane(&mut session, TabId::new(), "docs", 1);
+    let raised_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000);
+    let _ = session.set_pane_attention(
+        build_pane_id,
+        Some(Attention {
+            raised_at,
+            reason: AttentionReason::CommandFinished {
+                exit_code: Some(1),
+                elapsed_secs: Some(12),
+            },
+            withdrawable_notification_id: None,
+        }),
+    );
+    let mut server = build_test_runtime();
+    server.session_by_id.insert(session_id, session);
+
+    let overview = server.build_overview().expect("one session is running");
+
+    assert_eq!(
+        overview
+            .panes
+            .iter()
+            .map(|pane_discovery| (pane_discovery.pane_id, pane_discovery.attention))
+            .collect::<Vec<_>>(),
+        [
+            (
+                build_pane_id,
+                Some(PaneAttentionDiscovery {
+                    reason_kind: AttentionReasonKind::CommandFinished,
+                    raised_at,
+                })
+            ),
+            (docs_pane_id, None),
+        ]
+    );
 }

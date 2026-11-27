@@ -71,6 +71,7 @@ fn build_session_overview(
                 command_argv: None,
                 lifecycle: PaneLifecycle::Running,
                 focused_by_client_ids: Vec::new(),
+                attention: None,
             })
             .collect(),
         clients: client_ids
@@ -1609,6 +1610,7 @@ fn build_floating_pane_discovery(pane_id: PaneId, session_id: SessionId) -> Pane
         command_argv: None,
         lifecycle: PaneLifecycle::Running,
         focused_by_client_ids: Vec::new(),
+        attention: None,
     }
 }
 

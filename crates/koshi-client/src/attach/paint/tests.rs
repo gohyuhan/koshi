@@ -285,6 +285,7 @@ fn build_content_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 500,
         },
+        is_waiting: false,
     }
 }
 
@@ -363,17 +364,20 @@ fn build_two_pane_render_snapshot(pane_snapshots: Vec<PaneSnapshot>) -> RenderSn
                     tab_name: String::from("tab"),
                     tab_index: 0,
                     is_active: true,
+                    has_waiting_pane: false,
                 },
                 TabMetadata {
                     tab_id: secondary_tab_id,
                     tab_name: String::from("other"),
                     tab_index: 1,
                     is_active: false,
+                    has_waiting_pane: false,
                 },
             ],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -476,6 +480,9 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
         .client_snapshot
         .last_applied_floating_pane_move_command_id = Some(CommandId::new());
     expected_render_snapshot.client_snapshot.typed_pane_id = Some(empty_pane_id);
+    expected_render_snapshot.pane_snapshots[0].is_waiting = true;
+    expected_render_snapshot.session_snapshot.tabs_metadata[1].has_waiting_pane = true;
+    expected_render_snapshot.session_snapshot.waiting_pane_count = 2;
     expected_render_snapshot
         .client_snapshot
         .input_pane_moved_by_others_count = 4;
@@ -524,6 +531,7 @@ fn a_frame_that_travels_and_is_read_back_is_the_frame_that_was_sent() {
             pane_id: PaneId::new(),
             pane_title: Some("htop".to_string()),
             pane_count: NonZeroUsize::MIN,
+            is_waiting: true,
         },
         FloatingPane::Shown {
             floating_pane_id: build_floating_pane_id(lower_floating_slot_pane_id),
@@ -1902,6 +1910,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
         pane_id: minimized_floating_slot_pane_id,
         pane_title: Some(String::from("htop\u{1b}[2J")),
         pane_count: NonZeroUsize::MIN,
+        is_waiting: false,
     }];
     let mut placement_snapshot = crate::tests::build_test_placement_snapshot(
         focused_pane_id,
@@ -1954,6 +1963,7 @@ fn every_name_the_answering_session_chose_reads_back_filtered() {
             pane_id: minimized_floating_slot_pane_id,
             pane_title: Some(String::from("htop[2J")),
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         }],
         "the minimized floating pane's title reaches the tray"
     );

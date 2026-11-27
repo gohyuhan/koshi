@@ -105,6 +105,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 tab_name: "edit".to_string(),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: true,
             }],
             floating_pane_slots: vec![FrameFloatingPaneSlot {
                 floating_pane_id: build_floating_pane_id(9),
@@ -125,6 +126,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(6)),
                     pane_title: Some("htop".to_string()),
                     pane_count: NonZeroUsize::new(3).expect("3 is not zero"),
+                    is_waiting: true,
                 },
                 FrameFloatingPane::Shown {
                     floating_pane_id: build_floating_pane_id(9),
@@ -135,6 +137,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                     pane_id: PaneId::from_uuid(Uuid::from_u128(8)),
                     pane_title: None,
                     pane_count: NonZeroUsize::MIN,
+                    is_waiting: false,
                 },
             ],
             peers: vec![
@@ -155,6 +158,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                     recent_input_pane_ids: vec![pane_id],
                 },
             ],
+            waiting_pane_count: 2,
         },
         pane_snapshots: vec![FramePane {
             pane_id,
@@ -177,6 +181,7 @@ pub(crate) fn build_painted_frame() -> PaintedFrame {
                 row_spans: vec![(0, 0, 1)],
             }),
             has_selection: true,
+            is_waiting: true,
         }],
         client_snapshot: FrameClient {
             client_id: ClientId::from_uuid(Uuid::from_u128(3)),
@@ -275,6 +280,34 @@ fn a_frame_peer_without_its_recent_input_panes_is_refused() {
 }
 
 #[test]
+fn a_frame_without_a_waiting_marker_field_is_refused() {
+    for (json_pointer, field_name) in [
+        ("/session_snapshot", "waiting_pane_count"),
+        ("/session_snapshot/tab_snapshots/0", "has_waiting_pane"),
+        ("/session_snapshot/floating_panes/0/Minimized", "is_waiting"),
+        ("/pane_snapshots/0", "is_waiting"),
+    ] {
+        let mut encoded_json =
+            serde_json::to_value(build_painted_frame()).expect("the frame encodes");
+        encoded_json
+            .pointer_mut(json_pointer)
+            .and_then(|field_owner| field_owner.as_object_mut())
+            .expect("the field owner is an object")
+            .remove(field_name)
+            .expect("the waiting marker field is present");
+
+        let decode_error = serde_json::from_value::<PaintedFrame>(encoded_json)
+            .expect_err("a frame without a waiting marker field decoded instead of failing");
+
+        assert_eq!(
+            decode_error.to_string(),
+            format!("missing field `{field_name}`"),
+            "{json_pointer}"
+        );
+    }
+}
+
+#[test]
 fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
     let painted_frame = build_painted_frame();
     let mut encoded_json = serde_json::to_value(&painted_frame).expect("the frame encodes");
@@ -290,7 +323,8 @@ fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
                     "floating_pane_id": Uuid::from_u128(10).to_string(),
                     "pane_id": Uuid::from_u128(6).to_string(),
                     "pane_title": "htop",
-                    "pane_count": 3
+                    "pane_count": 3,
+                    "is_waiting": true
                 }
             },
             {
@@ -304,7 +338,8 @@ fn the_active_tab_focus_travels_under_its_own_name_and_null_means_none() {
                     "floating_pane_id": Uuid::from_u128(11).to_string(),
                     "pane_id": Uuid::from_u128(8).to_string(),
                     "pane_title": null,
-                    "pane_count": 1
+                    "pane_count": 1,
+                    "is_waiting": false
                 }
             }
         ])
@@ -518,7 +553,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                     "tab_id": "00000000-0000-0000-0000-000000000002",
                     "tab_name": "edit",
                     "tab_index": 0,
-                    "is_active": true
+                    "is_active": true,
+                    "has_waiting_pane": true
                 }],
                 "floating_pane_slots": [{
                     "floating_pane_id": "00000000-0000-0000-0000-000000000009",
@@ -555,7 +591,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                             "floating_pane_id": "00000000-0000-0000-0000-00000000000a",
                             "pane_id": "00000000-0000-0000-0000-000000000006",
                             "pane_title": "htop",
-                            "pane_count": 3
+                            "pane_count": 3,
+                            "is_waiting": true
                         }
                     },
                     {
@@ -569,7 +606,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                             "floating_pane_id": "00000000-0000-0000-0000-00000000000b",
                             "pane_id": "00000000-0000-0000-0000-000000000008",
                             "pane_title": null,
-                            "pane_count": 1
+                            "pane_count": 1,
+                            "is_waiting": false
                         }
                     }
                 ],
@@ -590,7 +628,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                         "typed_pane_id": null,
                         "recent_input_pane_ids": ["00000000-0000-0000-0000-000000000004"]
                     }
-                ]
+                ],
+                "waiting_pane_count": 2
             },
             "pane_snapshots": [{
                 "pane_id": "00000000-0000-0000-0000-000000000004",
@@ -608,7 +647,8 @@ fn a_frame_encodes_to_the_shape_a_client_decodes() {
                 "is_alternate_scroll_enabled": false,
                 "is_on_alt_screen": false,
                 "selection_spans": { "row_spans": [[0, 0, 1]] },
-                "has_selection": true
+                "has_selection": true,
+                "is_waiting": true
             }],
             "client_snapshot": {
                 "client_id": "00000000-0000-0000-0000-000000000003",

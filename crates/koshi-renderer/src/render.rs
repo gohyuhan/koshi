@@ -860,6 +860,10 @@ pub fn render_frame(
             StatuslineInputs {
                 keymap_hints,
                 pending_key_sequence,
+                waiting_pane_count: frame_geometry
+                    .render_snapshot
+                    .session_snapshot
+                    .waiting_pane_count,
             },
             theme,
             statusline_rect,
@@ -926,6 +930,7 @@ pub fn list_changed_screen_rows(
                 tabs_metadata,
                 floating_pane_slots,
                 floating_panes,
+                waiting_pane_count,
                 peers,
             },
         pane_snapshots,
@@ -939,6 +944,7 @@ pub fn list_changed_screen_rows(
         || previous_session_snapshot.tabs_metadata != *tabs_metadata
         || previous_session_snapshot.floating_pane_slots != *floating_pane_slots
         || previous_session_snapshot.floating_panes != *floating_panes
+        || previous_session_snapshot.waiting_pane_count != *waiting_pane_count
         || previous_render_snapshot.client_snapshot != *client_snapshot
         || previous_render_snapshot.pane_snapshots.len() != pane_snapshots.len()
     {
@@ -1029,8 +1035,9 @@ pub fn list_changed_screen_rows(
 
 /// Whether `previous_pane_snapshot` and `next_pane_snapshot` draw the same
 /// cells apart from their grid rows: the same pane, title, image placements,
-/// reverse video, selection and scroll position text, and grid views with the
-/// same row count, column count and scroll offset, or no grid view in both.
+/// reverse video, selection, scroll position text and wait for a person, and
+/// grid views with the same row count, column count and scroll offset, or no
+/// grid view in both.
 /// The fields drawn into no cell are not compared.
 fn is_pane_drawn_alike_except_rows(
     previous_pane_snapshot: &PaneSnapshot,
@@ -1049,6 +1056,7 @@ fn is_pane_drawn_alike_except_rows(
         view_top_row_index: _,
         selection_spans,
         has_selection: _,
+        is_waiting,
         scrollback_metadata: _,
     } = next_pane_snapshot;
     let is_grid_shape_alike = match (
@@ -1074,6 +1082,7 @@ fn is_pane_drawn_alike_except_rows(
         && previous_pane_snapshot.image_placement_snapshots == *image_placement_snapshots
         && previous_pane_snapshot.is_reverse_video == *is_reverse_video
         && previous_pane_snapshot.selection_spans == *selection_spans
+        && previous_pane_snapshot.is_waiting == *is_waiting
         && get_pane_scroll(previous_pane_snapshot) == get_pane_scroll(next_pane_snapshot)
 }
 
@@ -1369,16 +1378,17 @@ fn draw_panes(
             placement_target,
         ) || layout_area_surface
             .is_placement_handle_hovered(pane_slot.pane_id, viewer_chrome);
+        let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
         let border_style = compute_pane_border_style(
             render_snapshot,
             pane_slot.pane_id,
+            pane_snapshot.is_some_and(|pane_snapshot| pane_snapshot.is_waiting),
             is_placement_hovered,
             viewer_chrome,
             theme,
         );
         draw_pane_border(pane_rect, border_style, drawn_rows, screen_buffer);
 
-        let pane_snapshot = render_snapshot.find_pane_snapshot(pane_slot.pane_id);
         let pane_chip_group = find_layer_pane_chip_group(pane_chip_groups, pane_slot.pane_id)
             .filter(|pane_chip_group| !pane_chip_group.is_on_stack_header);
 
@@ -1533,15 +1543,18 @@ fn draw_pane_border(
 /// The style of the border of the pane `pane_id`, and of the text drawn in
 /// that border. The first match wins:
 ///
-/// 1. The focus style, when `pane_id` is `viewer_chrome.placement_source_pane_id`,
+/// 1. The attention style, when `is_waiting` is `true`: the pane waits for a
+///    person.
+/// 2. The focus style, when `pane_id` is `viewer_chrome.placement_source_pane_id`,
 ///    or, with no placement source, the client's `focused_pane_id`.
-/// 2. The placement hover style, when `is_placement_hovered` is `true`.
-/// 3. The hover style, when `viewer_chrome.hovered_pane_id` is `pane_id` and
+/// 3. The placement hover style, when `is_placement_hovered` is `true`.
+/// 4. The hover style, when `viewer_chrome.hovered_pane_id` is `pane_id` and
 ///    `viewer_chrome.is_pane_placement_visible` is `false`.
-/// 4. The unfocused style.
+/// 5. The unfocused style.
 fn compute_pane_border_style(
     render_snapshot: &RenderSnapshot,
     pane_id: PaneId,
+    is_waiting: bool,
     is_placement_hovered: bool,
     viewer_chrome: ViewerChrome,
     theme: &Theme,
@@ -1549,7 +1562,9 @@ fn compute_pane_border_style(
     let focused_pane_id = viewer_chrome
         .placement_source_pane_id
         .or(render_snapshot.client_snapshot.focused_pane_id);
-    if Some(pane_id) == focused_pane_id {
+    if is_waiting {
+        compute_attention_border_style(theme)
+    } else if Some(pane_id) == focused_pane_id {
         compute_focused_border_style(theme)
     } else if is_placement_hovered {
         compute_placement_hover_border_style(theme)
@@ -1919,8 +1934,9 @@ fn get_cell_color(cell_color: CellColor) -> Color {
 /// group on its stack header in `placed_layout_area` draws the group's chips
 /// in their peers' colors and its `+N` mark in the strip's style, and its
 /// title ends one cell before the group: `▸ cargo watch    2  [2/3]`. The
-/// strip of `viewer_chrome.placement_source_pane_id` takes the focus color,
-/// and the strip of a placement candidate
+/// strip of a member that waits for a person takes the attention color. Of the
+/// other strips, the strip of `viewer_chrome.placement_source_pane_id` takes
+/// the focus color, and the strip of a placement candidate
 /// ([`LayoutAreaSurface::is_placement_candidate`]) takes the placement hover
 /// color. Each strip first blanks every cell of its row
 /// ([`clear_overlay_area`]), then fills the row with its style.
@@ -1946,8 +1962,11 @@ fn draw_stack_headers(
             continue;
         }
 
+        let pane_snapshot = render_snapshot.find_pane_snapshot(stack_header.pane_id);
         let stack_header_style =
-            if Some(stack_header.pane_id) == viewer_chrome.placement_source_pane_id {
+            if pane_snapshot.is_some_and(|pane_snapshot| pane_snapshot.is_waiting) {
+                compute_attention_border_style(theme)
+            } else if Some(stack_header.pane_id) == viewer_chrome.placement_source_pane_id {
                 compute_focused_border_style(theme)
             } else if placed_layout_area
                 .layout_area_surface
@@ -1961,8 +1980,7 @@ fn draw_stack_headers(
         clear_overlay_area(header_rect, drawn_rows, screen_buffer);
         screen_buffer.set_style(header_rect, stack_header_style);
 
-        let pane_label = render_snapshot
-            .find_pane_snapshot(stack_header.pane_id)
+        let pane_label = pane_snapshot
             .and_then(|pane_snapshot| pane_snapshot.pane_title.as_deref())
             .unwrap_or("");
         let pane_chip_group =
@@ -2433,7 +2451,7 @@ mod tabline;
 use style::*;
 use tabline::{draw_tabline, TablineLayout};
 // The statusline fills its row with the same bar background as the tabline.
-pub(crate) use style::compute_bar_style;
+pub(crate) use style::{compute_attention_border_style, compute_bar_style};
 pub(crate) use tabline::{
     compute_right_block_start_column, find_floating_pane_tray_button_column, solve_tabline_layout,
     FLOATING_PANE_TRAY_BUTTON_COLUMN_COUNT,

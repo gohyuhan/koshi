@@ -39,6 +39,10 @@
 //! The walk over the visible panes of a layout area keeps slot order, finds
 //! each snapshot by pane id, and leaves out a hidden slot, a slot with no
 //! content rect and a slot with no snapshot.
+//!
+//! A pane that waits for a person draws its border and its collapsed stack
+//! header in the attention style over focus and hover, and a change of a
+//! waiting mark repaints the whole frame.
 
 use koshi_test_support::fixtures::build_floating_pane_id;
 
@@ -191,6 +195,7 @@ pub(crate) fn build_render_snapshot(
             scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },
+            is_waiting: false,
         })
         .collect();
 
@@ -202,6 +207,7 @@ pub(crate) fn build_render_snapshot(
             tab_name: (*tab_name).to_string(),
             tab_index,
             is_active: *is_active,
+            has_waiting_pane: false,
         })
         .collect();
 
@@ -225,6 +231,7 @@ pub(crate) fn build_render_snapshot(
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -6128,4 +6135,119 @@ fn list_client_colors_gives_the_viewer_then_each_peer_in_list_order() {
             },
         ]
     );
+}
+
+#[test]
+fn a_waiting_pane_border_takes_the_attention_style_over_focus_and_hover() {
+    let theme = Theme::default();
+    let focused_pane_id = PaneId::new();
+    let unfocused_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[
+            (focused_pane_id, build_cell_rect(0, 1, 20, 6), true),
+            (unfocused_pane_id, build_cell_rect(20, 1, 20, 6), true),
+        ],
+        Some(focused_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 40,
+            row_count: 8,
+        },
+    );
+    let hover_viewer_chrome = ViewerChrome {
+        hovered_pane_id: Some(unfocused_pane_id),
+        ..ViewerChrome::default()
+    };
+    let attention_color_and_modifier = (theme.attention_border_color, Modifier::BOLD);
+
+    render_snapshot.pane_snapshots[0].is_waiting = true;
+    let render_buffer =
+        render_snapshot_with_viewer_chrome(&render_snapshot, hover_viewer_chrome, 40, 8);
+    assert_eq!(
+        (render_buffer[(0, 1)].fg, render_buffer[(0, 1)].modifier),
+        attention_color_and_modifier
+    );
+    assert_eq!(render_buffer[(20, 1)].fg, theme.hover_border_color);
+
+    render_snapshot.pane_snapshots[1].is_waiting = true;
+    let render_buffer =
+        render_snapshot_with_viewer_chrome(&render_snapshot, hover_viewer_chrome, 40, 8);
+    assert_eq!(
+        (render_buffer[(20, 1)].fg, render_buffer[(20, 1)].modifier),
+        attention_color_and_modifier
+    );
+}
+
+#[test]
+fn a_waiting_collapsed_stack_member_draws_its_header_in_the_attention_style() {
+    let theme = Theme::default();
+    let active_pane_id = PaneId::new();
+    let collapsed_pane_id = PaneId::new();
+    let mut render_snapshot = build_render_snapshot(
+        "sess",
+        &[("shell", true)],
+        &[
+            (active_pane_id, build_cell_rect(0, 2, 30, 4), true),
+            (collapsed_pane_id, build_cell_rect(0, 1, 30, 1), false),
+        ],
+        Some(active_pane_id),
+        LockMode::Normal,
+        Size {
+            column_count: 30,
+            row_count: 8,
+        },
+    );
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .stack_headers = vec![StackHeader {
+        pane_id: collapsed_pane_id,
+        header_rect: build_cell_rect(0, 1, 30, 1),
+        member_index: 1,
+        member_count: 2,
+    }];
+    let quiet_render_buffer = render_test_snapshot(&render_snapshot, 30, 8);
+
+    render_snapshot.pane_snapshots[1].is_waiting = true;
+    let waiting_render_buffer = render_test_snapshot(&render_snapshot, 30, 8);
+
+    assert_eq!(
+        format_rendered_row_text(&waiting_render_buffer, 1),
+        format_rendered_row_text(&quiet_render_buffer, 1)
+    );
+    for column_index in [0, 29] {
+        assert_eq!(
+            (
+                waiting_render_buffer[(column_index, 1)].fg,
+                waiting_render_buffer[(column_index, 1)].modifier
+            ),
+            (theme.attention_border_color, Modifier::BOLD),
+            "column {column_index}"
+        );
+    }
+}
+
+#[test]
+fn a_change_of_a_waiting_mark_repaints_the_whole_frame() {
+    let (previous_render_snapshot, _) = build_one_grid_render_snapshot();
+    let waiting_mark_changes: [fn(&mut RenderSnapshot); 3] = [
+        |render_snapshot| render_snapshot.pane_snapshots[0].is_waiting = true,
+        |render_snapshot| render_snapshot.session_snapshot.waiting_pane_count = 1,
+        |render_snapshot| render_snapshot.session_snapshot.tabs_metadata[0].has_waiting_pane = true,
+    ];
+
+    for (waiting_mark_change_index, waiting_mark_change) in waiting_mark_changes.iter().enumerate()
+    {
+        let mut next_render_snapshot = previous_render_snapshot.clone();
+        waiting_mark_change(&mut next_render_snapshot);
+
+        assert_eq!(
+            list_core_changed_screen_rows(&previous_render_snapshot, &next_render_snapshot),
+            None,
+            "waiting mark change {waiting_mark_change_index}"
+        );
+    }
 }

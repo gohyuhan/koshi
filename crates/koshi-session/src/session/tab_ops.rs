@@ -232,7 +232,7 @@ pub fn close_tab(session: &mut Session, tab_id: TabId) -> Vec<Event> {
 
     let mut emitted_events = vec![];
     for pane_id in tab_pane_ids {
-        session.panes.remove_pane_record(pane_id);
+        session.remove_pane_record(pane_id);
         emitted_events.push(Event::PaneClosing(PaneClosing { pane_id }));
         emitted_events.push(Event::PaneRemoved(PaneRemoved {
             pane_id,

@@ -130,6 +130,15 @@ pub(super) fn compute_hover_border_style(theme: &Theme) -> Style {
         .add_modifier(Modifier::BOLD)
 }
 
+/// The marker of a pane that waits for a person: the theme's attention color,
+/// in bold. A waiting pane's border, its collapsed stack header, its tab's `●`,
+/// the statusline's `N waiting` and its floating pane's tray tile draw in it.
+pub(crate) fn compute_attention_border_style(theme: &Theme) -> Style {
+    Style::default()
+        .fg(theme.attention_border_color)
+        .add_modifier(Modifier::BOLD)
+}
+
 /// The pane under the placement pointer: the theme's accent color, in bold.
 pub(super) fn compute_placement_hover_border_style(theme: &Theme) -> Style {
     Style::default()

@@ -3,7 +3,8 @@
 //! pane tray button and the notification button and their one-cell glyphs, and
 //! the exact cells and styles
 //! `draw_tabline` writes — including tab widths measured by display width for
-//! wide (CJK), emoji, and combining-mark titles.
+//! wide (CJK), emoji, and combining-mark titles, and the `●` of a tab that
+//! holds a waiting pane.
 
 use super::*;
 use koshi_core::client::ClientOrigin;
@@ -45,6 +46,7 @@ fn build_tabline_frame(
             tab_name: (*tab_name).to_string(),
             tab_index,
             is_active: *is_active,
+            has_waiting_pane: false,
         })
         .collect();
     let viewport_size = Size {
@@ -71,6 +73,7 @@ fn build_tabline_frame(
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -1496,6 +1499,7 @@ fn both_buttons_show_with_no_floating_pane_and_no_notification_and_a_floating_pa
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         });
 
     let tabline_layout_with_float = solve_tabline_layout(&tabline_test_frame, tabline_area);
@@ -1569,6 +1573,7 @@ fn the_notification_button_sits_left_of_the_tray_button_and_ends_the_tabs_there(
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         });
     tabline_test_frame.viewer_chrome.notification_button = NotificationButton {
         unread_entry_count: 3,
@@ -1663,6 +1668,7 @@ fn the_tray_button_is_reversed_only_while_the_lock_mode_is_floating_pane_tray() 
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         });
     let tabline_column_count = 40 + compute_version_badge_column_count();
     let mode_style = compute_mode_style(&Theme::default());
@@ -2089,4 +2095,71 @@ fn the_tab_strip_scrolls_inside_the_cells_the_chips_leave() {
         })
         .collect();
     assert_eq!(tabline_layout.visible_tab_spans, expected_visible_tab_spans);
+}
+
+#[test]
+fn a_tab_that_holds_a_waiting_pane_draws_a_dot_in_place_of_its_leading_space_at_the_same_width() {
+    let theme = Theme::default();
+    let quiet_frame = build_tabline_frame(
+        "s",
+        &[("build", true), ("docs", false)],
+        None,
+        LockMode::Normal,
+        false,
+    );
+    let mut waiting_frame = build_tabline_frame(
+        "s",
+        &[("build", true), ("docs", false)],
+        None,
+        LockMode::Normal,
+        false,
+    );
+    waiting_frame.render_snapshot.session_snapshot.tabs_metadata[0].has_waiting_pane = true;
+    let column_count = 60 + TABLINE_BUTTONS_COLUMN_COUNT + compute_version_badge_column_count();
+    let tabline_area = build_tabline_area(column_count);
+    let quiet_tabline_layout = solve_tabline_layout(&quiet_frame, tabline_area);
+    assert_eq!(
+        solve_tabline_layout(&waiting_frame, tabline_area).visible_tab_spans,
+        quiet_tabline_layout.visible_tab_spans
+    );
+    // The name block starts after the 4 cells of ` #1 `.
+    let name_start_column = quiet_tabline_layout.visible_tab_spans[0].start_column + 4;
+    let name_end_column = name_start_column + 7;
+
+    let quiet_render_buffer = render_tabline(&quiet_frame, column_count);
+    let waiting_render_buffer = render_tabline(&waiting_frame, column_count);
+
+    assert_eq!(
+        format_rendered_cells(&quiet_render_buffer, 0, name_start_column..name_end_column),
+        " build "
+    );
+    assert_eq!(
+        format_rendered_cells(
+            &waiting_render_buffer,
+            0,
+            name_start_column..name_end_column
+        ),
+        "● build"
+    );
+    let mark_cell = &waiting_render_buffer[(name_start_column, 0)];
+    assert_eq!(
+        (mark_cell.fg, mark_cell.bg),
+        (
+            theme.attention_border_color,
+            quiet_render_buffer[(name_start_column, 0)].bg
+        )
+    );
+    assert_eq!(
+        waiting_render_buffer[(name_start_column + 2, 0)].style(),
+        quiet_render_buffer[(name_start_column + 1, 0)].style()
+    );
+    for column_index in (0..column_count)
+        .filter(|column_index| !(name_start_column..name_end_column).contains(column_index))
+    {
+        assert_eq!(
+            waiting_render_buffer[(column_index, 0)],
+            quiet_render_buffer[(column_index, 0)],
+            "column {column_index}"
+        );
+    }
 }

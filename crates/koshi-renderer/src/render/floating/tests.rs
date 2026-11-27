@@ -80,6 +80,7 @@ fn build_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
+        is_waiting: false,
     }
 }
 
@@ -117,10 +118,12 @@ fn build_tiled_render_snapshot(viewport_size: Size, tab_size: Size) -> RenderSna
                 tab_name: "t".to_string(),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: false,
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: vec![build_pane_snapshot(tiled_pane_id)],
         client_snapshot: ClientSnapshot {
@@ -1417,4 +1420,45 @@ fn a_floating_pane_covers_a_tiled_images_unavailable_text_in_placeholder_mode_an
         format_rendered_cells(&native_render_buffer, 2, 1..31),
         "         ┌─── hto─┐           "
     );
+}
+
+#[test]
+fn a_waiting_floating_pane_takes_the_attention_style_over_its_focus_and_the_pointer() {
+    let theme = Theme::default();
+    let mut render_snapshot = build_forty_by_twelve_render_snapshot();
+    let floating_slot_pane_id =
+        push_floating_pane(&mut render_snapshot, build_cell_rect(6, 2, 26, 6), "htop");
+    render_snapshot
+        .pane_snapshots
+        .iter_mut()
+        .find(|pane_snapshot| pane_snapshot.pane_id == floating_slot_pane_id)
+        .expect("the floating pane has a pane snapshot")
+        .is_waiting = true;
+    render_snapshot.client_snapshot.focused_pane_id = Some(floating_slot_pane_id);
+
+    for viewer_chrome in [
+        ViewerChrome::default(),
+        ViewerChrome {
+            hovered_pane_id: Some(floating_slot_pane_id),
+            ..ViewerChrome::default()
+        },
+    ] {
+        let render_buffer = render_core_frame(
+            &render_snapshot,
+            viewer_chrome,
+            ImageRenderMode::Placeholder,
+        );
+        // `(7, 3)` is the grab handle and `(6, 4)` the top-left corner of the
+        // pane box.
+        for chrome_cell in [(7, 3), (6, 4)] {
+            assert_eq!(
+                (
+                    render_buffer[chrome_cell].fg,
+                    render_buffer[chrome_cell].modifier
+                ),
+                (theme.attention_border_color, Modifier::BOLD),
+                "cell {chrome_cell:?} with {viewer_chrome:?}"
+            );
+        }
+    }
 }

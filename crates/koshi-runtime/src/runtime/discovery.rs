@@ -10,7 +10,8 @@
 use std::collections::HashMap;
 
 use koshi_core::discovery::{
-    ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, SessionOverview, TabDiscovery,
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery,
+    SessionOverview, TabDiscovery,
 };
 use koshi_core::ids::{LayoutAreaId, PaneId};
 use koshi_core::process::SpawnSpec;
@@ -127,6 +128,8 @@ fn list_pane_discoveries(
 /// title, once the child has set one. `focused_by_client_ids` lists every
 /// attached client whose input the pane takes
 /// ([`Client::get_active_focused_pane_id`](koshi_session::client::Client::get_active_focused_pane_id)).
+/// `attention` holds the kind and the start time of the pane's wait for a
+/// person, and `None` for a pane that waits for nobody.
 fn build_pane_discovery(
     session: &Session,
     layout_area_id: LayoutAreaId,
@@ -151,6 +154,13 @@ fn build_pane_discovery(
         command_argv: pane_record.spawn_spec.as_ref().map(list_spawn_argv),
         lifecycle: PaneLifecycle::Running,
         focused_by_client_ids,
+        attention: pane_record
+            .attention
+            .as_ref()
+            .map(|attention| PaneAttentionDiscovery {
+                reason_kind: attention.reason.get_reason_kind(),
+                raised_at: attention.raised_at,
+            }),
     })
 }
 

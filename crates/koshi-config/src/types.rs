@@ -1205,6 +1205,10 @@ pub struct ColorPalette {
     pub border_unfocused: RgbColor,
     /// Border of the pane the pointer is over: the pane the wheel scrolls.
     pub border_hover: RgbColor,
+    /// The marker of a pane that waits for a person: its border, the dot
+    /// before its tab's name, the statusline count and its floating pane's
+    /// tray tile.
+    pub border_attention: RgbColor,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: RgbColor,
     /// Background of a collapsed stack member's header strip.
@@ -1230,6 +1234,7 @@ impl Default for ColorPalette {
             border_focused: RgbColor::from_channels(0x00, 0xaf, 0xd7),
             border_unfocused: RgbColor::from_channels(0x58, 0x58, 0x58),
             border_hover: RgbColor::from_channels(0xaf, 0x5f, 0xff),
+            border_attention: RgbColor::from_channels(0xff, 0xaf, 0x00),
             stack_header_fg: RgbColor::from_channels(0xf4, 0xf1, 0xfa),
             stack_header_bg: RgbColor::from_channels(0x30, 0x0f, 0x4a),
             letterbox: RgbColor::from_channels(0x58, 0x58, 0x58),

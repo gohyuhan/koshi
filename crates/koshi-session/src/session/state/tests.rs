@@ -5,8 +5,8 @@
 //! floating cell sizes, the floating set and its size solve, a tab's stored
 //! solve with the focus handoff and the floating pane minimize each solve
 //! runs, the solve each client draws its active tab with and when it is built
-//! again, the view changes of two events merged, the serialized shape, and
-//! every invariant
+//! again, the view changes of two events merged, the attention changes that
+//! pane and layout writes record, the serialized shape, and every invariant
 //! [`Session::validate_session_consistency`] checks.
 
 use super::*;
@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::time::SystemTime;
 
+use koshi_core::attention::AttentionReason;
 use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::event::Event;
 use koshi_core::geometry::{AxisPercent, FloatingPanePosition, PaneArea, Point, SplitDirection};
@@ -5619,9 +5620,9 @@ fn a_floating_pane_the_session_does_not_hold_or_the_client_holds_no_view_of_has_
 }
 
 /// Tab `1` changed for client `a`, then tab `2` changed for client `b` with
-/// the tab bar and the pane sizing, and each client's presence changed: the
-/// merge lists both tabs, both clients in both client sets, and sets both
-/// flags. The floating set stays unchanged.
+/// the tab bar, the pane sizing and the pane attention, and each client's
+/// presence changed: the merge lists both tabs, both clients in both client
+/// sets, and sets all three flags. The floating set stays unchanged.
 #[test]
 fn merge_view_changes_joins_both_sets_and_keeps_each_flag_either_side_set() {
     let first_tab_id = TabId::new();
@@ -5642,6 +5643,7 @@ fn merge_view_changes_joins_both_sets_and_keeps_each_flag_either_side_set() {
         is_tab_bar_changed: true,
         is_floating_set_changed: false,
         is_pane_sizing_changed: true,
+        is_attention_changed: true,
     });
 
     assert_eq!(
@@ -5653,6 +5655,194 @@ fn merge_view_changes_joins_both_sets_and_keeps_each_flag_either_side_set() {
             is_tab_bar_changed: true,
             is_floating_set_changed: false,
             is_pane_sizing_changed: true,
+            is_attention_changed: true,
         }
     );
+}
+
+/// A bell attention raised `raised_at_seconds` seconds after the Unix epoch.
+fn build_bell_attention(raised_at_seconds: u64) -> Attention {
+    Attention {
+        raised_at: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(raised_at_seconds),
+        reason: AttentionReason::Bell,
+        withdrawable_notification_id: None,
+    }
+}
+
+/// A session with tab `a` and tab `b`, each holding the one pane it was
+/// created with, and its view changes taken. Returns the session, then each
+/// tab id with its pane id.
+fn build_session_with_two_tabs() -> (Session, (TabId, PaneId), (TabId, PaneId)) {
+    let mut session = build_empty_session();
+    let a_tab_events = commit_test_tab(&mut session, "a".to_string());
+    let b_tab_events = commit_test_tab(&mut session, "b".to_string());
+    let _ = session.take_view_changes();
+    (
+        session,
+        (
+            get_created_tab_id(&a_tab_events),
+            get_created_pane_id(&a_tab_events),
+        ),
+        (
+            get_created_tab_id(&b_tab_events),
+            get_created_pane_id(&b_tab_events),
+        ),
+    )
+}
+
+/// The view changes that list an attention change and nothing else.
+fn build_attention_view_changes() -> SessionViewChanges {
+    SessionViewChanges {
+        is_attention_changed: true,
+        ..SessionViewChanges::default()
+    }
+}
+
+#[test]
+fn raising_attention_on_a_pane_that_waits_for_nobody_records_an_attention_change() {
+    let (mut session, (_, a_pane_id), _) = build_session_with_two_tabs();
+
+    assert_eq!(
+        session.set_pane_attention(a_pane_id, Some(build_bell_attention(1))),
+        None
+    );
+
+    assert_eq!(session.take_view_changes(), build_attention_view_changes());
+    assert_eq!(
+        session
+            .panes
+            .get_pane_record_by_id(a_pane_id)
+            .expect("the pane has a record")
+            .attention,
+        Some(build_bell_attention(1))
+    );
+}
+
+#[test]
+fn replacing_the_attention_of_a_waiting_pane_records_no_attention_change() {
+    let (mut session, (_, a_pane_id), _) = build_session_with_two_tabs();
+    let _ = session.set_pane_attention(a_pane_id, Some(build_bell_attention(1)));
+    let _ = session.take_view_changes();
+
+    assert_eq!(
+        session.set_pane_attention(a_pane_id, Some(build_bell_attention(2))),
+        Some(build_bell_attention(1))
+    );
+
+    assert_eq!(session.take_view_changes(), SessionViewChanges::default());
+}
+
+#[test]
+fn clearing_a_waiting_pane_records_an_attention_change_and_clearing_it_again_records_none() {
+    let (mut session, (_, a_pane_id), _) = build_session_with_two_tabs();
+    let _ = session.set_pane_attention(a_pane_id, Some(build_bell_attention(1)));
+    let _ = session.take_view_changes();
+
+    assert_eq!(
+        session.set_pane_attention(a_pane_id, None),
+        Some(build_bell_attention(1))
+    );
+    assert_eq!(session.take_view_changes(), build_attention_view_changes());
+
+    assert_eq!(session.set_pane_attention(a_pane_id, None), None);
+    assert_eq!(session.take_view_changes(), SessionViewChanges::default());
+}
+
+#[test]
+fn setting_attention_on_a_pane_the_session_does_not_hold_changes_nothing() {
+    let (mut session, _, _) = build_session_with_two_tabs();
+
+    assert_eq!(
+        session.set_pane_attention(PaneId::new(), Some(build_bell_attention(1))),
+        None
+    );
+
+    assert_eq!(session.take_view_changes(), SessionViewChanges::default());
+}
+
+#[test]
+fn removing_a_waiting_pane_record_records_an_attention_change_and_a_quiet_one_records_none() {
+    let (mut session, (_, a_pane_id), (_, b_pane_id)) = build_session_with_two_tabs();
+    let _ = session.set_pane_attention(a_pane_id, Some(build_bell_attention(1)));
+    let _ = session.take_view_changes();
+
+    assert_eq!(
+        session
+            .remove_pane_record(a_pane_id)
+            .map(|pane_record| pane_record.attention),
+        Some(Some(build_bell_attention(1)))
+    );
+    assert_eq!(session.take_view_changes(), build_attention_view_changes());
+
+    assert_eq!(
+        session
+            .remove_pane_record(b_pane_id)
+            .map(|pane_record| pane_record.attention),
+        Some(None)
+    );
+    assert_eq!(session.take_view_changes(), SessionViewChanges::default());
+
+    assert_eq!(
+        session
+            .remove_pane_record(b_pane_id)
+            .map(|pane_record| pane_record.attention),
+        None
+    );
+    assert_eq!(session.take_view_changes(), SessionViewChanges::default());
+}
+
+/// The waiting pane `logs` joins tab `a`, leaves it, then joins tab `b`: each
+/// of the three writes records an attention change. Tab `b` then swaps its
+/// two panes and still holds `logs`, and the quiet pane `notes` joins tab
+/// `a`: neither write records one.
+#[test]
+fn a_layout_write_records_an_attention_change_only_when_its_tab_starts_or_stops_holding_a_waiting_pane(
+) {
+    let (mut session, (a_tab_id, a_pane_id), (b_tab_id, b_pane_id)) = build_session_with_two_tabs();
+    let (logs_pane_id, notes_pane_id) = (PaneId::new(), PaneId::new());
+    for pane_id in [logs_pane_id, notes_pane_id] {
+        session
+            .panes
+            .register_pane_record(PaneRecord::from_terminal_pane(pane_id))
+            .expect("unique pane id");
+    }
+    let _ = session.set_pane_attention(logs_pane_id, Some(build_bell_attention(1)));
+    let _ = session.take_view_changes();
+    let build_side_by_side_layout = |left_pane_id: PaneId, right_pane_id: PaneId| {
+        LayoutNode::Split(SplitNode::with_equal_weights(
+            SplitDirection::Horizontal,
+            vec![
+                LayoutNode::Pane(left_pane_id),
+                LayoutNode::Pane(right_pane_id),
+            ],
+        ))
+    };
+
+    let _ = session.update_tab_layout(a_tab_id, build_side_by_side_layout(a_pane_id, logs_pane_id));
+    assert!(session.take_view_changes().is_attention_changed);
+    let _ = session.update_tab_layout(a_tab_id, LayoutNode::Pane(a_pane_id));
+    assert!(session.take_view_changes().is_attention_changed);
+    let _ = session.update_tab_layout(b_tab_id, build_side_by_side_layout(b_pane_id, logs_pane_id));
+    assert!(session.take_view_changes().is_attention_changed);
+
+    let _ = session.update_tab_layout(b_tab_id, build_side_by_side_layout(logs_pane_id, b_pane_id));
+    assert!(!session.take_view_changes().is_attention_changed);
+    let _ = session.update_tab_layout(
+        a_tab_id,
+        build_side_by_side_layout(a_pane_id, notes_pane_id),
+    );
+    assert!(!session.take_view_changes().is_attention_changed);
+}
+
+#[test]
+fn closing_a_tab_that_holds_a_waiting_pane_records_an_attention_change() {
+    let (mut session, (a_tab_id, a_pane_id), (b_tab_id, _)) = build_session_with_two_tabs();
+    let _ = session.set_pane_attention(a_pane_id, Some(build_bell_attention(1)));
+    let _ = session.take_view_changes();
+
+    let _ = close_tab(&mut session, b_tab_id);
+    assert!(!session.take_view_changes().is_attention_changed);
+
+    let _ = close_tab(&mut session, a_tab_id);
+    assert!(session.take_view_changes().is_attention_changed);
 }

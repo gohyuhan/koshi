@@ -79,6 +79,7 @@ fn build_render_snapshot(
             tab_name: (*tab_name).to_string(),
             tab_index,
             is_active: tab_index == 0,
+            has_waiting_pane: false,
         })
         .collect();
 
@@ -102,6 +103,7 @@ fn build_render_snapshot(
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {

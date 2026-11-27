@@ -5153,6 +5153,7 @@ fn every_id_the_json_output_prints_parses_back_through_its_target_flag() {
             },
             session_id,
             session_name: "quiet-lake".to_string(),
+            attention: None,
         }],
         OutputFormat::Json,
     ))

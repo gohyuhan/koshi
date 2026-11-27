@@ -216,6 +216,23 @@ waiting when every client detaches and when the session restarts into a new
 build. The session sends each start and end of a wait to every attached
 client, one change at most for each read of the program's output.
 
+Every attached client marks a waiting pane in the `border-attention` color of
+its theme ([theme.md](theme.md)):
+
+- The pane's border. A collapsed stack member marks its header row, and the
+  front pane of a floating pane marks the floating pane's strip.
+- `●` in place of the leading space of the name of each tab that holds a
+  waiting pane: ` build ` becomes `● build`, at the same width.
+- ` N waiting ` at the right end of the statusline, where `N` counts every
+  waiting pane of the session, floating panes included. A row narrower than
+  the text shows no count.
+- The tray tile of a floating pane that holds a waiting pane: its text, and
+  its ring while the tile is not selected.
+
+The mark comes before every other border color: a waiting pane that has the
+focus or the pointer shows the attention color. `koshi list-panes` names the
+reason each pane waits in its `attention` column ([cli.md](cli.md)).
+
 Example: a program writes `BEL` and `ESC ] 9 ; tests passed ESC \` 500 times
 in one write. Each client receives one start of a wait, with the reason
 `Notify`.

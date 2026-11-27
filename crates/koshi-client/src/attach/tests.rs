@@ -284,6 +284,7 @@ fn build_test_painted_frame_with_lock_mode(lock_mode: LockMode) -> PaintedFrame 
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: Vec::new(),
         client_snapshot: FrameClient {
@@ -6581,10 +6582,12 @@ fn build_native_image_snapshot() -> RenderSnapshot {
                 tab_name: String::from("tab"),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: false,
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -6615,6 +6618,7 @@ fn build_native_image_snapshot() -> RenderSnapshot {
             scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },
+            is_waiting: false,
         }],
         client_snapshot: ClientSnapshot {
             client_id: ClientId::new(),
@@ -8130,6 +8134,7 @@ fn placement_presentation_describes_both_swap_destinations() {
         tab_name: String::from("main"),
         tab_index: 0,
         is_active: true,
+        has_waiting_pane: false,
     }];
     let build_pane_snapshot = |pane_id, pane_title| PaneSnapshot {
         pane_id,
@@ -8153,6 +8158,7 @@ fn placement_presentation_describes_both_swap_destinations() {
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
+        is_waiting: false,
     };
     render_snapshot.pane_snapshots = vec![
         build_pane_snapshot(source_pane_id, "/home/user/project"),
@@ -8226,6 +8232,7 @@ fn placement_presentation_describes_a_stack_target_and_names_the_tab_a_floating_
         tab_name: String::from("main"),
         tab_index: 0,
         is_active: true,
+        has_waiting_pane: false,
     }];
     client.set_frame_view(
         active_tab_id,
@@ -8303,6 +8310,7 @@ fn placement_presentation_names_group_tab_and_cross_tab_results() {
             tab_name: "logs".to_string(),
             tab_index: 1,
             is_active: false,
+            has_waiting_pane: false,
         });
     client.set_frame_view(
         source_tab_id,
@@ -8451,12 +8459,14 @@ fn placement_presentation_names_the_sessions_refusal_of_the_selected_target() {
             tab_name: "main".to_string(),
             tab_index: 0,
             is_active: true,
+            has_waiting_pane: false,
         },
         TabMetadata {
             tab_id: destination_tab_id,
             tab_name: "logs".to_string(),
             tab_index: 1,
             is_active: false,
+            has_waiting_pane: false,
         },
     ];
     client.set_frame_view(
@@ -13492,6 +13502,7 @@ fn a_floating_source_target_with_no_room_paints_the_tab_as_it_is_and_names_the_r
         tab_name: "main".to_string(),
         tab_index: 0,
         is_active: true,
+        has_waiting_pane: false,
     }];
     let mut placement_snapshot = placement_preview
         .find_placement_snapshot()
@@ -16084,6 +16095,7 @@ fn build_minimized_pane_snapshots(
         pane_id: floating_slot_pane_id,
         pane_title: Some(String::from("htop")),
         pane_count: NonZeroUsize::MIN,
+        is_waiting: false,
     }];
     let mut shown_frame = minimized_frame.clone();
     shown_frame.session_snapshot.floating_pane_slots =
@@ -16367,6 +16379,7 @@ fn a_restored_floating_pane_slides_when_another_of_its_panes_takes_the_input() {
         pane_id: PaneId::new(),
         pane_title: Some(String::from("vim")),
         pane_count: NonZeroUsize::new(2).expect("two panes"),
+        is_waiting: false,
     }];
     let started_at = Instant::now();
     commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);

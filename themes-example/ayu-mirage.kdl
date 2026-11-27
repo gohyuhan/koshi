@@ -13,6 +13,7 @@ colors {
     border-focused "#ffcc66"
     border-unfocused "#5c6773"
     border-hover "#5ccfe6"
+    border-attention "#ffae57"
     stack-header-fg "#d9d7ce"
     stack-header-bg "#343f4c"
     letterbox "#3d4751"

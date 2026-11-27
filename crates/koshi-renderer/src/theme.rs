@@ -66,6 +66,10 @@ pub struct Theme {
     /// Border of the pane the pointer is hovering over — the pane the wheel
     /// scrolls.
     pub hover_border_color: Color,
+    /// The marker of a pane that waits for a person: its border, the `●`
+    /// before its tab's name, the statusline's `N waiting` and its floating
+    /// pane's tray tile.
+    pub attention_border_color: Color,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_text_color: Color,
     /// Background of a collapsed stack member's header strip.
@@ -93,6 +97,7 @@ impl Default for Theme {
             focused_border_color: Color::Rgb(0x00, 0xaf, 0xd7),
             unfocused_border_color: Color::Rgb(0x58, 0x58, 0x58),
             hover_border_color: Color::Rgb(0xaf, 0x5f, 0xff),
+            attention_border_color: Color::Rgb(0xff, 0xaf, 0x00),
             stack_header_text_color: Color::Rgb(0xf4, 0xf1, 0xfa),
             stack_header_background_color: Color::Rgb(0x30, 0x0f, 0x4a),
             letterbox_color: Color::Rgb(0x58, 0x58, 0x58),
