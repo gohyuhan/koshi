@@ -4291,6 +4291,65 @@ fn held_mouse_actions_leave_before_the_requests_of_a_placement_handle_press() {
     );
 }
 
+/// A wheel tick waits in the pass's mouse round when the terminal reports
+/// `CSI I` in the same read. The round goes up first, then the focus report.
+#[test]
+fn held_mouse_actions_leave_before_a_terminal_focus_report() {
+    let pane_id = PaneId::new();
+    let mouse_frame = build_mouse_frame(&[build_plain_mouse_pane(pane_id)]);
+    let mut client = build_test_client();
+    let client_id = client.get_client_id();
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+    let mut cell_size_query = terminal::CellSizeQuery::from_current_measurement(None, false, false);
+    let mut sent_border_moves = Vec::new();
+    let mut pending_mouse_actions = vec![MouseAction::Scroll {
+        pane_id,
+        is_scrolling_up: true,
+        scroll_line_count: 3,
+    }];
+
+    assert_eq!(
+        handle_terminal_input_event(
+            &mut client,
+            &mut uplink,
+            &mut cell_size_query,
+            Some(&mouse_frame),
+            TerminalInput {
+                runtime_events: vec![RuntimeEvent::OuterTerminalFocusChanged {
+                    client_id,
+                    is_terminal_focused: true,
+                }],
+                read_stamp: build_input_read_stamp(Instant::now()),
+            },
+            &mut sent_border_moves,
+            &mut pending_mouse_actions,
+        ),
+        ControlFlow::Continue(())
+    );
+
+    assert_eq!(pending_mouse_actions, Vec::new());
+    assert_eq!(
+        request_receiver.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID,
+                request_kind: IpcRequestKind::Mouse(vec![WireMouseAction::Scroll {
+                    pane_id,
+                    is_scrolling_up: true,
+                    scroll_line_count: 3,
+                }]),
+            },
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + 1,
+                request_kind: IpcRequestKind::TerminalFocus {
+                    is_terminal_focused: true,
+                },
+            },
+        ]
+    );
+}
+
 #[test]
 fn a_tick_reaches_the_wire_at_once_with_rounds_already_out() {
     let pane_id = PaneId::new();

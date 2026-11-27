@@ -68,60 +68,54 @@ struct Osc99Metadata {
 }
 
 /// The notification an OSC 9 sequence carries, or `None` when it carries
-/// none. `osc_parameters` is the sequence split on `;`, starting with `9`.
+/// none. `argument_bytes` is the text after `9 ;`.
 ///
-/// The text after `9 ;` is the body, with its `;` kept. A sequence with no
-/// parameter after `9`, or whose first one is a ConEmu subcommand number
-/// from `1` to `12`, carries none:
+/// The whole text is the body, with its `;` kept. A text whose first field,
+/// up to the first `;`, is a ConEmu subcommand number from `1` to `12`
+/// carries none:
 ///
-/// - `9 ; hello` → `Notify { title: None, body: "hello", notification_id: None }`
-/// - `9 ; a ; b` → body `"a;b"`
-/// - `9 ; 4 ; 1 ; 40` and `9 ; 12` → `None`
-pub(super) fn parse_osc9_notification(osc_parameters: &[&[u8]]) -> Option<ProgramFact> {
-    let [_, first_parameter, ..] = osc_parameters else {
-        return None;
-    };
-    if CONEMU_OSC9_SUBCOMMAND_NUMBERS.contains(first_parameter) {
+/// - `hello` → `Notify { title: None, body: "hello", notification_id: None }`
+/// - `a;b` → body `"a;b"`
+/// - `4;1;40` and `12` → `None`
+pub(super) fn parse_osc9_notification(argument_bytes: &[u8]) -> Option<ProgramFact> {
+    let (first_field_bytes, _) = split_first_osc_field(argument_bytes);
+    if CONEMU_OSC9_SUBCOMMAND_NUMBERS.contains(&first_field_bytes) {
         return None;
     }
     Some(ProgramFact::Notify {
         title: None,
-        body: sanitize_notification_text(&osc_parameters[1..].join(&b';')),
+        body: sanitize_notification_text(argument_bytes),
         notification_id: None,
     })
 }
 
 /// The notification an OSC 777 sequence carries, or `None` when its
-/// subcommand is not `notify`. `osc_parameters` is the sequence split on
-/// `;`, starting with `777`.
+/// subcommand is not `notify`. `argument_bytes` is the text after `777 ;`.
 ///
-/// The parameter after `notify` is the title, and the text after the next
-/// `;` is the body, with its `;` kept:
+/// The field after `notify` is the title, and the text after the next `;`
+/// is the body, with its `;` kept:
 ///
-/// - `777 ; notify ; Build ; done ; 3 s` → `Notify { title: Some("Build"),
+/// - `notify;Build;done;3 s` → `Notify { title: Some("Build"),
 ///   body: "done;3 s", notification_id: None }`
-/// - `777 ; notify` → `Notify { title: None, body: "", notification_id: None }`
-/// - `777 ; preexec ; ls` → `None`
-pub(super) fn parse_osc777_notification(osc_parameters: &[&[u8]]) -> Option<ProgramFact> {
-    let [_, b"notify", notify_parameters @ ..] = osc_parameters else {
+/// - `notify` → `Notify { title: None, body: "", notification_id: None }`
+/// - `preexec;ls` → `None`
+pub(super) fn parse_osc777_notification(argument_bytes: &[u8]) -> Option<ProgramFact> {
+    let (subcommand_bytes, notify_field_bytes) = split_first_osc_field(argument_bytes);
+    if subcommand_bytes != b"notify" {
         return None;
-    };
-    let title_text = match notify_parameters.first() {
-        Some(title_bytes) => sanitize_notification_text(title_bytes),
-        None => String::new(),
-    };
-    let body_parameters = notify_parameters.get(1..).unwrap_or(&[]);
+    }
+    let (title_bytes, body_bytes) = split_first_osc_field(notify_field_bytes);
     Some(ProgramFact::Notify {
-        title: build_notification_title(title_text),
-        body: sanitize_notification_text(&body_parameters.join(&b';')),
+        title: build_notification_title(sanitize_notification_text(title_bytes)),
+        body: sanitize_notification_text(body_bytes),
         notification_id: None,
     })
 }
 
 /// Apply one OSC 99 sequence to the pane's open notification, and return the
-/// fact it completes. `osc_parameters` is the sequence split on `;`,
-/// starting with `99`: the metadata, then the payload, whose own `;` are
-/// kept. A sequence with no payload has an empty one.
+/// fact it completes. `argument_bytes` is the text after `99 ;`: the
+/// metadata up to the next `;`, then the payload, whose own `;` are kept. A
+/// text with no second `;` has an empty payload.
 ///
 /// - `p=?` and `p=alive` return `None` and leave `open_osc99_notification`
 ///   as it is.
@@ -137,15 +131,13 @@ pub(super) fn parse_osc777_notification(osc_parameters: &[&[u8]]) -> Option<Prog
 ///   it returns `Notify`, or `None` when the title and the body are both
 ///   empty.
 ///
-/// `i=1:d=0 ; Hello`, then `i=1:p=body ; This is cool` →
+/// `i=1:d=0;Hello`, then `i=1:p=body;This is cool` →
 /// `Notify { title: Some("Hello"), body: "This is cool", notification_id: Some("1") }`.
 pub(super) fn apply_osc99_sequence(
     open_osc99_notification: &mut Option<Osc99Notification>,
-    osc_parameters: &[&[u8]],
+    argument_bytes: &[u8],
 ) -> Option<ProgramFact> {
-    let [_, metadata_bytes, payload_parameters @ ..] = osc_parameters else {
-        return None;
-    };
+    let (metadata_bytes, payload_bytes) = split_first_osc_field(argument_bytes);
     let osc99_metadata = parse_osc99_metadata(metadata_bytes);
     match osc99_metadata.payload_type {
         Osc99PayloadType::Query => return None,
@@ -174,8 +166,7 @@ pub(super) fn apply_osc99_sequence(
         _ => None,
     };
     if let Some(text_field) = text_field {
-        let payload_bytes = payload_parameters.join(&b';');
-        if let Some(payload_text) = decode_osc99_payload(&payload_bytes, osc99_metadata.is_base64) {
+        if let Some(payload_text) = decode_osc99_payload(payload_bytes, osc99_metadata.is_base64) {
             let joined_text = format!("{text_field}{payload_text}");
             *text_field = sanitize_reported_text(&joined_text);
         }
@@ -266,6 +257,22 @@ fn decode_osc99_payload(payload_bytes: &[u8], is_base64: bool) -> Option<String>
     }
     let decoded_bytes = STANDARD_PAD_INDIFFERENT.decode(payload_bytes).ok()?;
     Some(String::from_utf8_lossy(&decoded_bytes).into_owned())
+}
+
+/// The bytes of `osc_text_bytes` before its first `;`, and the bytes after
+/// that `;`. A text with no `;` gives itself and an empty rest: `a;b;c` →
+/// (`a`, `b;c`), and `a` → (`a`, empty).
+fn split_first_osc_field(osc_text_bytes: &[u8]) -> (&[u8], &[u8]) {
+    match osc_text_bytes
+        .iter()
+        .position(|osc_text_byte| *osc_text_byte == b';')
+    {
+        Some(separator_index) => (
+            &osc_text_bytes[..separator_index],
+            &osc_text_bytes[separator_index + 1..],
+        ),
+        None => (osc_text_bytes, &[]),
+    }
 }
 
 /// `text_bytes` decoded lossily, then passed through [`sanitize_reported_text`].

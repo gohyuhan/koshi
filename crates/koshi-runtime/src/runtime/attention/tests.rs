@@ -138,7 +138,7 @@ impl AttentionFixture {
     /// Hand `output_bytes`, read at `read_at`, to `build_pane_id`.
     fn write_build_pane_output(&mut self, output_bytes: &[u8], read_at: SystemTime) {
         self.server
-            .handle_pty_output(self.build_pane_id, output_bytes, read_at);
+            .handle_pty_output(self.build_pane_id, output_bytes, read_at, Instant::now());
     }
 
     /// Everything the bus delivered to Alice since the last call, oldest
@@ -185,6 +185,20 @@ impl AttentionFixture {
             panic!("expected the command to apply, got {command_result:?}");
         }
     }
+}
+
+/// Each of `program_facts`, read at `read_instant`.
+fn build_timed_program_facts(
+    program_facts: Vec<ProgramFact>,
+    read_instant: Instant,
+) -> Vec<TimedProgramFact> {
+    program_facts
+        .into_iter()
+        .map(|program_fact| TimedProgramFact {
+            program_fact,
+            read_instant,
+        })
+        .collect()
 }
 
 /// `seconds` after the Unix epoch.
@@ -378,11 +392,12 @@ fn a_signal_whose_kind_koshi_kdl_switches_off_is_dropped() {
             AttentionReasonKind::Bell | AttentionReasonKind::Notify => Vec::new(),
         };
 
+        let read_instant = Instant::now();
         let emitted_events = fixture.server.apply_program_facts(
             fixture.build_pane_id,
-            vec![program_fact],
+            build_timed_program_facts(vec![program_fact], read_instant),
             build_wall_time(1_000),
-            Instant::now(),
+            read_instant,
         );
 
         assert_eq!(emitted_events, expected_events, "{attention_reason_kind:?}");
@@ -406,14 +421,17 @@ fn a_command_raises_only_once_it_ran_five_whole_seconds() {
         let finished_read_at = build_wall_time(1_005);
         fixture.server.apply_program_facts(
             build_pane_id,
-            vec![ProgramFact::CommandStarted],
+            build_timed_program_facts(vec![ProgramFact::CommandStarted], started_at),
             build_wall_time(1_000),
             started_at,
         );
 
         let emitted_events = fixture.server.apply_program_facts(
             build_pane_id,
-            vec![ProgramFact::CommandFinished { exit_code: Some(0) }],
+            build_timed_program_facts(
+                vec![ProgramFact::CommandFinished { exit_code: Some(0) }],
+                started_at + elapsed_duration,
+            ),
             finished_read_at,
             started_at + elapsed_duration,
         );
@@ -445,15 +463,18 @@ fn a_command_that_ran_twelve_seconds_raises_with_its_exit_code_and_whole_seconds
 
     let started_events = fixture.server.apply_program_facts(
         build_pane_id,
-        vec![ProgramFact::CommandStarted],
+        build_timed_program_facts(vec![ProgramFact::CommandStarted], started_at),
         build_wall_time(1_000),
         started_at,
     );
     let finished_events = fixture.server.apply_program_facts(
         build_pane_id,
-        vec![ProgramFact::CommandFinished {
-            exit_code: Some(101),
-        }],
+        build_timed_program_facts(
+            vec![ProgramFact::CommandFinished {
+                exit_code: Some(101),
+            }],
+            started_at + Duration::from_millis(12_200),
+        ),
         finished_read_at,
         started_at + Duration::from_millis(12_200),
     );
@@ -504,12 +525,16 @@ fn a_finish_whose_start_this_server_never_saw_raises_with_no_elapsed_time() {
     let mut fixture = build_attention_fixture();
     let build_pane_id = fixture.build_pane_id;
     let read_at = build_wall_time(1_000);
+    let read_instant = Instant::now();
 
     let emitted_events = fixture.server.apply_program_facts(
         build_pane_id,
-        vec![ProgramFact::CommandFinished { exit_code: Some(1) }],
+        build_timed_program_facts(
+            vec![ProgramFact::CommandFinished { exit_code: Some(1) }],
+            read_instant,
+        ),
         read_at,
-        Instant::now(),
+        read_instant,
     );
 
     assert_eq!(
@@ -582,6 +607,80 @@ fn a_run_of_bells_in_one_read_raises_once() {
     );
 }
 
+#[test]
+fn alternating_bells_and_notifications_in_one_read_raise_once_with_the_newest_reason() {
+    let mut fixture = build_attention_fixture();
+    let read_at = build_wall_time(1_000);
+    let alternating_signal_bytes = b"\x07\x1b]9;tests passed\x1b\\".repeat(250);
+
+    fixture.write_build_pane_output(&alternating_signal_bytes, read_at);
+
+    let notify_reason = AttentionReason::Notify {
+        title: None,
+        body: "tests passed".to_string(),
+    };
+    assert_eq!(
+        fixture.take_alice_deliveries(),
+        [build_raised_delivery(
+            fixture.build_pane_id,
+            fixture.code_tab_id,
+            notify_reason.clone(),
+            read_at
+        )]
+    );
+    assert_eq!(
+        fixture.find_pane_attention(fixture.build_pane_id),
+        Some(Attention {
+            raised_at: read_at,
+            reason: notify_reason,
+            withdrawable_notification_id: None,
+        })
+    );
+}
+
+#[test]
+fn facts_released_together_raise_at_the_read_times_of_their_own_chunks() {
+    // The start was read 8 s and the finish 3 s before the chunk that
+    // released both, read at 1 008 s.
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    let started_read_instant = Instant::now();
+    let mut program_facts =
+        build_timed_program_facts(vec![ProgramFact::CommandStarted], started_read_instant);
+    program_facts.extend(build_timed_program_facts(
+        vec![ProgramFact::CommandFinished { exit_code: Some(0) }],
+        started_read_instant + Duration::from_secs(5),
+    ));
+
+    let emitted_events = fixture.server.apply_program_facts(
+        build_pane_id,
+        program_facts,
+        build_wall_time(1_008),
+        started_read_instant + Duration::from_secs(8),
+    );
+
+    assert_eq!(
+        emitted_events,
+        [
+            Event::PaneCommandStarted(PaneCommandStarted {
+                pane_id: build_pane_id
+            }),
+            Event::PaneCommandFinished(PaneCommandFinished {
+                pane_id: build_pane_id
+            }),
+            Event::PaneAttentionRaised(PaneAttentionRaised {
+                pane_id: build_pane_id,
+                tab_id: Some(fixture.code_tab_id),
+                reason: AttentionReason::CommandFinished {
+                    exit_code: Some(0),
+                    elapsed_secs: Some(5),
+                },
+                raised_at: build_wall_time(1_005),
+            }),
+        ]
+    );
+}
+
 // --------------------------------------------------- program withdrawal ----
 
 #[test]
@@ -650,6 +749,46 @@ fn a_bell_after_the_notification_takes_its_withdrawal_away() {
     assert_eq!(
         fixture.find_pane_attention(fixture.build_pane_id),
         Some(build_bell_attention(first_read_at))
+    );
+}
+
+#[test]
+fn a_notification_withdrawn_in_the_same_read_raises_nothing() {
+    let mut fixture = build_attention_fixture();
+
+    fixture.write_build_pane_output(
+        b"\x1b]99;i=7:p=body;deploy done\x1b\\\x1b]99;i=7:p=close;\x1b\\",
+        build_wall_time(1_000),
+    );
+
+    assert_eq!(fixture.take_alice_deliveries(), Vec::new());
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+}
+
+#[test]
+fn a_withdrawal_and_a_bell_in_one_read_raise_once_at_the_new_read_time() {
+    let mut fixture = build_attention_fixture();
+    fixture.write_build_pane_output(
+        b"\x1b]99;i=7:p=body;deploy done\x1b\\",
+        build_wall_time(1_000),
+    );
+    let _ = fixture.take_alice_deliveries();
+    let second_read_at = build_wall_time(1_001);
+
+    fixture.write_build_pane_output(b"\x1b]99;i=7:p=close;\x1b\\\x07", second_read_at);
+
+    assert_eq!(
+        fixture.take_alice_deliveries(),
+        [build_raised_delivery(
+            fixture.build_pane_id,
+            fixture.code_tab_id,
+            AttentionReason::Bell,
+            second_read_at
+        )]
+    );
+    assert_eq!(
+        fixture.find_pane_attention(fixture.build_pane_id),
+        Some(build_bell_attention(second_read_at))
     );
 }
 
@@ -772,7 +911,7 @@ fn a_key_binding_that_leaves_the_input_where_it_was_clears_nothing() {
 #[test]
 fn focus_repair_after_a_pane_closes_leaves_the_landing_pane_waiting() {
     let first_read_at = build_wall_time(1_000);
-    for close_index in 0..2 {
+    for close_index in 0..3 {
         let mut fixture = build_attention_fixture();
         let bob_client_id = fixture.attach_bob_to_build_pane(TerminalFocus::Unreported);
         fixture.write_build_pane_output(b"\x07", first_read_at);
@@ -784,8 +923,13 @@ fn focus_repair_after_a_pane_closes_leaves_the_landing_pane_waiting() {
                 .server
                 .handle_child_exit(docs_pane_id, ExitStatus::ExitCode(0));
         } else {
+            let closing_client_id = if close_index == 1 {
+                bob_client_id
+            } else {
+                fixture.alice_client_id
+            };
             fixture.dispatch_command(
-                CommandSource::from_key_binding(bob_client_id),
+                CommandSource::from_key_binding(closing_client_id),
                 Command::ClosePane(ClosePaneArgs {
                     pane_id: Some(docs_pane_id),
                     should_force_close: false,
@@ -966,11 +1110,15 @@ fn koshi_input_into_the_waiting_pane_clears_nothing() {
 fn a_closed_pane_takes_its_attention_and_its_command_start_with_it() {
     let mut fixture = build_attention_fixture();
     let build_pane_id = fixture.build_pane_id;
+    let read_instant = Instant::now();
     fixture.server.apply_program_facts(
         build_pane_id,
-        vec![ProgramFact::CommandStarted, ProgramFact::Bell],
+        build_timed_program_facts(
+            vec![ProgramFact::CommandStarted, ProgramFact::Bell],
+            read_instant,
+        ),
         build_wall_time(1_000),
-        Instant::now(),
+        read_instant,
     );
 
     fixture.dispatch_command(

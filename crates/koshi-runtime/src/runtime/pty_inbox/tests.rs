@@ -273,15 +273,17 @@ fn two_chunks_into_an_empty_queue_send_one_wake_and_one_turn_takes_both() {
 }
 
 #[test]
-fn each_chunk_carries_the_wall_time_it_was_queued_at_in_queue_order() {
+fn each_chunk_carries_the_wall_time_and_instant_it_was_queued_at_in_queue_order() {
     let (event_sender, event_receiver) = mpsc::channel::<RuntimeEvent>();
     let inbox_sink = InboxSink::from_event_sender(event_sender);
     let pane_id = PaneId::new();
     let time_before_first_push = SystemTime::now();
+    let instant_before_first_push = Instant::now();
 
     assert!(inbox_sink.accept_output_bytes(pane_id, b"first".to_vec()));
     assert!(inbox_sink.accept_output_bytes(pane_id, b"second".to_vec()));
     let time_after_second_push = SystemTime::now();
+    let instant_after_second_push = Instant::now();
 
     let output_turn = receive_readable_queue(&event_receiver).take_output_turn();
     let [first_chunk, second_chunk] = output_turn.output_chunks.as_slice() else {
@@ -290,6 +292,38 @@ fn each_chunk_carries_the_wall_time_it_was_queued_at_in_queue_order() {
     assert!(time_before_first_push <= first_chunk.read_at);
     assert!(first_chunk.read_at <= second_chunk.read_at);
     assert!(second_chunk.read_at <= time_after_second_push);
+    assert!(instant_before_first_push <= first_chunk.read_instant);
+    assert!(first_chunk.read_instant <= second_chunk.read_instant);
+    assert!(second_chunk.read_instant <= instant_after_second_push);
+}
+
+#[test]
+fn a_chunk_that_waits_for_queue_room_keeps_the_instant_its_push_started_at() {
+    // Sixteen 8 KiB chunks fill the queue, and the seventeenth push waits.
+    // The turn that frees room runs after `instant_while_push_waits`, so the
+    // seventeenth chunk carries an instant from before that turn.
+    let (event_sender, event_receiver) = mpsc::channel::<RuntimeEvent>();
+    let inbox_sink = Arc::new(InboxSink::from_event_sender(event_sender));
+    let pane_id = PaneId::new();
+    let reader_thread_reports = start_reader_thread(Arc::clone(&inbox_sink), pane_id, 17);
+    let pane_output_queue = receive_readable_queue(&event_receiver);
+    wait_for_accepted_count(&reader_thread_reports.accepted_count_receiver, 16);
+    // The seventeenth push holds the second reference to the queue.
+    wait_for_push_holding_queue(&pane_output_queue, 2);
+    let instant_while_push_waits = Instant::now();
+
+    let _ = pane_output_queue.take_output_turn();
+    assert_eq!(reader_thread_reports.wait_for_final_count(), 17);
+
+    let queue_state = pane_output_queue
+        .queue_state
+        .lock()
+        .expect("pane output queue");
+    let waited_chunk = queue_state
+        .output_chunks
+        .back()
+        .expect("the seventeenth chunk is queued");
+    assert!(waited_chunk.read_instant <= instant_while_push_waits);
 }
 
 #[test]

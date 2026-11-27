@@ -2441,7 +2441,12 @@ fn a_token_takes_back_the_tab_focus_zoom_and_scroll_the_client_left() {
     let leaving_attachment = attach_with_token(&mut server, None, SystemTime::now());
     // 600 newlines on a 24-row viewport retain at least 576 lines, so the offset
     // of 500 the view files stands inside the split pane's history.
-    server.handle_pty_output(split_pane_id, &b"\n".repeat(600), SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(600),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     {
         let client = server
             .get_client_mut(leaving_attachment.client_id)
@@ -2754,7 +2759,12 @@ fn a_token_whose_pane_lost_its_history_comes_back_at_the_live_bottom() {
     let (session_id, _booted_tab_id, root_pane_id) = get_booted_parts(&server, client_id);
     let split_pane_id = split_booted_pane(&mut server, client_id, root_pane_id);
     let leaving_attachment = attach_with_token(&mut server, None, SystemTime::now());
-    server.handle_pty_output(split_pane_id, &b"\n".repeat(600), SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(600),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server
         .get_client_mut(leaving_attachment.client_id)
         .expect("the client that is about to leave")
@@ -2764,7 +2774,12 @@ fn a_token_whose_pane_lost_its_history_comes_back_at_the_live_bottom() {
     let _ = server.handle_client_detach(leaving_attachment.client_id);
     // `CSI 3 J` — what `clear` sends when terminfo names `E3` — drops every
     // retained line of the split pane while the view stands.
-    server.handle_pty_output(split_pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        split_pane_id,
+        b"\x1b[3J",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     assert_eq!(
         server.terminal_engine_by_pane_id[&split_pane_id]
             .get_terminal_state()
@@ -4112,7 +4127,12 @@ fn a_resumed_server_puts_every_carried_engine_back_with_its_undecoded_bytes() {
     let (_session_id, _tab_id, root_pane_id) = get_booted_parts(&server, client_id);
     // "hi" is printed; `ESC [` opens a control sequence that has no final byte
     // yet, so the parser stops there and holds those two bytes.
-    server.handle_pty_output(root_pane_id, b"hi\x1b[", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        root_pane_id,
+        b"hi\x1b[",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     assert_eq!(
         server.terminal_engine_by_pane_id[&root_pane_id].get_undecoded_terminal_bytes(),
         b"\x1b["
@@ -4154,6 +4174,7 @@ fn a_resumed_server_keeps_queued_graphics_events() {
         root_pane_id,
         b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
 
     let (_header, body) = server.carry_out(&[]).expect("a session to carry");
@@ -4222,7 +4243,12 @@ fn a_resumed_server_keeps_the_graphics_queue_overflow_report() {
         graphics_input_bytes
             .extend_from_slice(b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\");
     }
-    server.handle_pty_output(root_pane_id, &graphics_input_bytes, SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        root_pane_id,
+        &graphics_input_bytes,
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let (_header, body) = server.carry_out(&[]).expect("a session to carry");
     assert_eq!(
@@ -4277,6 +4303,7 @@ fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
         root_pane_id,
         &screen_wrap(&image_graphics_bytes[..split_byte_index]),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let (_header, body) = server.carry_out(&[]).expect("a session to carry");
 
@@ -4294,6 +4321,7 @@ fn a_resumed_server_keeps_graphics_inside_a_split_screen_wrapper() {
         root_pane_id,
         &screen_wrap(&image_graphics_bytes[split_byte_index..]),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
 
     let graphics_events = resumed_server

@@ -148,17 +148,21 @@ fn split_osc133_is_completed_by_the_next_chunk() {
 #[test]
 fn process_pty_output_at_returns_command_facts_with_their_exit_code_in_order() {
     let mut engine = build_test_terminal_engine();
+    let read_instant = Instant::now();
 
     assert_eq!(
-        engine.process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D;137\x07", Instant::now()),
+        engine.process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D;137\x07", read_instant),
         Some(TerminalAdvance {
             device_query_replies: Vec::new(),
-            program_facts: vec![
-                ProgramFact::CommandStarted,
-                ProgramFact::CommandFinished {
-                    exit_code: Some(137)
-                },
-            ],
+            program_facts: build_timed_program_facts(
+                vec![
+                    ProgramFact::CommandStarted,
+                    ProgramFact::CommandFinished {
+                        exit_code: Some(137)
+                    },
+                ],
+                read_instant
+            ),
         })
     );
 }
@@ -166,15 +170,19 @@ fn process_pty_output_at_returns_command_facts_with_their_exit_code_in_order() {
 #[test]
 fn bare_shell_integration_finish_returns_a_finish_with_no_exit_code() {
     let mut engine = build_test_terminal_engine();
+    let read_instant = Instant::now();
 
     assert_eq!(
-        engine.process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D\x07", Instant::now()),
+        engine.process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D\x07", read_instant),
         Some(TerminalAdvance {
             device_query_replies: Vec::new(),
-            program_facts: vec![
-                ProgramFact::CommandStarted,
-                ProgramFact::CommandFinished { exit_code: None },
-            ],
+            program_facts: build_timed_program_facts(
+                vec![
+                    ProgramFact::CommandStarted,
+                    ProgramFact::CommandFinished { exit_code: None },
+                ],
+                read_instant
+            ),
         })
     );
 }
@@ -195,12 +203,16 @@ fn unmatched_shell_integration_finish_returns_no_fact() {
 #[test]
 fn process_pty_output_at_returns_replies_and_facts_from_one_chunk() {
     let mut engine = build_test_terminal_engine();
+    let read_instant = Instant::now();
 
     assert_eq!(
-        engine.process_pty_output_at(b"\x1b[5n\x1b]133;C\x07", Instant::now()),
+        engine.process_pty_output_at(b"\x1b[5n\x1b]133;C\x07", read_instant),
         Some(TerminalAdvance {
             device_query_replies: b"\x1b[0n".to_vec(),
-            program_facts: vec![ProgramFact::CommandStarted],
+            program_facts: build_timed_program_facts(
+                vec![ProgramFact::CommandStarted],
+                read_instant
+            ),
         })
     );
 }
@@ -232,18 +244,14 @@ fn split_shell_integration_command_fact_waits_for_the_terminator() {
     let mut engine = build_test_terminal_engine();
 
     assert_eq!(
-        engine
-            .process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D;", Instant::now())
-            .map(|terminal_advance| terminal_advance.program_facts),
-        Some(vec![ProgramFact::CommandStarted])
+        take_chunk_program_facts(&mut engine, b"\x1b]133;C\x07\x1b]133;D;"),
+        vec![ProgramFact::CommandStarted]
     );
     assert_eq!(
-        engine
-            .process_pty_output_at(b"137\x07", Instant::now())
-            .map(|terminal_advance| terminal_advance.program_facts),
-        Some(vec![ProgramFact::CommandFinished {
+        take_chunk_program_facts(&mut engine, b"137\x07"),
+        vec![ProgramFact::CommandFinished {
             exit_code: Some(137)
-        }])
+        }]
     );
 }
 
@@ -678,12 +686,9 @@ fn c1_osc_shell_marker_is_not_printed() {
     terminal_input_bytes.extend_from_slice(b"133;C");
     terminal_input_bytes.push(0x07);
 
-    let terminal_advance = engine.process_pty_output_at(&terminal_input_bytes, Instant::now());
+    let program_facts = take_chunk_program_facts(&mut engine, &terminal_input_bytes);
 
-    assert_eq!(
-        terminal_advance.map(|terminal_advance| terminal_advance.program_facts),
-        Some(vec![ProgramFact::CommandStarted])
-    );
+    assert_eq!(program_facts, vec![ProgramFact::CommandStarted]);
     assert_eq!(
         engine.get_terminal_state().get_active_grid(),
         initial_terminal_state.get_active_grid()
@@ -1108,7 +1113,10 @@ fn synchronized_output_deadline_releases_replies_shell_facts_and_graphics() {
         engine.expire_synchronized_output(test_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION),
         Some(TerminalAdvance {
             device_query_replies: b"\x1b[0n".to_vec(),
-            program_facts: vec![ProgramFact::CommandStarted],
+            program_facts: build_timed_program_facts(
+                vec![ProgramFact::CommandStarted],
+                test_timestamp
+            ),
         })
     );
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
@@ -1205,6 +1213,310 @@ fn synchronized_output_transport_rejects_impossible_scanner_state() {
             .unwrap_err()
             .to_string(),
         "synchronized-output deadline has no bytes"
+    );
+}
+
+#[test]
+fn held_facts_keep_the_read_instant_of_the_chunk_that_brought_them() {
+    let begin_instant = Instant::now();
+    let started_instant = begin_instant + Duration::from_millis(10);
+    let finished_instant = begin_instant + Duration::from_millis(20);
+    let mut engine = build_test_terminal_engine();
+    assert_eq!(
+        engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, begin_instant),
+        None
+    );
+    assert_eq!(
+        engine.process_pty_output_at(b"\x1b]133;C\x07", started_instant),
+        None
+    );
+    assert_eq!(
+        engine.process_pty_output_at(b"\x1b]133;D;0\x07", finished_instant),
+        None
+    );
+
+    assert_eq!(
+        engine.process_pty_output_at(
+            END_SYNCHRONIZED_OUTPUT_BYTES,
+            begin_instant + Duration::from_millis(30)
+        ),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: vec![
+                TimedProgramFact {
+                    program_fact: ProgramFact::CommandStarted,
+                    read_instant: started_instant,
+                },
+                TimedProgramFact {
+                    program_fact: ProgramFact::CommandFinished { exit_code: Some(0) },
+                    read_instant: finished_instant,
+                },
+            ],
+        })
+    );
+}
+
+#[test]
+fn an_update_that_ends_and_opens_again_in_one_chunk_keeps_each_fact_at_its_read_instant() {
+    // The second chunk ends the open update and opens a new one. The bytes
+    // before the new `CSI ? 2026 h` release; the start after it waits for the
+    // deadline of the new update, and keeps the second chunk's instant.
+    let first_read_instant = Instant::now();
+    let second_read_instant = first_read_instant + Duration::from_millis(20);
+    let mut engine = build_test_terminal_engine();
+    let mut first_chunk_bytes = BEGIN_SYNCHRONIZED_OUTPUT_BYTES.to_vec();
+    first_chunk_bytes.extend_from_slice(b"\x1b]133;C\x07");
+    assert_eq!(
+        engine.process_pty_output_at(&first_chunk_bytes, first_read_instant),
+        None
+    );
+    let mut second_chunk_bytes = b"\x1b]133;D;0\x07".to_vec();
+    second_chunk_bytes.extend_from_slice(END_SYNCHRONIZED_OUTPUT_BYTES);
+    second_chunk_bytes.extend_from_slice(BEGIN_SYNCHRONIZED_OUTPUT_BYTES);
+    second_chunk_bytes.extend_from_slice(b"\x1b]133;C\x07");
+
+    assert_eq!(
+        engine.process_pty_output_at(&second_chunk_bytes, second_read_instant),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: vec![
+                TimedProgramFact {
+                    program_fact: ProgramFact::CommandStarted,
+                    read_instant: first_read_instant,
+                },
+                TimedProgramFact {
+                    program_fact: ProgramFact::CommandFinished { exit_code: Some(0) },
+                    read_instant: second_read_instant,
+                },
+            ],
+        })
+    );
+    assert_eq!(
+        engine
+            .expire_synchronized_output(second_read_instant + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: build_timed_program_facts(
+                vec![ProgramFact::CommandStarted],
+                second_read_instant
+            ),
+        })
+    );
+}
+
+#[test]
+fn splitting_held_chunk_starts_gives_each_part_the_starts_of_its_own_bytes() {
+    let first_read_instant = Instant::now();
+    let second_read_instant = first_read_instant + Duration::from_millis(20);
+    let build_synchronized_output = || SynchronizedOutput {
+        buffered_bytes: vec![b'x'; 14],
+        held_chunk_starts: vec![
+            HeldChunkStart {
+                first_byte_index: 0,
+                read_instant: first_read_instant,
+            },
+            HeldChunkStart {
+                first_byte_index: 10,
+                read_instant: second_read_instant,
+            },
+        ],
+        deadline: None,
+    };
+
+    let mut split_inside_first_chunk = build_synchronized_output();
+    assert_eq!(
+        split_inside_first_chunk.split_held_chunk_starts(4),
+        [HeldChunkStart {
+            first_byte_index: 0,
+            read_instant: first_read_instant,
+        }]
+    );
+    assert_eq!(
+        split_inside_first_chunk.held_chunk_starts,
+        [
+            HeldChunkStart {
+                first_byte_index: 0,
+                read_instant: first_read_instant,
+            },
+            HeldChunkStart {
+                first_byte_index: 6,
+                read_instant: second_read_instant,
+            },
+        ]
+    );
+
+    let mut split_at_second_chunk = build_synchronized_output();
+    assert_eq!(
+        split_at_second_chunk.split_held_chunk_starts(10),
+        [HeldChunkStart {
+            first_byte_index: 0,
+            read_instant: first_read_instant,
+        }]
+    );
+    assert_eq!(
+        split_at_second_chunk.held_chunk_starts,
+        [HeldChunkStart {
+            first_byte_index: 0,
+            read_instant: second_read_instant,
+        }]
+    );
+}
+
+#[test]
+fn held_chunk_read_times_survive_a_process_swap() {
+    // Read ages at the swap: 40 ms and 30 ms. The restored engine starts
+    // 100 ms of wall time later, so the ages become 140 ms and 130 ms.
+    let begin_instant = Instant::now();
+    let started_instant = begin_instant + Duration::from_millis(10);
+    let wall_clock_timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mut engine = build_test_terminal_engine();
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, begin_instant);
+    let _ = engine.process_pty_output_at(b"\x1b]133;C\x07", started_instant);
+    let synchronized_output_transport = engine
+        .get_synchronized_output_transport_at(
+            begin_instant + Duration::from_millis(40),
+            wall_clock_timestamp,
+        )
+        .expect("the open update has transport state");
+    assert_eq!(
+        synchronized_output_transport.held_chunk_read_times,
+        [
+            HeldChunkReadTime {
+                first_byte_index: 0,
+                read_at: wall_clock_timestamp - Duration::from_millis(40),
+            },
+            HeldChunkReadTime {
+                first_byte_index: BEGIN_SYNCHRONIZED_OUTPUT_BYTES.len(),
+                read_at: wall_clock_timestamp - Duration::from_millis(30),
+            },
+        ]
+    );
+    let serialized_transport =
+        serde_json::to_value(&synchronized_output_transport).expect("the transport serializes");
+    assert_eq!(
+        serde_json::from_value::<SynchronizedOutputTransport>(serialized_transport)
+            .expect("the transport deserializes"),
+        synchronized_output_transport
+    );
+    let terminal_state = engine.into_terminal_state();
+    let restored_timestamp = begin_instant + Duration::from_secs(1);
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        terminal_state,
+        &[],
+        &[],
+        GraphicsTransportState::default(),
+        Some(synchronized_output_transport),
+        restored_timestamp,
+        wall_clock_timestamp + Duration::from_millis(100),
+    );
+
+    assert_eq!(
+        restored_engine.expire_synchronized_output(restored_timestamp + Duration::from_millis(10)),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: build_timed_program_facts(
+                vec![ProgramFact::CommandStarted],
+                restored_timestamp - Duration::from_millis(130)
+            ),
+        })
+    );
+}
+
+#[test]
+fn a_resume_format_5_transport_reads_every_held_byte_at_its_deadline_less_150_ms() {
+    let begin_instant = Instant::now();
+    let wall_clock_timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mut engine = build_test_terminal_engine();
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, begin_instant);
+    let synchronized_output_transport = engine
+        .get_synchronized_output_transport_at(begin_instant, wall_clock_timestamp)
+        .expect("the open update has transport state");
+    let mut format_5_transport_json =
+        serde_json::to_value(&synchronized_output_transport).expect("the transport serializes");
+    format_5_transport_json
+        .as_object_mut()
+        .expect("the transport is an object")
+        .remove("held_chunk_read_times");
+
+    let read_format_5_transport = |transport_json: serde_json::Value| {
+        serde_json::from_value::<ResumeFormat5SynchronizedOutputTransport>(transport_json)
+            .expect("the format 5 transport deserializes")
+            .into_synchronized_output_transport()
+    };
+
+    assert_eq!(
+        read_format_5_transport(format_5_transport_json.clone()),
+        synchronized_output_transport
+    );
+
+    format_5_transport_json["normalized_bytes"] = serde_json::json!([]);
+    format_5_transport_json["deadline"] = serde_json::Value::Null;
+    assert_eq!(
+        read_format_5_transport(format_5_transport_json).held_chunk_read_times,
+        []
+    );
+}
+
+#[test]
+fn synchronized_output_transport_rejects_read_times_that_do_not_fit_its_bytes() {
+    let begin_instant = Instant::now();
+    let wall_clock_timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    let mut engine = build_test_terminal_engine();
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, begin_instant);
+    let _ =
+        engine.process_pty_output_at(b"\x1b]133;C\x07", begin_instant + Duration::from_millis(10));
+    let serialized_transport = serde_json::to_value(
+        engine
+            .get_synchronized_output_transport_at(begin_instant, wall_clock_timestamp)
+            .expect("the open update has transport state"),
+    )
+    .expect("the transport serializes");
+    let held_byte_count = serialized_transport["normalized_bytes"]
+        .as_array()
+        .expect("the bytes are an array")
+        .len();
+    let read_problem = |transport_json: serde_json::Value| {
+        serde_json::from_value::<SynchronizedOutputTransport>(transport_json)
+            .unwrap_err()
+            .to_string()
+    };
+
+    let mut no_read_times = serialized_transport.clone();
+    no_read_times["held_chunk_read_times"] = serde_json::json!([]);
+    assert_eq!(
+        read_problem(no_read_times),
+        "synchronized-output bytes have no chunk read time at index 0"
+    );
+
+    let mut first_read_time_after_index_0 = serialized_transport.clone();
+    first_read_time_after_index_0["held_chunk_read_times"][0]["first_byte_index"] =
+        serde_json::json!(1);
+    assert_eq!(
+        read_problem(first_read_time_after_index_0),
+        "synchronized-output bytes have no chunk read time at index 0"
+    );
+
+    let mut repeated_index = serialized_transport.clone();
+    repeated_index["held_chunk_read_times"][1]["first_byte_index"] = serde_json::json!(0);
+    assert_eq!(
+        read_problem(repeated_index),
+        "synchronized-output chunk read times are out of order"
+    );
+
+    let mut index_past_the_bytes = serialized_transport.clone();
+    index_past_the_bytes["held_chunk_read_times"][1]["first_byte_index"] =
+        serde_json::json!(held_byte_count);
+    assert_eq!(
+        read_problem(index_past_the_bytes),
+        "synchronized-output chunk read times are out of order"
+    );
+
+    let mut read_times_with_no_bytes = serialized_transport;
+    read_times_with_no_bytes["normalized_bytes"] = serde_json::json!([]);
+    read_times_with_no_bytes["deadline"] = serde_json::Value::Null;
+    assert_eq!(
+        read_problem(read_times_with_no_bytes),
+        "synchronized-output chunk read times have no bytes"
     );
 }
 
@@ -3419,13 +3731,34 @@ fn every_control_sequence_final_byte_lets_a_following_eight_bit_csi_apply() {
     }
 }
 
-/// The program facts `chunk` gave `engine`, empty when no byte reached the
-/// parsers.
-fn take_chunk_program_facts(engine: &mut TerminalEngine, chunk: &[u8]) -> Vec<ProgramFact> {
-    match engine.process_pty_output_at(chunk, Instant::now()) {
-        Some(terminal_advance) => terminal_advance.program_facts,
+/// The program facts `pty_output_bytes` gave `engine`, empty when no byte
+/// reached the parsers.
+fn take_chunk_program_facts(
+    engine: &mut TerminalEngine,
+    pty_output_bytes: &[u8],
+) -> Vec<ProgramFact> {
+    match engine.process_pty_output_at(pty_output_bytes, Instant::now()) {
+        Some(terminal_advance) => terminal_advance
+            .program_facts
+            .into_iter()
+            .map(|timed_program_fact| timed_program_fact.program_fact)
+            .collect(),
         None => Vec::new(),
     }
+}
+
+/// Each of `program_facts`, read at `read_instant`.
+fn build_timed_program_facts(
+    program_facts: Vec<ProgramFact>,
+    read_instant: Instant,
+) -> Vec<TimedProgramFact> {
+    program_facts
+        .into_iter()
+        .map(|program_fact| TimedProgramFact {
+            program_fact,
+            read_instant,
+        })
+        .collect()
 }
 
 /// Each attention sequence, byte-exact, with the facts it gives a fresh engine.
@@ -3589,18 +3922,70 @@ fn a_long_osc777_body_keeps_its_first_512_bytes() {
 }
 
 #[test]
-fn an_osc9_body_keeps_the_fifteen_parameters_the_parser_splits() {
+fn an_osc9_body_keeps_every_field_past_the_sixteenth_separator() {
     let mut engine = build_test_terminal_engine();
-    let parameter_letters: Vec<String> = ('a'..='t').map(String::from).collect();
-    let sequence_bytes = format!("\x1b]9;{}\x07", parameter_letters.join(";"));
+    let field_letters: Vec<String> = ('a'..='t').map(String::from).collect();
+    let sequence_bytes = format!("\x1b]9;{}\x07", field_letters.join(";"));
     assert_eq!(
         take_chunk_program_facts(&mut engine, sequence_bytes.as_bytes()),
         vec![ProgramFact::Notify {
             title: None,
-            body: parameter_letters[..15].join(";"),
+            body: field_letters.join(";"),
             notification_id: None,
         }]
     );
+}
+
+#[test]
+fn a_title_keeps_every_field_past_the_sixteenth_separator() {
+    let mut engine = build_test_terminal_engine();
+    let field_letters: Vec<String> = ('a'..='t').map(String::from).collect();
+    let sequence_bytes = format!("\x1b]2;{}\x1b\\", field_letters.join(";"));
+    let _ = engine.process_pty_output(sequence_bytes.as_bytes());
+    assert_eq!(
+        engine.get_terminal_state().get_title(),
+        Some(field_letters.join(";").as_str())
+    );
+}
+
+#[test]
+fn an_osc9_with_no_separator_makes_no_notification() {
+    let mut engine = build_test_terminal_engine();
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]9\x07\x1b]777\x07\x1b]99\x07"),
+        Vec::new()
+    );
+}
+
+#[test]
+fn an_osc_text_cut_by_a_process_swap_completes_in_the_next_engine() {
+    // The order a restored pane runs in: the engine is built from the carried
+    // bytes, then reads copies, then reads the next chunk.
+    for should_read_clipboard_copies in [false, true] {
+        let mut engine = build_test_terminal_engine();
+        assert_eq!(
+            take_chunk_program_facts(&mut engine, b"\x1b]9;a;b;"),
+            Vec::new()
+        );
+        let terminal_undecoded_bytes = engine.get_undecoded_terminal_bytes().to_vec();
+        let mut restored_engine = TerminalEngine::from_terminal_state(
+            engine.into_terminal_state(),
+            &terminal_undecoded_bytes,
+        );
+        if should_read_clipboard_copies {
+            restored_engine.start_reading_clipboard_copies(1024);
+        }
+
+        assert_eq!(
+            take_chunk_program_facts(&mut restored_engine, b"c\x07"),
+            vec![ProgramFact::Notify {
+                title: None,
+                body: "a;b;c".to_string(),
+                notification_id: None,
+            }],
+            "reads copies: {should_read_clipboard_copies}"
+        );
+    }
 }
 
 #[test]

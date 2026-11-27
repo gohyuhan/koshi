@@ -555,7 +555,7 @@ fn an_attach_paces_its_client_at_the_frame_rate_the_attach_names() {
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&attach_accepted.deliveries).len(), 1);
 
-    server.handle_pty_output(pane_id, b"x", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"x", SystemTime::UNIX_EPOCH, Instant::now());
 
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(
@@ -602,6 +602,7 @@ fn after_each_pass_every_clients_last_frame_is_its_current_frame() {
                 pane_id,
                 format!("line {step_index}\r\n\x1b]2;title {step_index}\x07").as_bytes(),
                 SystemTime::UNIX_EPOCH,
+                Instant::now(),
             ),
             4 if pane_ids.len() < 6 => open_new_tab_for_client(&mut server, client_id),
             4 | 5 => {
@@ -780,7 +781,7 @@ fn a_change_right_after_a_frame_waits_out_the_frame_interval() {
     server.push_due_frames(current_time);
     assert_eq!(take_queued_frames(&delivery_receiver).len(), 1);
 
-    server.handle_pty_output(pane_id, b"x", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"x", SystemTime::UNIX_EPOCH, Instant::now());
 
     assert_eq!(
         server.compute_next_render_wakeup(current_time),
@@ -817,7 +818,7 @@ fn list_frame_waits_after_input_event(
     server.push_due_frames(current_time);
 
     let _ = server.handle_runtime_event(build_input_event(client_id, session_id));
-    server.handle_pty_output(pane_id, b"a", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"a", SystemTime::UNIX_EPOCH, Instant::now());
 
     (
         mark_changed_views_then_compute_frame_wait(&mut server, client_id, current_time),
@@ -1292,7 +1293,12 @@ fn one_expiring_pane_among_a_thousand_idle_panes_is_the_only_one_the_index_holds
         spawn_and_park_test_pane(&mut server, &fake_pty_backend, *pane_id);
     }
     let expiring_pane_id = pane_ids[1000];
-    server.handle_pty_output(expiring_pane_id, b"\x1b[?2026hX", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        expiring_pane_id,
+        b"\x1b[?2026hX",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let render_deadline = server
         .pane_synchronized_output_deadlines
         .find_earliest_render_deadline()
@@ -1340,7 +1346,12 @@ fn a_released_pane_leaves_both_render_deadline_indexes() {
     let (mut server, _fake_pty_backend) = build_test_runtime_with_fake_pty_backend();
     let (_client_id, pane_id) = bootstrap_test_session(&mut server, SessionId::new());
     server.insert_terminal_engine(pane_id, build_two_frame_animated_terminal_engine());
-    server.handle_pty_output(pane_id, b"\x1b[?2026h", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?2026h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     for pane_render_deadlines in [
         &server.pane_synchronized_output_deadlines,
         &server.pane_animation_deadlines,
@@ -2614,7 +2625,12 @@ fn a_terminal_focus_report_records_the_clients_focus_and_a_focus_in_clears_its_i
         });
     assert_eq!(focus_out_control_flow, ControlFlow::Continue(()));
     assert_eq!(get_bob_terminal_focus(&server), TerminalFocus::Unfocused);
-    server.handle_pty_output(right_pane_id, b"\x07", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        right_pane_id,
+        b"\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let focus_in_control_flow =
         server.handle_runtime_event(RuntimeEvent::OuterTerminalFocusChanged {
@@ -2678,6 +2694,7 @@ fn build_two_client_session() -> TwoClientSession {
         left_pane_id,
         "line\r\n".repeat(30).as_bytes(),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let (alice_delivery_receiver, _) = server.subscribe(alice_client_id, 60, None);
     server.handle_attach_answer_received(alice_client_id);
@@ -3209,7 +3226,12 @@ fn a_recent_input_pane_in_a_frame_the_writing_thread_has_not_taken_stays_in_the_
     let _ = server.handle_runtime_event(build_painted_key_press_event(*bob_client_id, 'a', 0));
     server.push_due_frames(frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
     let slow_paint_time = Instant::now() + PEER_INPUT_MARK_DURATION + Duration::from_secs(1);
-    server.handle_pty_output(*left_pane_id, b"more output\r\n", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        *left_pane_id,
+        b"more output\r\n",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     server.push_due_frames(slow_paint_time);
 
@@ -3266,7 +3288,12 @@ fn a_recent_input_pane_leaves_two_seconds_after_the_take_of_the_first_frame_that
     let _ = server
         .event_bus
         .publish(&build_test_placement_event(destination_tab_id));
-    server.handle_pty_output(*left_pane_id, b"more output\r\n", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        *left_pane_id,
+        b"more output\r\n",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let newer_frame_time = mark_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
     server.push_due_frames(newer_frame_time);
 
@@ -3314,6 +3341,7 @@ fn one_pass_counts_the_recent_input_marks_of_every_frame_the_writing_thread_took
         left_pane_id,
         b"\x1b[?1000h",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
     let TwoClientSession {
@@ -3381,6 +3409,7 @@ fn a_pass_that_counts_a_taken_frame_asks_to_hear_of_the_take_of_the_next_waiting
         left_pane_id,
         b"\x1b[?1000h",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let frame_time = send_alice_a_frame_with_bob_in_a_local_input_mode(&mut two_client_session);
     let TwoClientSession {
@@ -3631,7 +3660,12 @@ fn a_mouse_report_into_another_pane_shows_in_the_other_clients_next_frame() {
         delivery_receivers: [alice_delivery_receiver, _],
         ..
     } = build_two_client_session();
-    server.handle_pty_output(left_pane_id, b"\x1b[?1000h", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        left_pane_id,
+        b"\x1b[?1000h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let first_frame_time = Instant::now();
     server.push_due_frames(first_frame_time);
     let _ = take_queued_frames(&alice_delivery_receiver);
@@ -3675,6 +3709,7 @@ fn alternate_scroll_arrows_into_another_pane_show_in_the_other_clients_next_fram
         left_pane_id,
         b"\x1b[?1049h\x1b[?1007h",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let first_frame_time = Instant::now();
     server.push_due_frames(first_frame_time);

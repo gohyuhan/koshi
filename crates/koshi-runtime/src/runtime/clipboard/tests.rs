@@ -7,7 +7,7 @@
 //! the copy.
 
 use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::runtime::command::tests::create_session_with_attached_client;
 use crate::runtime::pty_inbox::InboxSink;
@@ -437,6 +437,7 @@ fn pane_output_with_an_osc_52_copy_reaches_each_focusing_client_while_writes_are
         fixture.pane_id,
         b"a\x1b]52;c;aGk=\x07b",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
 
     assert_eq!(
@@ -461,6 +462,7 @@ fn pane_output_with_an_osc_52_copy_reaches_no_client_while_writes_are_off() {
         fixture.pane_id,
         b"a\x1b]52;c;aGk=\x07b",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
 
     assert_eq!(

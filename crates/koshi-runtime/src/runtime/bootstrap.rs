@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use koshi_core::geometry::Size;
 use koshi_core::ids::{PaneId, SessionId, TabId};
@@ -152,11 +152,13 @@ impl Server {
         }
         self.session_by_id.insert(session_id, session);
         let notice_written_at = SystemTime::now();
+        let notice_written_instant = Instant::now();
         for (pane_id, _) in carried_pane_sizes {
             self.handle_pty_output(
                 *pane_id,
                 LAYOUT_NOT_RESTORED_NOTICE_BYTES,
                 notice_written_at,
+                notice_written_instant,
             );
         }
         self.post_session_notification(

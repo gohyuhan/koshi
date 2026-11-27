@@ -29,6 +29,7 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 
 mod clipboard_copy;
+pub(crate) mod osc_reader;
 
 pub use crate::graphics::GraphicsTransportState;
 use crate::graphics::{
@@ -38,7 +39,7 @@ use crate::graphics::{
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ProgramFact, TerminalState};
 pub use clipboard_copy::ClipboardCopy;
-use clipboard_copy::ClipboardCopyParser;
+use osc_reader::OscReader;
 
 /// The byte every escape sequence starts with: `ESC`, `0x1b`.
 const ESCAPE_BYTE: u8 = 0x1b;
@@ -89,15 +90,60 @@ pub const MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT: usize = 0x20_0000;
 const BEGIN_SYNCHRONIZED_OUTPUT_BYTES: &[u8; 8] = b"\x1b[?2026h";
 const END_SYNCHRONIZED_OUTPUT_BYTES: &[u8; 8] = b"\x1b[?2026l";
 
-/// Synchronized-output bytes and deadline carried across a process-image swap.
+/// Synchronized-output bytes, the read time of each chunk among them, and the
+/// deadline, carried across a process-image swap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SynchronizedOutputTransport {
+    terminal_input: C1InputNormalizer,
+    normalized_bytes: Vec<u8>,
+    held_chunk_read_times: Vec<HeldChunkReadTime>,
+    deadline: Option<SystemTime>,
+}
+
+/// Where the bytes of one read chunk start among carried synchronized-output
+/// bytes, and the wall time koshi read that chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+struct HeldChunkReadTime {
+    /// The index of the chunk's first byte among the carried bytes.
+    first_byte_index: usize,
+    /// The wall time koshi read the chunk.
+    read_at: SystemTime,
+}
+
+/// Synchronized-output bytes and deadline in the shape resume formats 4 and 5
+/// carry them, with no read time for the chunks among the bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeFormat5SynchronizedOutputTransport {
     terminal_input: C1InputNormalizer,
     normalized_bytes: Vec<u8>,
     deadline: Option<SystemTime>,
 }
 
-impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
+impl ResumeFormat5SynchronizedOutputTransport {
+    /// The same bytes and deadline, with every byte read at `deadline` minus
+    /// [`SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION`]: the time the previous build
+    /// read the group's newest `CSI ? 2026 h`. A `deadline` that `SystemTime`
+    /// cannot move 150 ms back gives the read time `deadline`.
+    pub fn into_synchronized_output_transport(self) -> SynchronizedOutputTransport {
+        let held_chunk_read_times = match self.deadline {
+            Some(deadline) => vec![HeldChunkReadTime {
+                first_byte_index: 0,
+                read_at: deadline
+                    .checked_sub(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
+                    .unwrap_or(deadline),
+            }],
+            None => Vec::new(),
+        };
+        SynchronizedOutputTransport {
+            terminal_input: self.terminal_input,
+            normalized_bytes: self.normalized_bytes,
+            held_chunk_read_times,
+            deadline: self.deadline,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ResumeFormat5SynchronizedOutputTransport {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
@@ -112,36 +158,117 @@ impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
 
         let serialized_transport =
             SerializedSynchronizedOutputTransport::deserialize(deserializer)?;
-        let terminal_input = serialized_transport.terminal_input;
-        if terminal_input.remaining_utf8_continuation_count > 3 {
-            return Err(de::Error::custom(
-                "terminal-input UTF-8 continuation count is invalid",
-            ));
-        }
-        if terminal_input.trailing_byte_count > terminal_input.trailing_bytes.len()
-            || terminal_input.trailing_start_index >= terminal_input.trailing_bytes.len()
-            || (terminal_input.trailing_byte_count < terminal_input.trailing_bytes.len()
-                && terminal_input.trailing_start_index != terminal_input.trailing_byte_count)
-        {
-            return Err(de::Error::custom("terminal-input scanner tail is invalid"));
-        }
-        if serialized_transport.deadline.is_some()
-            && serialized_transport.normalized_bytes.is_empty()
-        {
-            return Err(de::Error::custom(
-                "synchronized-output deadline has no bytes",
-            ));
-        }
-        if serialized_transport.deadline.is_none()
-            && !serialized_transport.normalized_bytes.is_empty()
-        {
-            return Err(de::Error::custom(
-                "synchronized-output bytes have no deadline",
-            ));
+        if let Some(transport_problem) = find_carried_synchronized_output_problem(
+            &serialized_transport.terminal_input,
+            &serialized_transport.normalized_bytes,
+            serialized_transport.deadline,
+        ) {
+            return Err(de::Error::custom(transport_problem));
         }
         Ok(Self {
-            terminal_input,
+            terminal_input: serialized_transport.terminal_input,
             normalized_bytes: serialized_transport.normalized_bytes,
+            deadline: serialized_transport.deadline,
+        })
+    }
+}
+
+/// The reason carried synchronized-output state cannot be restored, or `None`
+/// when it can: a UTF-8 continuation count above 3, a scanner tail whose
+/// indexes do not fit its buffer, a deadline with no bytes, or bytes with no
+/// deadline.
+fn find_carried_synchronized_output_problem(
+    terminal_input: &C1InputNormalizer,
+    normalized_bytes: &[u8],
+    deadline: Option<SystemTime>,
+) -> Option<&'static str> {
+    if terminal_input.remaining_utf8_continuation_count > 3 {
+        return Some("terminal-input UTF-8 continuation count is invalid");
+    }
+    if terminal_input.trailing_byte_count > terminal_input.trailing_bytes.len()
+        || terminal_input.trailing_start_index >= terminal_input.trailing_bytes.len()
+        || (terminal_input.trailing_byte_count < terminal_input.trailing_bytes.len()
+            && terminal_input.trailing_start_index != terminal_input.trailing_byte_count)
+    {
+        return Some("terminal-input scanner tail is invalid");
+    }
+    if deadline.is_some() && normalized_bytes.is_empty() {
+        return Some("synchronized-output deadline has no bytes");
+    }
+    if deadline.is_none() && !normalized_bytes.is_empty() {
+        return Some("synchronized-output bytes have no deadline");
+    }
+    None
+}
+
+/// The reason `held_chunk_read_times` cannot describe `normalized_bytes`, or
+/// `None` when it can: no read time for no bytes, and otherwise a first read
+/// time at index `0` and rising indexes below the byte count.
+fn find_held_chunk_read_times_problem(
+    normalized_bytes: &[u8],
+    held_chunk_read_times: &[HeldChunkReadTime],
+) -> Option<&'static str> {
+    if normalized_bytes.is_empty() {
+        if held_chunk_read_times.is_empty() {
+            return None;
+        }
+        return Some("synchronized-output chunk read times have no bytes");
+    }
+    if held_chunk_read_times
+        .first()
+        .map(|held_chunk_read_time| held_chunk_read_time.first_byte_index)
+        != Some(0)
+    {
+        return Some("synchronized-output bytes have no chunk read time at index 0");
+    }
+    let is_each_index_rising = held_chunk_read_times.windows(2).all(|read_time_pair| {
+        read_time_pair[0].first_byte_index < read_time_pair[1].first_byte_index
+    });
+    let is_last_index_inside = held_chunk_read_times
+        .last()
+        .is_some_and(|held_chunk_read_time| {
+            held_chunk_read_time.first_byte_index < normalized_bytes.len()
+        });
+    if !is_each_index_rising || !is_last_index_inside {
+        return Some("synchronized-output chunk read times are out of order");
+    }
+    None
+}
+
+impl<'de> Deserialize<'de> for SynchronizedOutputTransport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct SerializedSynchronizedOutputTransport {
+            terminal_input: C1InputNormalizer,
+            #[serde(deserialize_with = "deserialize_synchronized_output_bytes")]
+            normalized_bytes: Vec<u8>,
+            held_chunk_read_times: Vec<HeldChunkReadTime>,
+            deadline: Option<SystemTime>,
+        }
+
+        let serialized_transport =
+            SerializedSynchronizedOutputTransport::deserialize(deserializer)?;
+        let transport_problem = find_carried_synchronized_output_problem(
+            &serialized_transport.terminal_input,
+            &serialized_transport.normalized_bytes,
+            serialized_transport.deadline,
+        )
+        .or_else(|| {
+            find_held_chunk_read_times_problem(
+                &serialized_transport.normalized_bytes,
+                &serialized_transport.held_chunk_read_times,
+            )
+        });
+        if let Some(transport_problem) = transport_problem {
+            return Err(de::Error::custom(transport_problem));
+        }
+        Ok(Self {
+            terminal_input: serialized_transport.terminal_input,
+            normalized_bytes: serialized_transport.normalized_bytes,
+            held_chunk_read_times: serialized_transport.held_chunk_read_times,
             deadline: serialized_transport.deadline,
         })
     }
@@ -190,26 +317,44 @@ enum SynchronizedControl {
     End,
 }
 
+/// Where the bytes of one read chunk start in `SynchronizedOutput::buffered_bytes`,
+/// and the instant koshi read that chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HeldChunkStart {
+    /// The index of the chunk's first held byte.
+    first_byte_index: usize,
+    /// The instant koshi read the chunk.
+    read_instant: Instant,
+}
+
 #[derive(Default)]
 struct SynchronizedOutput {
     buffered_bytes: Vec<u8>,
+    /// The start of each read chunk in `buffered_bytes`, in byte order. The
+    /// first starts at index `0`, and each index is below the next. Empty
+    /// exactly when `buffered_bytes` is empty.
+    held_chunk_starts: Vec<HeldChunkStart>,
     deadline: Option<Instant>,
 }
 
 impl SynchronizedOutput {
+    /// Hold or release `normalized_input_bytes`, one chunk read at
+    /// `read_instant`. `release_bytes` takes each released run of bytes with
+    /// the instant its chunk was read: held bytes keep the read instant of the
+    /// chunk that brought them.
     fn process_normalized_bytes<F>(
         &mut self,
         normalized_input_bytes: &[u8],
         synchronized_controls: &[(usize, SynchronizedControl)],
-        monotonic_timestamp: Instant,
+        read_instant: Instant,
         mut release_bytes: F,
     ) -> bool
     where
-        F: FnMut(&[u8]),
+        F: FnMut(&[u8], Instant),
     {
         let mut has_released_bytes = if self
             .deadline
-            .is_some_and(|deadline| monotonic_timestamp >= deadline)
+            .is_some_and(|deadline| read_instant >= deadline)
         {
             self.release_buffered_bytes(&mut release_bytes)
         } else {
@@ -232,26 +377,30 @@ impl SynchronizedOutput {
                             ))
                     })
                 else {
-                    release_bytes(&normalized_input_bytes[input_byte_index..]);
+                    release_bytes(&normalized_input_bytes[input_byte_index..], read_instant);
                     return has_released_bytes || input_byte_index < normalized_input_bytes.len();
                 };
                 let held_byte_count = BEGIN_SYNCHRONIZED_OUTPUT_BYTES
                     .len()
                     .min(control_end_index - input_byte_index);
                 let direct_release_end_index = control_end_index - held_byte_count;
-                release_bytes(&normalized_input_bytes[input_byte_index..direct_release_end_index]);
+                release_bytes(
+                    &normalized_input_bytes[input_byte_index..direct_release_end_index],
+                    read_instant,
+                );
                 has_released_bytes |= input_byte_index < direct_release_end_index;
                 if self.buffered_bytes.try_reserve(held_byte_count).is_err() {
                     release_bytes(
                         &normalized_input_bytes[direct_release_end_index..control_end_index],
+                        read_instant,
                     );
                     has_released_bytes = true;
                 } else {
-                    self.buffered_bytes.extend_from_slice(
+                    self.hold_bytes(
                         &normalized_input_bytes[direct_release_end_index..control_end_index],
+                        read_instant,
                     );
-                    self.deadline =
-                        Some(monotonic_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
+                    self.deadline = Some(read_instant + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
                 }
                 input_byte_index = control_end_index;
                 next_control_index = control_index + 1;
@@ -268,8 +417,10 @@ impl SynchronizedOutput {
             }
             let buffered_byte_count = self.buffered_bytes.len();
             let input_end_index = input_byte_index + read_byte_count;
-            self.buffered_bytes
-                .extend_from_slice(&normalized_input_bytes[input_byte_index..input_end_index]);
+            self.hold_bytes(
+                &normalized_input_bytes[input_byte_index..input_end_index],
+                read_instant,
+            );
             let mut last_begin_index = None;
             let mut last_end_index = None;
             while let Some((control_end_index, control)) =
@@ -293,7 +444,7 @@ impl SynchronizedOutput {
             self.apply_buffered_controls(
                 last_begin_index,
                 last_end_index,
-                monotonic_timestamp,
+                read_instant,
                 &mut release_bytes,
                 &mut has_released_bytes,
             );
@@ -312,39 +463,101 @@ impl SynchronizedOutput {
         &mut self,
         last_begin_index: Option<usize>,
         last_end_index: Option<usize>,
-        monotonic_timestamp: Instant,
+        read_instant: Instant,
         release_bytes: &mut F,
         has_released_bytes: &mut bool,
     ) where
-        F: FnMut(&[u8]),
+        F: FnMut(&[u8], Instant),
     {
         let Some(end_index) = last_end_index else {
             if last_begin_index.is_some() {
-                self.deadline = Some(monotonic_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
+                self.deadline = Some(read_instant + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
             }
             return;
         };
         if let Some(begin_index) = last_begin_index.filter(|begin_index| *begin_index > end_index) {
             let retained_bytes = self.buffered_bytes.split_off(begin_index);
             let complete_bytes = mem::replace(&mut self.buffered_bytes, retained_bytes);
-            release_bytes(&complete_bytes);
+            let complete_chunk_starts = self.split_held_chunk_starts(begin_index);
+            release_held_bytes(&complete_bytes, &complete_chunk_starts, release_bytes);
             *has_released_bytes = true;
-            self.deadline = Some(monotonic_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
+            self.deadline = Some(read_instant + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
         } else {
             *has_released_bytes |= self.release_buffered_bytes(release_bytes);
         }
     }
 
+    /// Append `held_bytes`, from the chunk read at `read_instant`, to the held
+    /// bytes. A chunk read at another instant than the last held chunk starts a
+    /// new [`HeldChunkStart`]. No bytes change nothing.
+    fn hold_bytes(&mut self, held_bytes: &[u8], read_instant: Instant) {
+        if held_bytes.is_empty() {
+            return;
+        }
+        let is_new_chunk = self
+            .held_chunk_starts
+            .last()
+            .is_none_or(|held_chunk_start| held_chunk_start.read_instant != read_instant);
+        if is_new_chunk {
+            self.held_chunk_starts.push(HeldChunkStart {
+                first_byte_index: self.buffered_bytes.len(),
+                read_instant,
+            });
+        }
+        self.buffered_bytes.extend_from_slice(held_bytes);
+    }
+
+    /// Split the chunk starts at `split_byte_index`: hand back the starts of the
+    /// bytes before it, and keep the starts of the bytes from it on, each index
+    /// lowered by `split_byte_index`. The chunk that holds the byte at
+    /// `split_byte_index` starts both parts.
+    ///
+    /// Example: starts `[0 at t1, 10 at t2]` split at `4` give `[0 at t1]` and
+    /// keep `[0 at t1, 6 at t2]`.
+    fn split_held_chunk_starts(&mut self, split_byte_index: usize) -> Vec<HeldChunkStart> {
+        let kept_start_position = self.held_chunk_starts.partition_point(|held_chunk_start| {
+            held_chunk_start.first_byte_index <= split_byte_index
+        });
+        let mut kept_chunk_starts =
+            Vec::with_capacity(self.held_chunk_starts.len() - kept_start_position + 1);
+        if let Some(split_chunk_start) = kept_start_position
+            .checked_sub(1)
+            .and_then(|split_chunk_position| self.held_chunk_starts.get(split_chunk_position))
+        {
+            kept_chunk_starts.push(HeldChunkStart {
+                first_byte_index: 0,
+                read_instant: split_chunk_start.read_instant,
+            });
+        }
+        kept_chunk_starts.extend(self.held_chunk_starts[kept_start_position..].iter().map(
+            |held_chunk_start| HeldChunkStart {
+                first_byte_index: held_chunk_start.first_byte_index - split_byte_index,
+                read_instant: held_chunk_start.read_instant,
+            },
+        ));
+        let mut released_chunk_starts =
+            mem::replace(&mut self.held_chunk_starts, kept_chunk_starts);
+        released_chunk_starts.truncate(kept_start_position);
+        if released_chunk_starts
+            .last()
+            .is_some_and(|held_chunk_start| held_chunk_start.first_byte_index == split_byte_index)
+        {
+            released_chunk_starts.pop();
+        }
+        released_chunk_starts
+    }
+
     fn release_buffered_bytes<F>(&mut self, release_bytes: &mut F) -> bool
     where
-        F: FnMut(&[u8]),
+        F: FnMut(&[u8], Instant),
     {
         self.deadline = None;
         if self.buffered_bytes.is_empty() {
             return false;
         }
         let released_bytes = mem::take(&mut self.buffered_bytes);
-        release_bytes(&released_bytes);
+        let released_chunk_starts = mem::take(&mut self.held_chunk_starts);
+        release_held_bytes(&released_bytes, &released_chunk_starts, release_bytes);
         true
     }
 
@@ -354,7 +567,7 @@ impl SynchronizedOutput {
         mut release_bytes: F,
     ) -> bool
     where
-        F: FnMut(&[u8]),
+        F: FnMut(&[u8], Instant),
     {
         if self
             .deadline
@@ -379,9 +592,24 @@ impl SynchronizedOutput {
         if self.deadline.is_none() && !terminal_input.is_transport_required() {
             return None;
         }
+        let held_chunk_read_times = self
+            .held_chunk_starts
+            .iter()
+            .map(|held_chunk_start| {
+                let read_age =
+                    monotonic_timestamp.saturating_duration_since(held_chunk_start.read_instant);
+                HeldChunkReadTime {
+                    first_byte_index: held_chunk_start.first_byte_index,
+                    read_at: wall_clock_timestamp
+                        .checked_sub(read_age)
+                        .unwrap_or(wall_clock_timestamp),
+                }
+            })
+            .collect();
         Some(SynchronizedOutputTransport {
             terminal_input,
             normalized_bytes: self.buffered_bytes.clone(),
+            held_chunk_read_times,
             deadline: self
                 .compute_release_delay(monotonic_timestamp)
                 .map(|delay| wall_clock_timestamp + delay),
@@ -395,6 +623,21 @@ impl SynchronizedOutput {
         wall_clock_timestamp: SystemTime,
     ) {
         self.buffered_bytes = synchronized_output_transport.normalized_bytes;
+        self.held_chunk_starts = synchronized_output_transport
+            .held_chunk_read_times
+            .iter()
+            .map(|held_chunk_read_time| {
+                let read_age = wall_clock_timestamp
+                    .duration_since(held_chunk_read_time.read_at)
+                    .unwrap_or(Duration::ZERO);
+                HeldChunkStart {
+                    first_byte_index: held_chunk_read_time.first_byte_index,
+                    read_instant: monotonic_timestamp
+                        .checked_sub(read_age)
+                        .unwrap_or(monotonic_timestamp),
+                }
+            })
+            .collect();
         self.deadline = synchronized_output_transport.deadline.map(|deadline| {
             let remaining_duration = deadline
                 .duration_since(wall_clock_timestamp)
@@ -402,6 +645,28 @@ impl SynchronizedOutput {
                 .min(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
             monotonic_timestamp + remaining_duration
         });
+    }
+}
+
+/// Hand `held_bytes` to `release_bytes`, one run per entry of
+/// `held_chunk_starts`, each with the read instant of its chunk.
+fn release_held_bytes<F>(
+    held_bytes: &[u8],
+    held_chunk_starts: &[HeldChunkStart],
+    release_bytes: &mut F,
+) where
+    F: FnMut(&[u8], Instant),
+{
+    for (chunk_position, held_chunk_start) in held_chunk_starts.iter().enumerate() {
+        let chunk_end_index = held_chunk_starts
+            .get(chunk_position + 1)
+            .map_or(held_bytes.len(), |next_chunk_start| {
+                next_chunk_start.first_byte_index
+            });
+        release_bytes(
+            &held_bytes[held_chunk_start.first_byte_index..chunk_end_index],
+            held_chunk_start.read_instant,
+        );
     }
 }
 
@@ -819,8 +1084,20 @@ pub struct TerminalAdvance {
     /// the advance read no query.
     pub device_query_replies: Vec<u8>,
     /// The program facts the advance read, in the order the program wrote
-    /// them. Empty when it read none.
-    pub program_facts: Vec<ProgramFact>,
+    /// them, each with the read instant of the chunk that completed it. Empty
+    /// when it read none.
+    pub program_facts: Vec<TimedProgramFact>,
+}
+
+/// A program fact, and the instant koshi read the chunk whose bytes completed
+/// it. A fact in bytes that synchronized output held takes the read instant of
+/// the chunk that brought those bytes, not the instant of their release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimedProgramFact {
+    /// What the program wrote.
+    pub program_fact: ProgramFact,
+    /// The instant koshi read the chunk.
+    pub read_instant: Instant,
 }
 
 /// One pane's emulation engine: the byte decoder and the screen model it
@@ -863,6 +1140,9 @@ pub struct TerminalEngine {
     terminal_input_normalizer: C1InputNormalizer,
     /// Holds complete top-level DEC synchronized-output groups before either parser sees them.
     synchronized_output: SynchronizedOutput,
+    /// The read instant of each program fact the terminal state holds, in the
+    /// same order: as many instants as facts.
+    program_fact_read_instants: Vec<Instant>,
     /// RGBA bytes held by successful image events.
     queued_graphics_rgba_byte_count: usize,
     /// Number of events dropped after the bounded graphics queue filled.
@@ -875,10 +1155,13 @@ pub struct TerminalEngine {
     /// Number of parser advances that changed the reported working directory
     /// ([`TerminalState::take_working_directory_change`]).
     working_directory_change_count: u64,
-    /// Reads the `OSC 52` clipboard copies in the bytes `parser` reads. `None`
-    /// until [`start_reading_clipboard_copies`](Self::start_reading_clipboard_copies)
-    /// runs: the engine then reads no copy and spends no work on one.
-    clipboard_copy_parser: Option<ClipboardCopyParser>,
+    /// Reads the bytes `parser` reads, before `parser` reads them, and keeps
+    /// the whole text of each OSC whose command is an
+    /// [`OscTextCommand`](crate::state::OscTextCommand), and the `OSC 52`
+    /// clipboard copies. It keeps no copy until
+    /// [`start_reading_clipboard_copies`](Self::start_reading_clipboard_copies)
+    /// runs.
+    osc_reader: OscReader,
 }
 
 impl TerminalEngine {
@@ -908,12 +1191,13 @@ impl TerminalEngine {
             graphics_events: VecDeque::new(),
             terminal_input_normalizer: C1InputNormalizer::default(),
             synchronized_output: SynchronizedOutput::default(),
+            program_fact_read_instants: Vec::new(),
             queued_graphics_rgba_byte_count: 0,
             dropped_graphics_event_count: 0,
             dropped_graphics_error_count: 0,
             title_change_count: 0,
             working_directory_change_count: 0,
-            clipboard_copy_parser: None,
+            osc_reader: OscReader::default(),
         }
     }
 
@@ -937,19 +1221,21 @@ impl TerminalEngine {
         }
     }
 
-    /// Feed one chunk of PTY output at `monotonic_timestamp` through the parsers,
-    /// and take what the advance produced: the device query replies and the
-    /// program facts, in the order the program wrote them. Returns `None`, and
-    /// takes nothing, when no byte reached the parsers, as while synchronized
-    /// output (`CSI ? 2026 h`) holds the chunk.
+    /// Feed one chunk of PTY output, read at `read_instant`, through the
+    /// parsers, and take what the advance produced: the device query replies
+    /// and the program facts, in the order the program wrote them. Returns
+    /// `None`, and takes nothing, when no byte reached the parsers, as while
+    /// synchronized output (`CSI ? 2026 h`) holds the chunk. A synchronized
+    /// output group's deadline counts from `read_instant`.
     ///
-    /// `ESC ] 133 ; C`, then `BEL`, then `ESC ] 133 ; D ; 137` gives
-    /// `program_facts: [CommandStarted, Bell, CommandFinished { exit_code: Some(137) }]`.
+    /// `ESC ] 133 ; C`, then `BEL`, then `ESC ] 133 ; D ; 137` read at `t`
+    /// gives `program_facts` `[CommandStarted, Bell, CommandFinished { exit_code:
+    /// Some(137) }]`, each at `t`.
     #[must_use = "undelivered replies or program facts are lost"]
     pub fn process_pty_output_at(
         &mut self,
         pty_output_bytes: &[u8],
-        monotonic_timestamp: Instant,
+        read_instant: Instant,
     ) -> Option<TerminalAdvance> {
         let normalized_terminal_input = self
             .terminal_input_normalizer
@@ -958,19 +1244,41 @@ impl TerminalEngine {
         let has_advanced = synchronized_output.process_normalized_bytes(
             &normalized_terminal_input.normalized_bytes,
             &normalized_terminal_input.synchronized_controls,
-            monotonic_timestamp,
-            |normalized_bytes| self.process_normalized_terminal_bytes(normalized_bytes),
+            read_instant,
+            |normalized_bytes, chunk_read_instant| {
+                self.process_read_terminal_bytes(normalized_bytes, chunk_read_instant);
+            },
         );
         self.synchronized_output = synchronized_output;
         has_advanced.then(|| self.take_terminal_advance())
     }
 
-    /// Take the device query replies and the program facts the state holds.
+    /// Take the device query replies and the program facts the state holds,
+    /// each fact with its read instant.
     fn take_terminal_advance(&mut self) -> TerminalAdvance {
+        let program_facts = self.terminal_state.take_program_facts();
+        let program_fact_read_instants = mem::take(&mut self.program_fact_read_instants);
+        debug_assert_eq!(program_facts.len(), program_fact_read_instants.len());
         TerminalAdvance {
             device_query_replies: self.terminal_state.take_device_query_replies(),
-            program_facts: self.terminal_state.take_program_facts(),
+            program_facts: program_facts
+                .into_iter()
+                .zip(program_fact_read_instants)
+                .map(|(program_fact, read_instant)| TimedProgramFact {
+                    program_fact,
+                    read_instant,
+                })
+                .collect(),
         }
+    }
+
+    /// Feed `normalized_bytes`, from the chunk read at `read_instant`, to the
+    /// parsers, and give each program fact they add `read_instant`.
+    fn process_read_terminal_bytes(&mut self, normalized_bytes: &[u8], read_instant: Instant) {
+        self.process_normalized_terminal_bytes(normalized_bytes);
+        let program_fact_count = self.terminal_state.get_program_fact_count();
+        self.program_fact_read_instants
+            .resize(program_fact_count, read_instant);
     }
 
     fn process_normalized_terminal_bytes(&mut self, normalized_bytes: &[u8]) {
@@ -980,9 +1288,9 @@ impl TerminalEngine {
         let terminal_input =
             remove_terminal_inert_bytes(normalized_bytes, &graphics_advance.terminal_inert_ranges);
         let terminal_bytes = terminal_input.as_ref();
-        if let Some(clipboard_copy_parser) = &mut self.clipboard_copy_parser {
-            clipboard_copy_parser.process_terminal_bytes(terminal_bytes);
-        }
+        self.osc_reader.process_terminal_bytes(terminal_bytes);
+        self.terminal_state
+            .queue_osc_texts(self.osc_reader.take_osc_texts());
         let mut parser_byte_index = 0;
         for (graphics_byte_offset, graphics_event) in graphics_advance.completed_graphics_events {
             let graphics_event_end_index = compute_terminal_byte_offset_without_inert_ranges(
@@ -1018,14 +1326,15 @@ impl TerminalEngine {
         self.capture_undecoded_terminal_bytes(terminal_bytes);
     }
 
-    /// An engine wrapped around an existing `terminal_state`, with a parser fed
-    /// `terminal_undecoded_bytes` — the bytes that put a parser where the previous engine's parser
-    /// stood, from [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes).
+    /// An engine wrapped around an existing `terminal_state`, with the VTE
+    /// parser and the OSC reader fed `terminal_undecoded_bytes` — the bytes that
+    /// put a parser where the previous engine's parser stood, from
+    /// [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes).
     ///
     /// The replay reaches no screen: every action those bytes dispatch is
-    /// dropped, and `terminal_state` stays as passed. The replay leaves the parser at
-    /// the previous parser's position, and the rest of a sequence that was cut
-    /// in half completes here. Pass an empty slice for a state that was not
+    /// dropped, and `terminal_state` stays as passed. The replay leaves the parser
+    /// and the reader at the previous parser's position, and the rest of a
+    /// sequence that was cut in half completes here. Pass an empty slice for a state that was not
     /// carried out of a running engine.
     pub fn from_terminal_state(
         terminal_state: TerminalState,
@@ -1046,8 +1355,8 @@ impl TerminalEngine {
     /// from the previous engine restored, at `monotonic_timestamp` and
     /// `wall_clock_timestamp`:
     ///
-    /// - the VTE parser is fed `terminal_undecoded_bytes`, as
-    ///   [`from_terminal_state`](Self::from_terminal_state) feeds them;
+    /// - the VTE parser and the OSC reader are fed `terminal_undecoded_bytes`,
+    ///   as [`from_terminal_state`](Self::from_terminal_state) feeds them;
     /// - the graphics parser is rebuilt from `graphics_transport_state`;
     /// - each of `graphics_events` is queued again, except a
     ///   `GraphicsError::QueueFull`, whose `dropped_event_count` is added to the
@@ -1082,6 +1391,9 @@ impl TerminalEngine {
         terminal_engine
             .parser
             .advance(&mut NoScreen, &normalized_terminal_input_bytes);
+        terminal_engine
+            .osc_reader
+            .process_terminal_bytes(&normalized_terminal_input_bytes);
         terminal_engine.capture_undecoded_terminal_bytes(&normalized_terminal_input_bytes);
         for graphics_event in graphics_events {
             if let Err(GraphicsError::QueueFull {
@@ -1259,37 +1571,36 @@ impl TerminalEngine {
         monotonic_timestamp: Instant,
     ) -> Option<TerminalAdvance> {
         let mut synchronized_output = mem::take(&mut self.synchronized_output);
-        let has_advanced = synchronized_output
-            .release_expired_bytes(monotonic_timestamp, |normalized_bytes| {
-                self.process_normalized_terminal_bytes(normalized_bytes)
-            });
+        let has_advanced = synchronized_output.release_expired_bytes(
+            monotonic_timestamp,
+            |normalized_bytes, chunk_read_instant| {
+                self.process_read_terminal_bytes(normalized_bytes, chunk_read_instant);
+            },
+        );
         self.synchronized_output = synchronized_output;
         has_advanced.then(|| self.take_terminal_advance())
     }
 
     /// Start reading the `OSC 52` clipboard copies in this pane's output, each
     /// of at most `maximum_copy_byte_count` decoded bytes, by the rules of the
-    /// module `clipboard_copy`. A reader already running is replaced.
+    /// module `clipboard_copy`. The OSC reader is replaced by a new one that
+    /// keeps copies.
     ///
     /// The new reader reads [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes)
-    /// first. A copy that a process-image swap cut within its first 64 KiB
-    /// completes in the next chunk. Example:
-    /// the previous engine stopped after `ESC ] 52 ; c ; aG`, and the chunk
-    /// `k= BEL` gives the copy `hi`.
+    /// first, as the VTE parser of an engine built from them does. A copy or an
+    /// OSC text that a process-image swap cut within its first 64 KiB completes
+    /// in the next chunk. Example: the previous engine stopped after
+    /// `ESC ] 52 ; c ; aG`, and the chunk `k= BEL` gives the copy `hi`.
     pub fn start_reading_clipboard_copies(&mut self, maximum_copy_byte_count: usize) {
-        let mut clipboard_copy_parser =
-            ClipboardCopyParser::with_maximum_copy_byte_count(maximum_copy_byte_count);
-        clipboard_copy_parser.process_terminal_bytes(&self.undecoded_terminal_bytes);
-        self.clipboard_copy_parser = Some(clipboard_copy_parser);
+        let mut osc_reader = OscReader::with_maximum_copy_byte_count(maximum_copy_byte_count);
+        osc_reader.process_terminal_bytes(&self.undecoded_terminal_bytes);
+        self.osc_reader = osc_reader;
     }
 
     /// Hand back the clipboard copies finished since the last call, in the
     /// order their sequences ended. Empty when the engine reads no copy.
     pub fn take_clipboard_copies(&mut self) -> Vec<ClipboardCopy> {
-        match &mut self.clipboard_copy_parser {
-            Some(clipboard_copy_parser) => clipboard_copy_parser.take_clipboard_copies(),
-            None => Vec::new(),
-        }
+        self.osc_reader.take_clipboard_copies()
     }
 
     /// The screen model, for reads (rendering, cursor and mode queries).

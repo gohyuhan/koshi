@@ -6,7 +6,7 @@
 use super::*;
 
 use std::sync::mpsc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::command::GridPosition;
@@ -355,7 +355,7 @@ fn build_snapshot_carries_the_cursor_style_the_pane_asked_for() {
         }),
     );
 
-    server.handle_pty_output(pane_id, b"\x1b[5 q", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"\x1b[5 q", SystemTime::UNIX_EPOCH, Instant::now());
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
         render_snapshot.pane_snapshots[0].cursor_snapshot.shape,
@@ -368,7 +368,7 @@ fn build_snapshot_carries_the_cursor_style_the_pane_asked_for() {
     );
 
     // Leaving insert mode: back to a steady block.
-    server.handle_pty_output(pane_id, b"\x1b[2 q", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"\x1b[2 q", SystemTime::UNIX_EPOCH, Instant::now());
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
         render_snapshot.pane_snapshots[0].cursor_snapshot.shape,
@@ -382,7 +382,7 @@ fn build_snapshot_carries_the_cursor_style_the_pane_asked_for() {
 
     // vim exiting: `CSI 0 SP q` resets the cursor style, and the pane asks for
     // no cursor shape.
-    server.handle_pty_output(pane_id, b"\x1b[0 q", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"\x1b[0 q", SystemTime::UNIX_EPOCH, Instant::now());
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     assert_eq!(
         render_snapshot.pane_snapshots[0].cursor_snapshot.shape,
@@ -1046,7 +1046,7 @@ fn snapshot_follows_live_output_when_the_client_has_not_scrolled() {
             row_count: 1,
         }),
     );
-    server.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH); // three retained lines
+    server.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH, Instant::now()); // three retained lines
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     let pane_snapshot = render_snapshot.find_pane_snapshot(pane_id).expect("pane");
@@ -1076,7 +1076,7 @@ fn snapshot_carries_the_clients_scrolled_back_offset() {
             row_count: 1,
         }),
     );
-    server.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH, Instant::now());
     server.scroll_up(client_id, pane_id, 2);
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
@@ -1108,9 +1108,14 @@ fn snapshot_reports_a_live_offset_for_a_scrolled_client_on_the_alternate_screen(
             row_count: 1,
         }),
     );
-    server.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH, Instant::now());
     server.scroll_up(client_id, pane_id, 2);
-    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH); // enter the alternate screen
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    ); // enter the alternate screen
 
     let render_snapshot = server.build_snapshot(client_id).expect("snapshot");
     let pane_snapshot = render_snapshot.find_pane_snapshot(pane_id).expect("pane");

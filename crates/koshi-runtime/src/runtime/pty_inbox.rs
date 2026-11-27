@@ -57,9 +57,11 @@ pub struct PaneOutputQueue {
 pub(crate) struct PaneOutputChunk {
     /// The bytes the read gave, never empty.
     pub(crate) output_bytes: Vec<u8>,
-    /// The wall time at which the sink queued the bytes, right after the
-    /// read.
+    /// The wall time at which the sink took the bytes, right after the read.
     pub(crate) read_at: SystemTime,
+    /// The instant at which the sink took the bytes, the same moment as
+    /// `read_at`.
+    pub(crate) read_instant: Instant,
 }
 
 /// What one pane's output queue holds.
@@ -250,9 +252,9 @@ impl InboxSink {
 
 impl PtySink for InboxSink {
     /// Queue one chunk of child output on `pane_id`'s queue, stamped with the
-    /// wall time at which it is queued. While the queue holds
-    /// [`PANE_OUTPUT_QUEUE_BYTE_LIMIT`] bytes or more, a waiting sink waits
-    /// first, and the stamp is taken once the wait ends. Returns `false` when
+    /// wall time and the instant at which the sink takes it. While the queue
+    /// holds [`PANE_OUTPUT_QUEUE_BYTE_LIMIT`] bytes or more, a waiting sink
+    /// waits after the stamp, before it queues the chunk. Returns `false` when
     /// the queue this push found closes before the chunk is queued, as while
     /// the push waits for room, or when the inbox is closed, which tells the
     /// reader to stop reading this pane. A push that starts after the pane's
@@ -262,6 +264,8 @@ impl PtySink for InboxSink {
         if output_bytes.is_empty() {
             return true;
         }
+        let read_at = SystemTime::now();
+        let read_instant = Instant::now();
         let pane_output_queue = self.find_or_start_output_queue(pane_id);
         let should_send_wake = {
             let mut queue_state = pane_output_queue
@@ -283,7 +287,8 @@ impl PtySink for InboxSink {
             queue_state.queued_byte_count += output_bytes.len();
             queue_state.output_chunks.push_back(PaneOutputChunk {
                 output_bytes,
-                read_at: SystemTime::now(),
+                read_at,
+                read_instant,
             });
             !std::mem::replace(&mut queue_state.is_wake_sent, true)
         };
@@ -345,7 +350,12 @@ impl Server {
         let pane_output_queue = Arc::clone(self.pane_output_queue_by_pane_id.get(&pane_id)?);
         let output_turn = pane_output_queue.take_output_turn();
         for output_chunk in &output_turn.output_chunks {
-            self.handle_pty_output(pane_id, &output_chunk.output_bytes, output_chunk.read_at);
+            self.handle_pty_output(
+                pane_id,
+                &output_chunk.output_bytes,
+                output_chunk.read_at,
+                output_chunk.read_instant,
+            );
         }
         let parsed_byte_count: usize = output_turn
             .output_chunks

@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::num::{NonZeroU16, NonZeroU32};
 use std::path::Path;
 use std::sync::{mpsc, Arc};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::runtime::command::tests::{
     attach_client_to_only_tab, build_floating_new_pane_args, create_floating_pane,
@@ -1692,6 +1692,7 @@ fn build_populated_server() -> PopulatedServer {
             pane_id,
             format!("pane {pane_index} output").as_bytes(),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
     }
 
@@ -1880,9 +1881,12 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
     let waiting_pane_id = list_session_pane_ids(&populated_server.server, session_id)[0];
     let waiting_raised_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
-    populated_server
-        .server
-        .handle_pty_output(waiting_pane_id, b"\x07", waiting_raised_at);
+    populated_server.server.handle_pty_output(
+        waiting_pane_id,
+        b"\x07",
+        waiting_raised_at,
+        Instant::now(),
+    );
     let expected_tabs = populated_server.server.session_by_id[&session_id]
         .tabs
         .clone();
@@ -2120,11 +2124,13 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
         pinned_pane_id,
         b"pinned output",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     populated_server.server.handle_pty_output(
         minimized_pane_id,
         b"minimized output",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let expected_floating_panes = populated_server.server.session_by_id[&session_id]
         .floating_set
@@ -2294,6 +2300,7 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
         reporting_pane_id,
         b"\x1b]7;file://host/home/user/Proj",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
 
     let (resume_header, resume_body) = populated_server
@@ -2334,7 +2341,12 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
         0,
     );
 
-    resumed_server.handle_pty_output(reporting_pane_id, b"ects/koshi\x07", SystemTime::UNIX_EPOCH);
+    resumed_server.handle_pty_output(
+        reporting_pane_id,
+        b"ects/koshi\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let terminal_state =
         resumed_server.terminal_engine_by_pane_id[&reporting_pane_id].get_terminal_state();
@@ -3231,6 +3243,7 @@ fn a_blank_screen_after_a_restart_keeps_the_scrollback_limit_the_startup_config_
         blank_pane_id,
         &scrolled_output_bytes,
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
 
     assert_eq!(

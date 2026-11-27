@@ -12,32 +12,35 @@ fn build_notify(title: Option<&str>, body: &str, notification_id: Option<&str>) 
 
 fn apply_osc99_payloads(
     open_osc99_notification: &mut Option<Osc99Notification>,
-    metadata: &[u8],
-    payload: &[u8],
+    osc99_metadata_bytes: &[u8],
+    notification_payload_bytes: &[u8],
 ) -> Option<ProgramFact> {
-    apply_osc99_sequence(open_osc99_notification, &[b"99", metadata, payload])
+    let mut argument_bytes = osc99_metadata_bytes.to_vec();
+    argument_bytes.push(b';');
+    argument_bytes.extend_from_slice(notification_payload_bytes);
+    apply_osc99_sequence(open_osc99_notification, &argument_bytes)
 }
 
 #[test]
 fn osc9_text_is_a_notification_body_with_its_semicolons_kept() {
     assert_eq!(
-        parse_osc9_notification(&[b"9", b"hello"]),
+        parse_osc9_notification(b"hello"),
         Some(build_notify(None, "hello", None))
     );
     assert_eq!(
-        parse_osc9_notification(&[b"9", b"a", b"b"]),
+        parse_osc9_notification(b"a;b"),
         Some(build_notify(None, "a;b", None))
     );
     assert_eq!(
-        parse_osc9_notification(&[b"9", b""]),
+        parse_osc9_notification(b""),
         Some(build_notify(None, "", None))
     );
     assert_eq!(
-        parse_osc9_notification(&[b"9", b"13"]),
+        parse_osc9_notification(b"13"),
         Some(build_notify(None, "13", None))
     );
     assert_eq!(
-        parse_osc9_notification(&[b"9", b"04"]),
+        parse_osc9_notification(b"04"),
         Some(build_notify(None, "04", None))
     );
 }
@@ -47,67 +50,57 @@ fn osc9_conemu_subcommands_one_to_twelve_are_not_notifications() {
     for subcommand_number in 1..=12 {
         let subcommand_text = subcommand_number.to_string();
         assert_eq!(
-            parse_osc9_notification(&[b"9", subcommand_text.as_bytes()]),
+            parse_osc9_notification(subcommand_text.as_bytes()),
             None,
             "subcommand {subcommand_number}"
         );
     }
-    assert_eq!(parse_osc9_notification(&[b"9", b"4", b"1", b"40"]), None);
+    assert_eq!(parse_osc9_notification(b"4;1;40"), None);
     assert_eq!(
-        parse_osc9_notification(&[b"9", b"9", b"\"C:\\Users\\user\\project\""]),
+        parse_osc9_notification(b"9;\"C:\\Users\\user\\project\""),
         None
     );
-    assert_eq!(parse_osc9_notification(&[b"9"]), None);
 }
 
 #[test]
 fn osc777_notify_splits_the_title_from_the_body() {
     assert_eq!(
-        parse_osc777_notification(&[b"777", b"notify", b"Build", b"done", b"3 s"]),
+        parse_osc777_notification(b"notify;Build;done;3 s"),
         Some(build_notify(Some("Build"), "done;3 s", None))
     );
     assert_eq!(
-        parse_osc777_notification(&[b"777", b"notify", b"Build"]),
+        parse_osc777_notification(b"notify;Build"),
         Some(build_notify(Some("Build"), "", None))
     );
     assert_eq!(
-        parse_osc777_notification(&[b"777", b"notify", b"", b"body"]),
+        parse_osc777_notification(b"notify;;body"),
         Some(build_notify(None, "body", None))
     );
     assert_eq!(
-        parse_osc777_notification(&[b"777", b"notify"]),
+        parse_osc777_notification(b"notify"),
         Some(build_notify(None, "", None))
     );
 }
 
 #[test]
 fn osc777_without_the_notify_subcommand_is_not_a_notification() {
-    assert_eq!(
-        parse_osc777_notification(&[b"777", b"preexec", b"ls"]),
-        None
-    );
-    assert_eq!(parse_osc777_notification(&[b"777", b"Notify", b"T"]), None);
-    assert_eq!(parse_osc777_notification(&[b"777"]), None);
+    assert_eq!(parse_osc777_notification(b"preexec;ls"), None);
+    assert_eq!(parse_osc777_notification(b"Notify;T"), None);
 }
 
 #[test]
 fn notification_text_is_sanitized_and_cut_to_512_bytes() {
     let long_body = "b".repeat(5000);
     assert_eq!(
-        parse_osc777_notification(&[
-            b"777",
-            b"notify",
-            "Build\u{202E}gpj".as_bytes(),
-            long_body.as_bytes()
-        ]),
+        parse_osc777_notification(format!("notify;Build\u{202E}gpj;{long_body}").as_bytes()),
         Some(build_notify(Some("Buildgpj"), &"b".repeat(512), None))
     );
     assert_eq!(
-        parse_osc777_notification(&[b"777", b"notify", "\u{202E}".as_bytes(), b"x"]),
+        parse_osc777_notification("notify;\u{202E};x".as_bytes()),
         Some(build_notify(None, "x", None))
     );
     assert_eq!(
-        parse_osc9_notification(&[b"9", b"a\xffb"]),
+        parse_osc9_notification(b"a\xffb"),
         Some(build_notify(None, "a\u{FFFD}b", None))
     );
 }
@@ -223,7 +216,7 @@ fn osc99_queries_return_nothing_and_leave_the_open_notification() {
         None
     );
     assert_eq!(
-        apply_osc99_sequence(&mut open_osc99_notification, &[b"99", b"i=1:p=?"]),
+        apply_osc99_sequence(&mut open_osc99_notification, b"i=1:p=?"),
         None
     );
 
@@ -246,7 +239,7 @@ fn osc99_close_names_its_id_and_leaves_the_open_notification() {
         })
     );
     assert_eq!(
-        apply_osc99_sequence(&mut open_osc99_notification, &[b"99", b"i=1:p=close"]),
+        apply_osc99_sequence(&mut open_osc99_notification, b"i=1:p=close"),
         Some(ProgramFact::NotificationWithdrawn {
             notification_id: "1".to_string()
         })
@@ -308,7 +301,7 @@ fn osc99_with_no_title_and_no_body_is_dropped() {
         None
     );
     assert_eq!(
-        apply_osc99_sequence(&mut open_osc99_notification, &[b"99"]),
+        apply_osc99_sequence(&mut open_osc99_notification, b""),
         None
     );
     assert_eq!(open_osc99_notification, None);

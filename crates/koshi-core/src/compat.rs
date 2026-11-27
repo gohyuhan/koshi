@@ -326,7 +326,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// `attention`, what the pane last asked a person to look at and since when,
 /// and a format 5 pane record takes `null`. A pane's terminal state holds no
 /// device query reply and no shell-integration fact: a pane of format 5 or
-/// older drops the ones it held. A session
+/// older drops the ones it held. A pane's open synchronized-output group holds
+/// `held_chunk_read_times`, the wall time koshi read each chunk among its
+/// bytes. A group of format 5 or older takes one read time for all its bytes:
+/// its deadline less 150 ms. A session
 /// of format 5 keeps its clients, and the body keeps its saved views and resume-token
 /// hashes. Format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views

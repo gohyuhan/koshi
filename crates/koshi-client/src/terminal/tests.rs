@@ -810,9 +810,19 @@ fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
         });
         let mut output_bytes = b"A\x1b[1;1H".to_vec();
         output_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
-        server.handle_pty_output(pane_id, &output_bytes, SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(
+            pane_id,
+            &output_bytes,
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        server.handle_pty_output(pane_id, b"\x1b[1;1HB", SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(
+            pane_id,
+            b"\x1b[1;1HB",
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
         let changed_render_snapshot = build_render_snapshot(&server, client_id);
         let mut overwritten_image_pixels = build_opaque_image_pixels();
         if image_protocol != GraphicsProtocol::Kitty {
@@ -846,9 +856,19 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
         });
         let mut image_input_bytes = b"\x1b[1;1H".to_vec();
         image_input_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
-        server.handle_pty_output(pane_id, &image_input_bytes, SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(
+            pane_id,
+            &image_input_bytes,
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        server.handle_pty_output(pane_id, b"\x1b[1;1HB", SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(
+            pane_id,
+            b"\x1b[1;1HB",
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
         let repainted_render_snapshot = build_render_snapshot(&server, client_id);
         let client = build_launch_client(client_id);
 
@@ -977,7 +997,12 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
         client_id,
         cell_size: PixelCellSize::from_pixel_dimensions(1, 1).unwrap(),
     });
-    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let kitty_upload_text = String::from_utf8(build_opaque_image_input(GraphicsProtocol::Kitty))
         .unwrap()
         .replace("c=4,r=4,C=1", "c=4,C=1,y=3,h=1,r=1");
@@ -1035,6 +1060,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
             pane_id,
             &terminal_input_text.into_bytes(),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
         render_snapshots.push(build_render_snapshot(&server, client_id));
         expected_frame_pixel_rows.push((
@@ -1101,13 +1127,14 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             pane_id,
             &build_two_image_input(image_protocol),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
         let mut render_snapshots = vec![build_render_snapshot(&server, client_id)];
 
-        server.handle_pty_output(pane_id, b"\x1b[3S", SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(pane_id, b"\x1b[3S", SystemTime::UNIX_EPOCH, Instant::now());
         render_snapshots.push(build_render_snapshot(&server, client_id));
 
-        server.handle_pty_output(pane_id, b"\x1b[5S", SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(pane_id, b"\x1b[5S", SystemTime::UNIX_EPOCH, Instant::now());
         render_snapshots.push(build_render_snapshot(&server, client_id));
 
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
@@ -1186,6 +1213,7 @@ fn a_native_paint_snapshots_only_the_cells_under_its_images() {
         pane_id,
         &build_opaque_image_input(GraphicsProtocol::Iterm2),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_launch_client(client_id);
@@ -1279,6 +1307,7 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
         pane_id,
         &build_opaque_image_input(GraphicsProtocol::Kitty),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_launch_client(client_id);
@@ -1525,6 +1554,7 @@ fn assert_partial_native_frame_write_recovers(
         pane_id,
         &build_opaque_image_input(GraphicsProtocol::Kitty),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_launch_client(client_id);
@@ -1676,6 +1706,7 @@ fn a_text_frame_writes_at_once_and_its_image_follows_inside_one_synchronized_upd
             pane_id,
             &build_opaque_image_input(GraphicsProtocol::Kitty),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
         let mut render_snapshot = build_render_snapshot(&server, client_id);
         render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
@@ -1837,9 +1868,10 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
             pane_id,
             &build_opaque_image_input(image_protocol),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        server.handle_pty_output(pane_id, b"\x1b[3S", SystemTime::UNIX_EPOCH);
+        server.handle_pty_output(pane_id, b"\x1b[3S", SystemTime::UNIX_EPOCH, Instant::now());
         let cropped_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
             client_id,
@@ -2214,7 +2246,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
 fn pty_output_is_painted_to_the_screen() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
 
-    server.handle_pty_output(pane_id, b"hello", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"hello", SystemTime::UNIX_EPOCH, Instant::now());
 
     let client = build_launch_client(client_id);
     let mut paint_driver = build_test_paint_driver(80, 24);
@@ -2248,7 +2280,7 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
 
     // The pane asks for a steady bar via DECSCUSR (`CSI 6 SP q`); the first
     // painting sees it differ from the starting `None` and records the new style.
-    server.handle_pty_output(pane_id, b"\x1b[6 q", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"\x1b[6 q", SystemTime::UNIX_EPOCH, Instant::now());
     let client = build_launch_client(client_id);
     let mut last_cursor_style = None;
     let render_snapshot = build_render_snapshot(&server, client_id);
@@ -3811,6 +3843,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
         pane_id,
         b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\",
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let client = build_launch_client(client_id);
     let render_snapshot = build_render_snapshot(&server, client_id);
@@ -5156,6 +5189,7 @@ fn seeded_frames_that_draw_their_changed_rows_write_the_bytes_of_frames_that_dra
                         first_pane_id,
                         &build_seeded_print_bytes(&mut seeded_sequence, 40),
                         SystemTime::UNIX_EPOCH,
+                        Instant::now(),
                     );
                 }
                 SeededPaintStep::Print => {
@@ -5173,6 +5207,7 @@ fn seeded_frames_that_draw_their_changed_rows_write_the_bytes_of_frames_that_dra
                         printed_pane_id,
                         &build_seeded_print_bytes(&mut seeded_sequence, line_count),
                         SystemTime::UNIX_EPOCH,
+                        Instant::now(),
                     );
                     print_frame_count_after_frame_zero += 1;
                 }
@@ -5332,7 +5367,12 @@ fn a_text_print_beside_a_native_image_draws_only_its_row_in_every_protocol() {
             for (stage_index, (stage_output_bytes, expected_drawn_rows)) in
                 stages.into_iter().enumerate()
             {
-                server.handle_pty_output(pane_id, stage_output_bytes, SystemTime::UNIX_EPOCH);
+                server.handle_pty_output(
+                    pane_id,
+                    stage_output_bytes,
+                    SystemTime::UNIX_EPOCH,
+                    Instant::now(),
+                );
                 let render_snapshot = build_render_snapshot(&server, client_id);
                 let stage_check_name = format!("{check_name}, stage {stage_index}");
                 let settle_deadline = Instant::now() + Duration::from_secs(5);
@@ -5887,6 +5927,7 @@ fn a_host_resize_writes_every_iterm_and_sixel_image_again_in_the_frame_that_eras
             pane_id,
             &build_opaque_image_input(GraphicsProtocol::Kitty),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
         let mut client = build_launch_client(client_id);
         let mut outer_terminal = EmulatedOuterTerminal::from_graphics_support(graphics_support);
@@ -6039,10 +6080,20 @@ fn apply_image_session_change(
             }),
         ),
         ImageSessionChange::EnterAlternateScreen => {
-            server.handle_pty_output(image_pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
+            server.handle_pty_output(
+                image_pane_id,
+                b"\x1b[?1049h",
+                SystemTime::UNIX_EPOCH,
+                Instant::now(),
+            );
         }
         ImageSessionChange::LeaveAlternateScreen => {
-            server.handle_pty_output(image_pane_id, b"\x1b[?1049l", SystemTime::UNIX_EPOCH);
+            server.handle_pty_output(
+                image_pane_id,
+                b"\x1b[?1049l",
+                SystemTime::UNIX_EPOCH,
+                Instant::now(),
+            );
         }
     }
 }
@@ -6150,8 +6201,18 @@ fn every_layout_change_leaves_the_outer_terminal_showing_exactly_the_frame_image
                     client_id,
                     cell_size: build_one_pixel_cell_size(),
                 });
-                server.handle_pty_output(image_pane_id, content_bytes, SystemTime::UNIX_EPOCH);
-                server.handle_pty_output(image_pane_id, b"\r\nprompt$ ", SystemTime::UNIX_EPOCH);
+                server.handle_pty_output(
+                    image_pane_id,
+                    content_bytes,
+                    SystemTime::UNIX_EPOCH,
+                    Instant::now(),
+                );
+                server.handle_pty_output(
+                    image_pane_id,
+                    b"\r\nprompt$ ",
+                    SystemTime::UNIX_EPOCH,
+                    Instant::now(),
+                );
                 let mut client = build_launch_client(client_id);
                 let mut outer_terminal =
                     EmulatedOuterTerminal::from_graphics_support(graphics_support);
@@ -6239,6 +6300,7 @@ fn a_peer_cursor_that_moves_under_an_image_leaves_the_outer_terminal_showing_the
             image_pane_id,
             &build_opaque_image_input(GraphicsProtocol::Kitty),
             SystemTime::UNIX_EPOCH,
+            Instant::now(),
         );
         let mut client = build_launch_client(client_id);
         let mut outer_terminal = EmulatedOuterTerminal::from_graphics_support(graphics_support);
@@ -6306,6 +6368,7 @@ fn a_host_resize_of_one_client_redraws_its_images_and_writes_no_image_to_another
         pane_id,
         &build_opaque_image_input(GraphicsProtocol::Kitty),
         SystemTime::UNIX_EPOCH,
+        Instant::now(),
     );
     let mut sixel_client = build_launch_client(sixel_client_id);
     let mut kitty_client = build_launch_client(kitty_client_id);

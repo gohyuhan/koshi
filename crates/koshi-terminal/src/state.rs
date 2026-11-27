@@ -22,7 +22,7 @@
 //! as `koshi_terminal::state::*`.
 
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
@@ -56,6 +56,7 @@ use modes::ResumeFormat4TerminalModes;
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
 use perform::notification::Osc99Notification;
+pub(crate) use perform::osc::{OscText, OscTextCommand};
 pub(crate) use render::{Charset, RenderState};
 pub use screen::Screen;
 pub use working_directory::ReportedWorkingDirectory;
@@ -239,6 +240,12 @@ pub struct TerminalState {
     /// `None` when no notification is open. The resume file does not carry
     /// it: a state read back holds `None`.
     open_osc99_notification: Option<Osc99Notification>,
+    /// The whole texts that the engine's OSC reader read ahead of the VTE
+    /// parser, oldest first: one for each finished OSC whose command is an
+    /// [`OscTextCommand`]. Each such OSC that the parser dispatches takes the
+    /// oldest. The resume file does not carry them: a state read back holds
+    /// none.
+    osc_texts: VecDeque<OscText>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
     /// Primary screen's DECSTBM scroll-region margins, 0-based inclusive
@@ -1155,6 +1162,7 @@ impl TerminalState {
             shell_integration_state: fields.shell_integration_state,
             program_facts: Vec::new(),
             open_osc99_notification: None,
+            osc_texts: VecDeque::new(),
             scrollback: fields.scrollback,
             primary_scroll_region: fields.primary_scroll_region,
             alternate_scroll_region: fields.alternate_scroll_region,
@@ -1346,6 +1354,7 @@ impl TerminalState {
             shell_integration_state: ShellIntegrationState::default(),
             program_facts: Vec::new(),
             open_osc99_notification: None,
+            osc_texts: VecDeque::new(),
             scrollback: Scrollback::from_scrollback_limit(scrollback_limit),
             primary_scroll_region: None,
             alternate_scroll_region: None,
@@ -1703,6 +1712,18 @@ impl TerminalState {
     /// Drain the program facts, oldest first, leaving the list empty.
     pub(crate) fn take_program_facts(&mut self) -> Vec<ProgramFact> {
         std::mem::take(&mut self.program_facts)
+    }
+
+    /// The number of program facts not yet taken.
+    pub(crate) fn get_program_fact_count(&self) -> usize {
+        self.program_facts.len()
+    }
+
+    /// Queue `osc_texts`, oldest first, behind the texts already queued. The
+    /// next OSC whose command is an [`OscTextCommand`] that the VTE parser
+    /// dispatches takes the oldest queued text.
+    pub(crate) fn queue_osc_texts(&mut self, osc_texts: Vec<OscText>) {
+        self.osc_texts.extend(osc_texts);
     }
 
     /// Append `program_fact` after the facts not yet taken. A

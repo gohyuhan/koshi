@@ -9,8 +9,8 @@
 //! pane that already waits replaces the reason and keeps `raised_at`.
 //!
 //! The wait ends at the first of four facts. Three come from one client: its
-//! own command lands its focus on the pane
-//! ([`Server::clear_attention_on_focus_landing`]), its terminal reports
+//! own command lands its focus on the pane while the pane it was on still
+//! exists ([`Server::clear_attention_on_focus_landing`]), its terminal reports
 //! `CSI I` while the pane takes its input
 //! ([`Server::handle_terminal_focus_change`]), or its key, paste or mouse
 //! report reaches the pane ([`Server::clear_attended_pane_attention`]). The
@@ -32,47 +32,75 @@ use koshi_core::event::{
 };
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_session::client::TerminalFocus;
+use koshi_terminal::engine::TimedProgramFact;
 use koshi_terminal::state::ProgramFact;
 
 use crate::server::Server;
 
 impl Server {
     /// Apply `program_facts`, the facts one terminal advance of `pane_id` read,
-    /// in byte order, and return their events in the same order. `read_at` is
-    /// the wall time the bytes were read, and `current_time` the instant the
-    /// engine read them.
+    /// in byte order, and return their events. `reference_read_at` and
+    /// `reference_read_instant` are the wall time and the instant of one
+    /// moment at or after the read of every fact: a fact read `d` before
+    /// `reference_read_instant` was read at `reference_read_at` minus `d`.
     ///
-    /// - `CommandStarted` records `current_time` as the pane's command start
-    ///   and gives [`Event::PaneCommandStarted`].
+    /// - `CommandStarted` records its read instant as the pane's command
+    ///   start and gives [`Event::PaneCommandStarted`].
     /// - `CommandFinished` takes the command start and gives
     ///   [`Event::PaneCommandFinished`], then raises
-    ///   [`AttentionReason::CommandFinished`] with the whole seconds since that
-    ///   start. A command start this server does not hold gives
-    ///   `elapsed_secs: None`, which raises. Fewer than
+    ///   [`AttentionReason::CommandFinished`] with the whole seconds from that
+    ///   start to its own read instant. A command start this server does not
+    ///   hold gives `elapsed_secs: None`, which raises. Fewer than
     ///   [`MIN_ATTENTION_COMMAND_SECONDS`] raise nothing.
     /// - `Bell` raises [`AttentionReason::Bell`].
     /// - `Notify` raises [`AttentionReason::Notify`], withdrawable by its OSC 99
     ///   id when it has one.
-    /// - `NotificationWithdrawn` clears the attention whose withdrawable id it
-    ///   names, with `client_id: None`. Another id clears nothing.
+    /// - `NotificationWithdrawn` ends the wait whose withdrawable id it names.
+    ///   Another id ends nothing.
+    ///
+    /// A raise is dropped when `koshi.kdl` switches its kind off
+    /// (`AttentionConfig::should_raise_for`), and every raise is dropped when
+    /// an attached client whose terminal reported [`TerminalFocus::Focused`]
+    /// holds the pane as its active focused pane. A pane that waits for nobody
+    /// takes the read time of the raise as `raised_at`. A pane that already
+    /// waits keeps its `raised_at`, and takes the new reason and its
+    /// withdrawable id.
+    ///
+    /// After the last fact, one event at most reports the change, after every
+    /// command event: [`Event::PaneAttentionRaised`] when the pane waits with
+    /// another reason or another `raised_at` than before, and
+    /// [`Event::PaneAttentionCleared`] with `client_id: None` when the pane
+    /// waited before and waits no more.
     ///
     /// Example: `C` read at 14:00:00 and `D;101` read at 14:00:12.2 give
     /// `PaneCommandStarted`, then `PaneCommandFinished` and
     /// `PaneAttentionRaised` with
     /// `CommandFinished { exit_code: Some(101), elapsed_secs: Some(12) }`.
+    /// `BEL ESC ] 9 ; x ESC \` read 500 times in one chunk gives one
+    /// `PaneAttentionRaised`, with the reason `Notify` and the read time of
+    /// the first `BEL`.
     pub(crate) fn apply_program_facts(
         &mut self,
         pane_id: PaneId,
-        program_facts: Vec<ProgramFact>,
-        read_at: SystemTime,
-        current_time: Instant,
+        program_facts: Vec<TimedProgramFact>,
+        reference_read_at: SystemTime,
+        reference_read_instant: Instant,
     ) -> Vec<Event> {
         let mut emitted_events = Vec::new();
-        for program_fact in program_facts {
-            match program_fact {
+        let attention_before = self
+            .find_pane_attention(pane_id)
+            .map(|attention| (attention.reason.clone(), attention.raised_at));
+        let is_pane_watched = self.is_pane_watched(pane_id);
+        for timed_program_fact in program_facts {
+            let read_instant = timed_program_fact.read_instant;
+            let read_age = reference_read_instant.saturating_duration_since(read_instant);
+            let read_at = reference_read_at
+                .checked_sub(read_age)
+                .unwrap_or(reference_read_at);
+            match timed_program_fact.program_fact {
                 ProgramFact::CommandStarted => {
                     self.command_started_at_by_pane_id
-                        .insert(pane_id, current_time);
+                        .insert(pane_id, read_instant);
                     emitted_events.push(Event::PaneCommandStarted(PaneCommandStarted { pane_id }));
                 }
                 ProgramFact::CommandFinished { exit_code } => {
@@ -81,15 +109,15 @@ impl Server {
                             .remove(&pane_id)
                             .map(|started_at| {
                                 let elapsed_duration =
-                                    current_time.saturating_duration_since(started_at);
+                                    read_instant.saturating_duration_since(started_at);
                                 u32::try_from(elapsed_duration.as_secs()).unwrap_or(u32::MAX)
                             });
                     emitted_events
                         .push(Event::PaneCommandFinished(PaneCommandFinished { pane_id }));
                     let is_long_enough = elapsed_secs
                         .is_none_or(|elapsed_secs| elapsed_secs >= MIN_ATTENTION_COMMAND_SECONDS);
-                    if is_long_enough {
-                        emitted_events.extend(self.raise_pane_attention(
+                    if is_long_enough && !is_pane_watched {
+                        self.raise_pane_attention(
                             pane_id,
                             AttentionReason::CommandFinished {
                                 exit_code,
@@ -97,128 +125,161 @@ impl Server {
                             },
                             None,
                             read_at,
-                        ));
+                        );
                     }
                 }
                 ProgramFact::Bell => {
-                    emitted_events.extend(self.raise_pane_attention(
-                        pane_id,
-                        AttentionReason::Bell,
-                        None,
-                        read_at,
-                    ));
+                    if !is_pane_watched {
+                        self.raise_pane_attention(pane_id, AttentionReason::Bell, None, read_at);
+                    }
                 }
                 ProgramFact::Notify {
                     title,
                     body,
                     notification_id,
                 } => {
-                    emitted_events.extend(self.raise_pane_attention(
-                        pane_id,
-                        AttentionReason::Notify { title, body },
-                        notification_id,
-                        read_at,
-                    ));
+                    if !is_pane_watched {
+                        self.raise_pane_attention(
+                            pane_id,
+                            AttentionReason::Notify { title, body },
+                            notification_id,
+                            read_at,
+                        );
+                    }
                 }
                 ProgramFact::NotificationWithdrawn { notification_id } => {
-                    emitted_events
-                        .extend(self.withdraw_pane_notification(pane_id, &notification_id));
+                    self.withdraw_pane_notification(pane_id, &notification_id);
                 }
             }
         }
+        emitted_events.extend(self.report_pane_attention_change(pane_id, attention_before));
         emitted_events
     }
 
-    /// Make `pane_id` wait for a person with `reason`, first read at
-    /// `read_at`. `withdrawable_notification_id` is the OSC 99 id that
-    /// withdraws the attention, or `None`.
+    /// What `pane_id` waits for, or `None` for a pane that waits for nobody
+    /// and a pane no session holds.
+    fn find_pane_attention(&self, pane_id: PaneId) -> Option<&Attention> {
+        self.get_session_for_pane(pane_id)?
+            .panes
+            .get_pane_record_by_id(pane_id)?
+            .attention
+            .as_ref()
+    }
+
+    /// Whether an attached client whose terminal reported
+    /// [`TerminalFocus::Focused`] holds `pane_id` as its active focused pane.
+    fn is_pane_watched(&self, pane_id: PaneId) -> bool {
+        self.get_session_for_pane(pane_id).is_some_and(|session| {
+            session.clients.list_attached_clients().any(|client| {
+                client.get_terminal_focus() == TerminalFocus::Focused
+                    && client.get_active_focused_pane_id() == Some(pane_id)
+            })
+        })
+    }
+
+    /// Make `pane_id` wait for a person with `reason`, read at `read_at`.
+    /// `withdrawable_notification_id` is the OSC 99 id that withdraws the
+    /// attention, or `None`.
     ///
-    /// Returns `None`, with nothing changed, when `koshi.kdl` switches off
-    /// `reason`'s kind (`AttentionConfig::should_raise_for`), when no session
-    /// holds the pane, and when an attached client whose terminal reported
-    /// [`TerminalFocus::Focused`] holds the pane as its active focused pane.
-    ///
-    /// A pane that waits for nobody takes `raised_at: read_at`, and the call
-    /// returns [`Event::PaneAttentionRaised`]. A pane that already waits keeps
-    /// its `raised_at` and takes `withdrawable_notification_id`. With another
-    /// reason, it takes `reason` and the call returns the event with the kept
-    /// `raised_at`. With the same reason, the call returns `None`.
+    /// Nothing changes when `koshi.kdl` switches off `reason`'s kind
+    /// (`AttentionConfig::should_raise_for`) and when no session holds the
+    /// pane. A pane that waits for nobody takes `raised_at: read_at`. A pane
+    /// that already waits keeps its `raised_at`, and takes `reason` and
+    /// `withdrawable_notification_id`.
     fn raise_pane_attention(
         &mut self,
         pane_id: PaneId,
         reason: AttentionReason,
         withdrawable_notification_id: Option<String>,
         read_at: SystemTime,
-    ) -> Option<Event> {
+    ) {
         if !self
             .config
             .attention
             .should_raise_for(reason.get_reason_kind())
         {
-            return None;
+            return;
         }
-        let session = self.get_session_for_pane_mut(pane_id)?;
-        let is_pane_watched = session.clients.list_attached_clients().any(|client| {
-            client.get_terminal_focus() == TerminalFocus::Focused
-                && client.get_active_focused_pane_id() == Some(pane_id)
-        });
-        if is_pane_watched {
-            return None;
-        }
-        let tab_id = session
-            .find_tab_by_pane_id(pane_id)
-            .map(|tab| tab.get_tab_id());
-        let pane_record = session.panes.get_pane_record_mut_by_id(pane_id)?;
-        let raised_at = match pane_record.attention.as_mut() {
+        let Some(pane_record) = self
+            .get_session_for_pane_mut(pane_id)
+            .and_then(|session| session.panes.get_pane_record_mut_by_id(pane_id))
+        else {
+            return;
+        };
+        match pane_record.attention.as_mut() {
             Some(attention) => {
+                attention.reason = reason;
                 attention.withdrawable_notification_id = withdrawable_notification_id;
-                if attention.reason == reason {
-                    return None;
-                }
-                attention.reason = reason.clone();
-                attention.raised_at
             }
             None => {
                 pane_record.attention = Some(Attention {
                     raised_at: read_at,
-                    reason: reason.clone(),
+                    reason,
                     withdrawable_notification_id,
                 });
-                read_at
             }
-        };
-        Some(Event::PaneAttentionRaised(PaneAttentionRaised {
-            pane_id,
-            tab_id,
-            reason,
-            raised_at,
-        }))
+        }
     }
 
     /// End `pane_id`'s wait because its program withdrew the OSC 99
-    /// notification `notification_id`. Returns the
-    /// [`Event::PaneAttentionCleared`] with `client_id: None` when the
-    /// pane's attention is withdrawable by `notification_id`, and `None`, with
-    /// nothing changed, for every other attention and for a pane that waits
-    /// for nobody.
-    fn withdraw_pane_notification(
-        &mut self,
+    /// notification `notification_id`, when the pane's attention is
+    /// withdrawable by `notification_id`. Every other attention, and a pane
+    /// that waits for nobody, stays as it is.
+    fn withdraw_pane_notification(&mut self, pane_id: PaneId, notification_id: &str) {
+        let Some(pane_record) = self
+            .get_session_for_pane_mut(pane_id)
+            .and_then(|session| session.panes.get_pane_record_mut_by_id(pane_id))
+        else {
+            return;
+        };
+        let is_withdrawable = pane_record.attention.as_ref().is_some_and(|attention| {
+            attention.withdrawable_notification_id.as_deref() == Some(notification_id)
+        });
+        if is_withdrawable {
+            pane_record.attention = None;
+        }
+    }
+
+    /// The event that reports how `pane_id`'s attention changed since
+    /// `attention_before`, the reason and `raised_at` it had before:
+    /// [`Event::PaneAttentionRaised`] when it waits with another reason or
+    /// another `raised_at`, [`Event::PaneAttentionCleared`] with
+    /// `client_id: None` when it waited and waits no more, and `None` when
+    /// nothing changed or no session holds the pane.
+    fn report_pane_attention_change(
+        &self,
         pane_id: PaneId,
-        notification_id: &str,
+        attention_before: Option<(AttentionReason, SystemTime)>,
     ) -> Option<Event> {
-        let is_withdrawable = self
-            .get_session_for_pane(pane_id)?
+        let session = self.get_session_for_pane(pane_id)?;
+        let attention_after = session
             .panes
             .get_pane_record_by_id(pane_id)?
             .attention
-            .as_ref()?
-            .withdrawable_notification_id
-            .as_deref()
-            == Some(notification_id);
-        if !is_withdrawable {
+            .as_ref();
+        let tab_id = session
+            .find_tab_by_pane_id(pane_id)
+            .map(|tab| tab.get_tab_id());
+        let Some(attention_after) = attention_after else {
+            attention_before.as_ref()?;
+            return Some(Event::PaneAttentionCleared(PaneAttentionCleared {
+                pane_id,
+                tab_id,
+                client_id: None,
+            }));
+        };
+        let is_unchanged = attention_before.is_some_and(|(reason_before, raised_at_before)| {
+            reason_before == attention_after.reason && raised_at_before == attention_after.raised_at
+        });
+        if is_unchanged {
             return None;
         }
-        self.clear_pane_attention(pane_id, None)
+        Some(Event::PaneAttentionRaised(PaneAttentionRaised {
+            pane_id,
+            tab_id,
+            reason: attention_after.reason.clone(),
+            raised_at: attention_after.raised_at,
+        }))
     }
 
     /// End `pane_id`'s wait. `client_id` is the client that attended the
@@ -269,11 +330,15 @@ impl Server {
     /// of `client_id`'s own key binding or mouse, when that pane is not
     /// `focused_pane_id_before`, the pane that took the input before the
     /// command ([`clear_attended_pane_attention`](Self::clear_attended_pane_attention)).
+    /// When the command removed `focused_pane_id_before` from every session,
+    /// nothing ends.
     ///
     /// Example: Alice reads tab 2 while pane 3 in tab 1 waits. Her
     /// `core:focus-tab` to tab 1 lands her input on pane 3, and pane 3 stops
     /// waiting. The same switch from a script's `koshi focus-tab` is not a
-    /// key binding of Alice's, and the caller does not call this.
+    /// key binding of Alice's, and the caller does not call this. Her
+    /// `core:close-pane` on the last pane of tab 2 also moves her input to
+    /// pane 3, and pane 3 keeps waiting.
     pub(crate) fn clear_attention_on_focus_landing(
         &mut self,
         client_id: ClientId,
@@ -283,6 +348,11 @@ impl Server {
             return;
         };
         if Some(focused_pane_id) == focused_pane_id_before {
+            return;
+        }
+        let is_pane_before_removed = focused_pane_id_before
+            .is_some_and(|pane_id_before| self.get_session_for_pane(pane_id_before).is_none());
+        if is_pane_before_removed {
             return;
         }
         self.clear_attended_pane_attention(client_id, focused_pane_id);

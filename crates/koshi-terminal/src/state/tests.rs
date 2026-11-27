@@ -74,11 +74,15 @@ fn build_image_record(
 }
 
 /// Feed `input_bytes` through a fresh parser into `terminal_state` as the
-/// engine does: each run of printed characters goes to
+/// engine does: a fresh OSC reader queues the OSC texts of `input_bytes`
+/// first, and each run of printed characters goes to
 /// [`TerminalState::print_text`] at once. A clone fed the same bytes one
 /// printed character at a time through `print` must end equal to
 /// `terminal_state`, and the call panics when it does not.
 pub(crate) fn process_terminal_bytes(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
+    let mut osc_reader = crate::engine::osc_reader::OscReader::default();
+    osc_reader.process_terminal_bytes(input_bytes);
+    terminal_state.queue_osc_texts(osc_reader.take_osc_texts());
     let mut single_character_state = terminal_state.clone();
     let mut single_character_parser =
         vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();

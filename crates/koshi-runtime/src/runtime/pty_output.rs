@@ -90,9 +90,13 @@ impl Server {
     /// A chunk that leaves the pane on a different screen (primary or
     /// alternate) than it started on drops every client's highlight in it.
     ///
-    /// The chunk's program facts become events in byte order
-    /// (`Server::apply_program_facts`), stamped with `read_at`, the wall time
-    /// the chunk was read.
+    /// The engine reads the chunk at `read_instant`, the instant the chunk was
+    /// read, and the engine's next timed renders count from the instant this
+    /// call starts. The chunk's program facts become events
+    /// (`Server::apply_program_facts`): a fact read at `read_instant` takes
+    /// `read_at`, the wall time of the same moment, and a fact that
+    /// synchronized output held since an earlier chunk takes that chunk's read
+    /// time.
     ///
     /// Each `OSC 52` copy the engine read
     /// ([`TerminalEngine::take_clipboard_copies`]) goes, in order, to every
@@ -105,7 +109,13 @@ impl Server {
     /// (`mark_views_listing_floating_pane`), also a client that minimized the
     /// pane. Example: `cd /tmp` in a floating shell that one client minimized
     /// gives that client a frame with the new title `/tmp`.
-    pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8], read_at: SystemTime) {
+    pub fn handle_pty_output(
+        &mut self,
+        pane_id: PaneId,
+        output_bytes: &[u8],
+        read_at: SystemTime,
+        read_instant: Instant,
+    ) {
         let terminal_cell_size = self.session_by_id.values().find_map(|session| {
             if let Some(tab) = session.find_tab_by_pane_id(pane_id) {
                 return session.get_tab_cell_size(tab.get_tab_id());
@@ -123,9 +133,8 @@ impl Server {
         }
         let terminal_advance_state_before =
             TerminalAdvanceStateBefore::capture_terminal_advance_state(terminal_engine);
-        let current_time = Instant::now();
-        let terminal_advance = terminal_engine.process_pty_output_at(output_bytes, current_time);
-        self.refresh_pane_render_deadlines(pane_id, current_time);
+        let terminal_advance = terminal_engine.process_pty_output_at(output_bytes, read_instant);
+        self.refresh_pane_render_deadlines(pane_id, Instant::now());
         let Some(terminal_advance) = terminal_advance else {
             return;
         };
@@ -134,15 +143,16 @@ impl Server {
             terminal_advance_state_before,
             terminal_advance,
             read_at,
-            current_time,
+            read_instant,
         );
     }
 
     /// End `pane_id`'s synchronized-output hold when it is due at
     /// `current_time`, and handle the output it released as
-    /// [`handle_pty_output`](Self::handle_pty_output) handles a chunk. The
-    /// released program facts are stamped with the wall time of the release. A
-    /// pane with no engine, or with no hold due, changes nothing.
+    /// [`handle_pty_output`](Self::handle_pty_output) handles a chunk. Each
+    /// released program fact takes the read time of the chunk that brought its
+    /// bytes, counted back from `current_time` and the wall time of this
+    /// call. A pane with no engine, or with no hold due, changes nothing.
     pub(in crate::runtime) fn expire_synchronized_output(
         &mut self,
         pane_id: PaneId,
@@ -170,8 +180,9 @@ impl Server {
     /// `terminal_advance_state_before`: log its graphics errors, write its
     /// device-query replies back into the pane, clear the pane's selections
     /// when the active screen changed, re-anchor held views when the
-    /// scrollback gained or lost lines, apply its program facts at `read_at`
-    /// and `current_time` and publish their events
+    /// scrollback gained or lost lines, apply its program facts against
+    /// `reference_read_at` and `reference_read_instant`, the wall time and the
+    /// instant of one moment, and publish their events
     /// (`Server::apply_program_facts`), send its clipboard copies, mark the
     /// views changed of every client of the session when an input of a
     /// floating pane's title changed, and mark the views showing the pane
@@ -181,8 +192,8 @@ impl Server {
         pane_id: PaneId,
         terminal_advance_state_before: TerminalAdvanceStateBefore,
         terminal_advance: TerminalAdvance,
-        read_at: SystemTime,
-        current_time: Instant,
+        reference_read_at: SystemTime,
+        reference_read_instant: Instant,
     ) {
         let TerminalAdvance {
             device_query_replies: reply_bytes,
@@ -256,8 +267,12 @@ impl Server {
             self.anchor_held_views(pane_id, pushed_line_count, retained_line_count_after);
         }
         if !program_facts.is_empty() {
-            let program_fact_events =
-                self.apply_program_facts(pane_id, program_facts, read_at, current_time);
+            let program_fact_events = self.apply_program_facts(
+                pane_id,
+                program_facts,
+                reference_read_at,
+                reference_read_instant,
+            );
             self.publish_events(&program_fact_events);
         }
         if !clipboard_copies.is_empty() {

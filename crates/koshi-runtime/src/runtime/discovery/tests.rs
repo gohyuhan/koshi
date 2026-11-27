@@ -7,7 +7,7 @@ use koshi_test_support::fixtures::build_test_uuid_with_suffix;
 
 use std::collections::BTreeMap;
 use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use koshi_layout::tree::LayoutNode;
 
@@ -190,7 +190,12 @@ fn a_pane_reports_the_title_its_child_set_and_no_argv_for_a_shell() {
     assert_eq!(overview_before_title_update.panes[0].pane_title, None);
 
     // OSC 2 sets the window title, ended here by BEL.
-    server.handle_pty_output(pane_id, b"\x1b]2;build watch\x07", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b]2;build watch\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let overview_after_title_update = server.build_overview().expect("one session is running");
     assert_eq!(

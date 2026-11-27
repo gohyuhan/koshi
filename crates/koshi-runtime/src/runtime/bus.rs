@@ -3,8 +3,8 @@
 //! `EventBus::subscribe` registers a subscriber and hands back its id, the
 //! receiving end of that subscriber's own bounded queue, and its
 //! [`WriterHandoff`].
-//! `EventBus::publish` clones each pane placement, quit and restart event
-//! into every subscriber's queue,
+//! `EventBus::publish` clones each pane placement, pane attention raise and
+//! clear, quit and restart event into every subscriber's queue,
 //! `EventBus::publish_notification_post` clones one post of the session's
 //! notification queue into every subscriber's queue,
 //! `EventBus::try_send_frame` puts the frame the session composed for one
@@ -303,8 +303,9 @@ impl WriterHandoff {
 }
 
 /// Fan-out hub: [`publish`](Self::publish) delivers each pane placement
-/// commit, quit and restart to every live subscriber, over that subscriber's
-/// own bounded queue. Every other event reaches no subscriber.
+/// commit, pane attention raise and clear, quit and restart to every live
+/// subscriber, over that subscriber's own bounded queue. Every other event
+/// reaches no subscriber.
 #[derive(Debug)]
 pub(crate) struct EventBus {
     /// Live subscribers, in subscription order.

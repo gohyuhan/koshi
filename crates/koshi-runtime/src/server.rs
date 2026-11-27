@@ -254,8 +254,8 @@ pub struct Server {
     /// differs from this record.
     pub(crate) pty_size_by_pane_id: HashMap<PaneId, PtySize>,
     /// Fan-out hub: [`EventBus::publish`] delivers each pane placement
-    /// commit, quit and restart to every subscriber, over its own bounded
-    /// queue.
+    /// commit, pane attention raise and clear, quit and restart to every
+    /// subscriber, over its own bounded queue.
     pub(crate) event_bus: EventBus,
     /// The newest records of the events this server published. The threads
     /// that serve the session's control socket hold the same ring and answer
@@ -537,6 +537,7 @@ impl Server {
                     pane_id,
                     SCREEN_NOT_RESTORED_NOTICE_BYTES,
                     restored_wall_time,
+                    restored_at,
                 );
                 server.post_session_notification(
                     session_id,

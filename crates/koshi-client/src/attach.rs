@@ -3864,9 +3864,10 @@ fn run_attachment<B: Backend, W: Write>(
                                 refusal,
                             });
                         }
-                        // Every other frame is a `Pong`, which carries nothing.
-                        // The frames that end the attachment leave the loop
-                        // above.
+                        // A `PaneAttentionRaised` or `PaneAttentionCleared`
+                        // frame changes nothing in this client. Every other
+                        // frame is a `Pong`, which carries nothing. The frames
+                        // that end the attachment leave the loop above.
                         _ => {}
                     }
                 }
@@ -6808,6 +6809,7 @@ fn handle_terminal_input_event(
                 is_terminal_focused,
                 ..
             } => {
+                flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);
                 client.handle_outer_terminal_focus_change(is_terminal_focused);
                 uplink.send_terminal_focus(is_terminal_focused);
             }

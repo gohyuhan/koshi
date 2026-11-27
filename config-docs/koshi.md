@@ -196,12 +196,13 @@ Three signals make a pane wait:
 
 A signal raises nothing when a client whose terminal has keyboard focus types
 into that pane. A pane that waits holds one reason. A new signal replaces the
-reason and keeps the time of the first signal.
+reason and keeps the time of the first signal. Each signal takes the time
+koshi read it, also when synchronized output (`CSI ? 2026 h`) held it.
 
 The wait ends at the first of these:
 
 1. A client moves its own input onto the pane with a key binding or a mouse
-   click.
+   click, from a pane that still exists.
 2. The terminal of a client that types into the pane gets keyboard focus.
 3. A client types or pastes into the pane, or clicks in it while the program
    reads the mouse.
@@ -209,9 +210,15 @@ The wait ends at the first of these:
    `p=close`.
 
 `koshi input`, other `koshi` commands and a focus change that a closed pane
-causes end no wait. A waiting pane keeps waiting when every client detaches
-and when the session restarts into a new build. The session sends each start
-and end of a wait to every attached client.
+causes end no wait. A close-pane key binding is one: its client's input lands
+on another pane because the pane it was on closed. A waiting pane keeps
+waiting when every client detaches and when the session restarts into a new
+build. The session sends each start and end of a wait to every attached
+client, one change at most for each read of the program's output.
+
+Example: a program writes `BEL` and `ESC ] 9 ; tests passed ESC \` 500 times
+in one write. Each client receives one start of a wait, with the reason
+`Notify`.
 
 A key set to `#false` drops new signals of its kind. A pane that already waits
 keeps waiting. A value that is not a boolean is skipped with a warning, and the

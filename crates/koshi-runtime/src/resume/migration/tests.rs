@@ -158,11 +158,13 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
         )
         .expect("read the pane states");
         for (pane_key, raw_pane_state) in pane_states {
-            if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+            if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_TERMINAL_STATE {
                 let saved_pane: Value =
                     serde_json::from_str(raw_pane_state.get()).expect("read the saved pane");
-                let decoded_pane: CarriedPaneState =
-                    serde_json::from_str(raw_pane_state.get()).expect("decode the saved pane");
+                let decoded_pane =
+                    serde_json::from_str::<ResumeFormat5CarriedPaneState>(raw_pane_state.get())
+                        .expect("decode the saved pane")
+                        .into_carried_pane_state();
                 lost_json_paths.extend(list_json_paths_lost_by_decoding(
                     &saved_pane,
                     &serde_json::to_value(&decoded_pane).expect("encode the decoded pane"),
