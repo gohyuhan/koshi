@@ -254,8 +254,8 @@ pub struct Server {
     /// differs from this record.
     pub(crate) pty_size_by_pane_id: HashMap<PaneId, PtySize>,
     /// Fan-out hub: [`EventBus::publish`] delivers each pane placement
-    /// commit, quit and restart to every subscriber, over its own bounded
-    /// queue.
+    /// commit, pane attention raise and clear, quit and restart to every
+    /// subscriber, over its own bounded queue.
     pub(crate) event_bus: EventBus,
     /// The newest records of the events this server published. The threads
     /// that serve the session's control socket hold the same ring and answer
@@ -356,6 +356,10 @@ pub struct Server {
     /// was logged: one such failure is logged per
     /// [`LOG_WINDOW_DURATION`](koshi_observability::repeated_warning::LOG_WINDOW_DURATION).
     pub(crate) device_reply_failure_warning: WarningRateLimiter,
+    /// The instant each pane's engine read the `OSC 133 ; C` of the command
+    /// that runs in it, by pane, until the command's `D` or the pane's
+    /// removal. Never carried across an image swap.
+    pub(crate) command_started_at_by_pane_id: HashMap<PaneId, Instant>,
 }
 
 impl Server {
@@ -400,6 +404,7 @@ impl Server {
             grace_window_id: NEXT_GRACE_WINDOW_ID.fetch_add(1, Ordering::Relaxed),
             saved_view_store: SavedViewStore::default(),
             device_reply_failure_warning: WarningRateLimiter::new(),
+            command_started_at_by_pane_id: HashMap::new(),
             app_layer,
             config,
             client_config,
@@ -528,7 +533,12 @@ impl Server {
             let Some(carried_pane_state) = carried_pane_state_by_pane_id.remove(&pane_id) else {
                 tracing::warn!(%pane_id, "a carried pane has no screen to restore; it comes back blank");
                 server.park_pane_pty(pane_id, pty_size);
-                server.handle_pty_output(pane_id, SCREEN_NOT_RESTORED_NOTICE_BYTES);
+                server.handle_pty_output(
+                    pane_id,
+                    SCREEN_NOT_RESTORED_NOTICE_BYTES,
+                    restored_wall_time,
+                    restored_at,
+                );
                 server.post_session_notification(
                     session_id,
                     NotificationSeverity::Warning,

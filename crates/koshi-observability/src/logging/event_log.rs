@@ -129,6 +129,15 @@ pub fn log_event(runtime_event: &Event) {
             );
         }
 
+        // --- pane attention: the pane id alone. The reason, its text and the
+        // clearing client write no field.
+        Event::PaneAttentionRaised(event_payload) => {
+            tracing::info!(pane_id = %event_payload.pane_id, "pane attention raised");
+        }
+        Event::PaneAttentionCleared(event_payload) => {
+            tracing::info!(pane_id = %event_payload.pane_id, "pane attention cleared");
+        }
+
         // --- config.
         Event::ConfigReloaded(event_payload) => {
             tracing::info!(session_id = %event_payload.session_id, "config reloaded");

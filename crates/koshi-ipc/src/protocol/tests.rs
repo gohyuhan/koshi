@@ -330,6 +330,9 @@ pub(crate) fn list_every_request_kind() -> Vec<IpcRequestKind> {
         IpcRequestKind::SetViewerLocalInputMode {
             is_viewer_local_input_mode_on: true,
         },
+        IpcRequestKind::TerminalFocus {
+            is_terminal_focused: false,
+        },
         build_test_confirm_pane_placement(),
         IpcRequestKind::RecentEvents,
         IpcRequestKind::Restart,

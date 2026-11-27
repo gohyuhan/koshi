@@ -12,7 +12,8 @@
 //!   (zero-width joiner) emoji sequences, variation selectors, skin tones,
 //!   flags — fold onto the base cell.
 //! - `execute` — C0 and C1 control bytes: newline, tab, backspace, line
-//!   movement, tab-stop setup, and the `SI`/`SO` charset shifts.
+//!   movement, tab-stop setup, the `SI`/`SO` charset shifts, and BEL, which
+//!   adds a [`ProgramFact::Bell`].
 //! - `csi_dispatch` — CSI sequences (Control Sequence Introducer, `ESC [ …`):
 //!   cursor moves (relative, absolute, line-relative), tab stops, erase in
 //!   display/line and erase-char, including active image placement clearing
@@ -25,8 +26,11 @@
 //! - `esc_dispatch` — plain ESC sequences: cursor save/restore, line movement,
 //!   tab-stop setup, terminal reset, and `G0`–`G3` charset designation.
 //! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
-//!   carrying a text payload): the OSC 0/1/2 window title, OSC 7
-//!   working-directory report, and OSC 133 shell markers.
+//!   carrying a text payload): the OSC 133 shell markers, read from the
+//!   parser's parameters, and the OSC 0/1/2 window title, OSC 7
+//!   working-directory report, and OSC 9, OSC 777 and OSC 99 desktop
+//!   notifications, read from the whole text the engine's OSC reader queued.
+//!   The notifications add program facts.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
 //!   ends a text run like any non-printing event); the payload and `put`
@@ -38,7 +42,8 @@
 //! stacks ([`keyboard`]), cursor motion / scrolling
 //! / the scroll region ([`motion`]), alternate-screen entry/exit
 //! ([`alt_screen`]), hard/soft reset ([`reset`]), SGR ([`sgr`]), OSC parsing
-//! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
+//! ([`osc`]), desktop notification parsing ([`notification`]), and CSI
+//! parameter accessors ([`params`]) — while the
 //! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
 use koshi_core::display_width::compute_character_display_width;
@@ -46,12 +51,15 @@ use koshi_core::text::sanitize_reported_text;
 
 use crate::grid::state::{Cell, ImagePlaceholder, RowEnd};
 use crate::state::{
-    CursorShape, MouseEncoding, MouseTracking, Screen, ShellIntegrationFact, ShellIntegrationState,
+    CursorShape, MouseEncoding, MouseTracking, ProgramFact, Screen, ShellIntegrationState,
     TerminalState,
 };
 
 use self::motion::{find_next_tab_stop, find_previous_tab_stop};
-use self::osc::{parse_osc133, parse_osc7_working_directory, Osc133};
+use self::notification::{
+    apply_osc99_sequence, parse_osc777_notification, parse_osc9_notification,
+};
+use self::osc::{parse_osc133, parse_osc7_working_directory, Osc133, OscTextCommand};
 use self::params::{
     get_cursor_coordinate, get_cursor_move_count, get_first_parameter_number,
     get_parameter_number_at,
@@ -64,7 +72,8 @@ mod device;
 mod glyph;
 mod keyboard;
 mod motion;
-mod osc;
+pub(super) mod notification;
+pub(super) mod osc;
 mod params;
 mod reset;
 mod sgr;
@@ -267,7 +276,10 @@ impl vte::Perform for TerminalState {
             0x0E => self.get_active_render_mut().gl = 1,
             // SI (shift in): select G0 into the GL range for printing.
             0x0F => self.get_active_render_mut().gl = 0,
-            // BEL (0x07) and any other control byte: discarded, never rendered.
+            // BEL: a bell fact. A BEL that ends an OSC sequence reaches
+            // `osc_dispatch` and never this arm.
+            0x07 => self.push_program_fact(ProgramFact::Bell),
+            // Any other control byte: discarded, never rendered.
             _ => {}
         }
     }
@@ -893,9 +905,11 @@ impl vte::Perform for TerminalState {
         }
     }
 
-    /// Handle an Operating System Command (OSC) sequence: window/icon title
-    /// (OSC 0/1/2), working-directory report (OSC 7, `file://` URI), or shell
-    /// marker (OSC 133).
+    /// Handle an Operating System Command (OSC) sequence. A shell marker
+    /// (OSC 133) is read from `osc_parameters`. The window/icon title (OSC
+    /// 0/1/2), the working-directory report (OSC 7) and the desktop
+    /// notifications (OSC 9, OSC 777, OSC 99) take the oldest queued OSC text
+    /// (`apply_next_osc_text`). Any other OSC command is ignored.
     fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], _is_bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -913,54 +927,23 @@ impl vte::Perform for TerminalState {
                 Osc133::CommandStart => {
                     if self.shell_integration_state != ShellIntegrationState::Running {
                         self.shell_integration_state = ShellIntegrationState::Running;
-                        self.shell_integration_facts
-                            .push(ShellIntegrationFact::CommandStarted);
+                        self.push_program_fact(ProgramFact::CommandStarted);
                     }
                 }
-                Osc133::CommandFinished => {
+                Osc133::CommandFinished(exit_code) => {
                     if self.shell_integration_state == ShellIntegrationState::Running {
                         self.shell_integration_state = ShellIntegrationState::Prompt;
-                        self.shell_integration_facts
-                            .push(ShellIntegrationFact::CommandFinished);
+                        self.push_program_fact(ProgramFact::CommandFinished { exit_code });
                     }
                 }
             }
             return;
         }
-        // `osc_parameters[0]` is the command number. vte splits the payload on every
-        // `;`; each arm rejoins `osc_parameters[1..]` with `;`, and a payload that
-        // itself holds a `;` stays whole.
-        let Some(&command) = osc_parameters.first() else {
-            return;
-        };
-        match std::str::from_utf8(command) {
-            // OSC 0/1/2 — set the window/icon title: lossy UTF-8 decode (a
-            // non-UTF-8 title keeps replacement characters), then bounded and
-            // filtered by `sanitize_reported_text`.
-            Ok("0" | "1" | "2") if osc_parameters.len() > 1 => {
-                let title = osc_parameters[1..].join(&b';');
-                let title = Some(sanitize_reported_text(&String::from_utf8_lossy(&title)));
-                if self.title != title {
-                    self.title = title;
-                    self.is_title_changed = true;
-                }
-            }
-            // OSC 7 — the shell's working directory as a `file://host/path`
-            // URI. An unparseable URI leaves the last working directory unchanged.
-            Ok("7") if osc_parameters.len() > 1 => {
-                let working_directory_uri = osc_parameters[1..].join(&b';');
-                if let Some(reported_working_directory) =
-                    parse_osc7_working_directory(&working_directory_uri)
-                {
-                    if self.reported_working_directory.as_ref() != Some(&reported_working_directory)
-                    {
-                        self.reported_working_directory = Some(reported_working_directory);
-                        self.is_working_directory_changed = true;
-                    }
-                }
-            }
-            // Any other OSC command is ignored.
-            _ => {}
+        let is_osc_text_command = osc_parameters.first().is_some_and(|command_number_bytes| {
+            OscTextCommand::from_command_number(command_number_bytes).is_some()
+        });
+        if is_osc_text_command {
+            self.apply_next_osc_text();
         }
     }
 
@@ -984,6 +967,61 @@ impl vte::Perform for TerminalState {
     /// callback — neither `esc_dispatch` nor `execute`.
     fn unhook(&mut self) {
         self.reset_cluster();
+    }
+}
+
+impl TerminalState {
+    /// Take the oldest queued [`OscText`](self::osc::OscText) and apply it. An empty queue and a
+    /// text with `argument_bytes: None` change nothing.
+    ///
+    /// - `Title`: the text, decoded lossily (a non-UTF-8 byte becomes U+FFFD)
+    ///   and passed through `sanitize_reported_text`, becomes the title.
+    /// - `WorkingDirectory`: the text, parsed by
+    ///   `parse_osc7_working_directory`, becomes the reported working
+    ///   directory. A text that does not parse leaves the last one in place.
+    /// - `Osc9Notification`, `Osc777Notification` and `Osc99Notification`:
+    ///   the notification fact the text completes, if any, is added.
+    ///
+    /// `Title` with `a;b;c` sets the title `a;b;c`.
+    fn apply_next_osc_text(&mut self) {
+        let Some(osc_text) = self.osc_texts.pop_front() else {
+            return;
+        };
+        let Some(argument_bytes) = osc_text.argument_bytes else {
+            return;
+        };
+        let program_fact = match osc_text.osc_text_command {
+            OscTextCommand::Title => {
+                let title = Some(sanitize_reported_text(&String::from_utf8_lossy(
+                    &argument_bytes,
+                )));
+                if self.title != title {
+                    self.title = title;
+                    self.is_title_changed = true;
+                }
+                None
+            }
+            OscTextCommand::WorkingDirectory => {
+                if let Some(reported_working_directory) =
+                    parse_osc7_working_directory(&argument_bytes)
+                {
+                    if self.reported_working_directory.as_ref() != Some(&reported_working_directory)
+                    {
+                        self.reported_working_directory = Some(reported_working_directory);
+                        self.is_working_directory_changed = true;
+                    }
+                }
+                None
+            }
+            OscTextCommand::Osc9Notification => parse_osc9_notification(&argument_bytes),
+            OscTextCommand::Osc777Notification => parse_osc777_notification(&argument_bytes),
+            OscTextCommand::Osc99Notification => {
+                apply_osc99_sequence(&mut self.open_osc99_notification, &argument_bytes)
+            }
+        };
+        if let Some(program_fact) = program_fact {
+            self.push_program_fact(program_fact);
+        }
     }
 }
 

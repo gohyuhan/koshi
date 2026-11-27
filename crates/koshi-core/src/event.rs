@@ -12,8 +12,10 @@
 //! `Instant`. No raw OS handles and no `&mut` references.
 
 use std::num::NonZeroU32;
+use std::time::SystemTime;
 
 use crate::action::ActionReference;
+use crate::attention::AttentionReason;
 use crate::command::PanePlacementTarget;
 use crate::geometry::{PaneArea, Point, Size};
 use crate::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
@@ -25,8 +27,8 @@ use serde::{Deserialize, Serialize};
 /// A completed fact emitted by the runtime.
 ///
 /// Variants are grouped to match the sections further down the file: pane/tab
-/// lifecycle, input modes, shell integration, selection, floating pane views,
-/// and session lifecycle. Each variant wraps a like-named
+/// lifecycle, input modes, shell integration, pane attention, selection,
+/// floating pane views, and session lifecycle. Each variant wraps a like-named
 /// payload struct. `Quit` wraps its [`QuitCause`]; `Restarting` carries
 /// nothing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,12 @@ pub enum Event {
     /// A command finished in a pane (OSC 133;D). Carries no command text and
     /// no exit code.
     PaneCommandFinished(PaneCommandFinished),
+
+    // Pane attention.
+    /// A pane began to wait for a person, or the reason it waits changed.
+    PaneAttentionRaised(PaneAttentionRaised),
+    /// A pane stopped waiting for a person.
+    PaneAttentionCleared(PaneAttentionCleared),
 
     // Selection.
     /// The active selection changed or was cleared. A selection appearing
@@ -130,6 +138,8 @@ impl Event {
             Event::MouseSelectChanged(_) => "MouseSelectChanged",
             Event::PaneCommandStarted(_) => "PaneCommandStarted",
             Event::PaneCommandFinished(_) => "PaneCommandFinished",
+            Event::PaneAttentionRaised(_) => "PaneAttentionRaised",
+            Event::PaneAttentionCleared(_) => "PaneAttentionCleared",
             Event::SelectionChanged(_) => "SelectionChanged",
             Event::FloatingPaneMoved(_) => "FloatingPaneMoved",
             Event::FloatingPanePinChanged(_) => "FloatingPanePinChanged",
@@ -414,6 +424,48 @@ pub struct PaneCommandStarted {
 pub struct PaneCommandFinished {
     /// The pane whose shell reported the command ending.
     pub pane_id: PaneId,
+}
+
+// ============================================================================
+// Pane attention
+// ============================================================================
+
+/// Payload for [`Event::PaneAttentionRaised`].
+///
+/// Emitted when a pane that waits for nobody starts to wait, and when a
+/// signal gives a waiting pane another reason. A signal with the reason the
+/// pane already holds emits nothing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAttentionRaised {
+    /// The pane that waits.
+    pub pane_id: PaneId,
+    /// The tab that holds the pane; `None` when the pane floats. A message
+    /// without `tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub tab_id: Option<TabId>,
+    /// What the program sent most recently.
+    pub reason: AttentionReason,
+    /// The read time of the first signal since the pane last stopped waiting.
+    pub raised_at: SystemTime,
+}
+
+/// Payload for [`Event::PaneAttentionCleared`].
+///
+/// Emitted once when a waiting pane stops waiting: a client attended it, or
+/// its program withdrew the OSC 99 notification that set the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAttentionCleared {
+    /// The pane that stopped waiting.
+    pub pane_id: PaneId,
+    /// The tab that holds the pane; `None` when the pane floats. A message
+    /// without `tab_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub tab_id: Option<TabId>,
+    /// The client that attended the pane. `None` when the program withdrew
+    /// its notification (`OSC 99 ; i=<id> : p=close`). A message without
+    /// `client_id` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub client_id: Option<ClientId>,
 }
 
 // ============================================================================

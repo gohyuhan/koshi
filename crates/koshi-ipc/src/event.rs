@@ -1,6 +1,7 @@
 //! What an attached client is told after the attach reply: the picture to
-//! draw, a pane placement the session committed, the end of the stream, and
-//! the session's notifications. [`SessionEvent`](crate::event::SessionEvent)
+//! draw, a pane placement the session committed, a pane that began or stopped
+//! waiting for a person, the end of the stream, and the session's
+//! notifications. [`SessionEvent`](crate::event::SessionEvent)
 //! is every JSON frame after the reply.
 //!
 //! Pane content travels in painted updates, which are binary frames
@@ -47,10 +48,13 @@
 //! is the eighth: it asks the client to run one viewer-local action that
 //! `koshi actions run` named, and to answer.
 
+use std::time::SystemTime;
+
 use koshi_core::action::ActionReference;
+use koshi_core::attention::AttentionReason;
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::event::{HeldCommandRejection, RejectReason};
-use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::notification::{NotificationEntry, NotificationQueue};
 use serde::{Deserialize, Serialize};
 
@@ -121,6 +125,36 @@ pub enum SessionEvent {
         destination_tab_id: Option<TabId>,
         /// The checked swap or insertion target used by the transaction.
         placement_target: PanePlacementTarget,
+    },
+    /// A pane of the session began to wait for a person, or the reason it
+    /// waits changed. Sent once to every attached client.
+    PaneAttentionRaised {
+        /// The pane that waits.
+        pane_id: PaneId,
+        /// The tab that holds the pane; `None` when the pane floats. A message
+        /// without `tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        tab_id: Option<TabId>,
+        /// What the pane's program sent most recently.
+        reason: AttentionReason,
+        /// The read time of the first signal since the pane last stopped
+        /// waiting.
+        raised_at: SystemTime,
+    },
+    /// A pane of the session stopped waiting for a person. Sent once to every
+    /// attached client.
+    PaneAttentionCleared {
+        /// The pane that stopped waiting.
+        pane_id: PaneId,
+        /// The tab that holds the pane; `None` when the pane floats. A message
+        /// without `tab_id` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        tab_id: Option<TabId>,
+        /// The client that attended the pane. `None` when the pane's program
+        /// withdrew its notification. A message without `client_id` is
+        /// refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        client_id: Option<ClientId>,
     },
     /// The session is over: its last tab closed, a quit command was applied,
     /// or its last pane's child exited. A terminal frame — nothing follows it.
@@ -264,6 +298,8 @@ impl SessionEvent {
             SessionEvent::ImageContentStart { .. } => "ImageContentStart",
             SessionEvent::ImageContentReleased { .. } => "ImageContentReleased",
             SessionEvent::PanePlacementCommitted { .. } => "PanePlacementCommitted",
+            SessionEvent::PaneAttentionRaised { .. } => "PaneAttentionRaised",
+            SessionEvent::PaneAttentionCleared { .. } => "PaneAttentionCleared",
             SessionEvent::Quit => "Quit",
             SessionEvent::Restarting => "Restarting",
             SessionEvent::Detached => "Detached",
@@ -288,6 +324,8 @@ impl WireVariants for SessionEvent {
         "ImageContentStart",
         "ImageContentReleased",
         "PanePlacementCommitted",
+        "PaneAttentionRaised",
+        "PaneAttentionCleared",
         "Quit",
         "Restarting",
         "Detached",

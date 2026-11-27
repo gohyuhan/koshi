@@ -502,6 +502,10 @@ impl Server {
     /// [`dispatch`](Self::dispatch), also handing back the cells a tiled
     /// pane's border moved.
     ///
+    /// A command from a client's key binding or mouse that moves the pane
+    /// taking that client's input ends the new pane's wait for a person
+    /// ([`Server::clear_attention_on_focus_landing`]).
+    ///
     /// The second half is `Some` only for an applied [`Command::ResizePane`]
     /// on a tiled pane; every other outcome, a refusal included, gives
     /// `None`. A border asked to move `100` cells into a neighbor with `36`
@@ -514,6 +518,14 @@ impl Server {
         if let Err(rejection) = self.validate_command(&envelope) {
             return (Self::reject_command(command_id, rejection), None);
         }
+        let landing_client_id = match envelope.command_source {
+            CommandSource::KeyBinding { client_id } | CommandSource::Mouse { client_id } => {
+                Some(client_id)
+            }
+            CommandSource::InSessionCli { .. } | CommandSource::ExternalCli { .. } => None,
+        };
+        let focused_pane_id_before =
+            landing_client_id.and_then(|client_id| self.find_active_focused_pane_id(client_id));
         let mut moved_cell_count = None;
         let outcome = match envelope.command {
             Command::NewPane(command_args) => {
@@ -630,6 +642,9 @@ impl Server {
                 self.handle_switch_session(command_id, &envelope.command_source, &command_args)
             }
         };
+        if let Some(client_id) = landing_client_id {
+            self.clear_attention_on_focus_landing(client_id, focused_pane_id_before);
+        }
         match outcome {
             Ok(command_result) => (command_result, moved_cell_count),
             Err(rejection) => (Self::reject_command(command_id, rejection), None),

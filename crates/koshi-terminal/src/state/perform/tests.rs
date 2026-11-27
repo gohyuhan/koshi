@@ -7334,8 +7334,8 @@ fn osc133_command_start_reports_one_started_fact_even_when_repeated() {
         ShellIntegrationState::Running
     );
     assert_eq!(
-        terminal_state.take_shell_integration_facts(),
-        vec![ShellIntegrationFact::CommandStarted]
+        terminal_state.take_program_facts(),
+        vec![ProgramFact::CommandStarted]
     );
 }
 
@@ -7348,10 +7348,12 @@ fn osc133_finish_with_an_exit_code_reports_the_finish() {
         ShellIntegrationState::Prompt
     );
     assert_eq!(
-        terminal_state.take_shell_integration_facts(),
+        terminal_state.take_program_facts(),
         vec![
-            ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished,
+            ProgramFact::CommandStarted,
+            ProgramFact::CommandFinished {
+                exit_code: Some(137)
+            },
         ]
     );
 }
@@ -7365,10 +7367,10 @@ fn osc133_finish_without_an_exit_code_reports_the_finish() {
         ShellIntegrationState::Prompt
     );
     assert_eq!(
-        terminal_state.take_shell_integration_facts(),
+        terminal_state.take_program_facts(),
         vec![
-            ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished,
+            ProgramFact::CommandStarted,
+            ProgramFact::CommandFinished { exit_code: None },
         ]
     );
 }
@@ -7381,7 +7383,7 @@ fn osc133_finish_without_a_running_command_reports_nothing() {
         terminal_state.shell_integration_state,
         ShellIntegrationState::Prompt
     );
-    assert_eq!(terminal_state.take_shell_integration_facts(), vec![]);
+    assert_eq!(terminal_state.take_program_facts(), vec![]);
 }
 
 // --- RIS and the shell marker state ---
@@ -7396,15 +7398,15 @@ fn ris_returns_the_shell_marker_state_to_prompt_and_keeps_pending_facts() {
         ShellIntegrationState::Prompt
     );
     assert_eq!(
-        terminal_state.take_shell_integration_facts(),
-        vec![ShellIntegrationFact::CommandStarted]
+        terminal_state.take_program_facts(),
+        vec![ProgramFact::CommandStarted]
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b]133;D;0\x07"); // the reset forgot the running command
     assert_eq!(
         terminal_state.shell_integration_state,
         ShellIntegrationState::Prompt
     );
-    assert_eq!(terminal_state.take_shell_integration_facts(), vec![]);
+    assert_eq!(terminal_state.take_program_facts(), vec![]);
 }
 
 // --- ESC / DCS edges ---

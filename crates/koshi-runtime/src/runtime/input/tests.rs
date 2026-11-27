@@ -208,7 +208,12 @@ fn build_server_with_scrolled_client() -> (Server, koshi_core::ids::PaneId, Clie
 {
     let (mut server, _fake_pty_backend, client_id, viewer) = build_test_server();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, &b"\n".repeat(40)); // push lines into history
+    server.handle_pty_output(
+        pane_id,
+        &b"\n".repeat(40),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    ); // push lines into history
     server.scroll_up(client_id, pane_id, 3);
     (server, pane_id, client_id, viewer)
 }
@@ -268,7 +273,7 @@ fn an_unbound_arrow_follows_the_focused_panes_application_cursor_mode() {
 
     // vim turns it on (DECCKM, `ESC [ ? 1 h`) and now reads `ESC O A` for the
     // same press. The pane's mode, not the press, picks the bytes.
-    server.handle_pty_output(pane_id, b"\x1b[?1h");
+    server.handle_pty_output(pane_id, b"\x1b[?1h", SystemTime::UNIX_EPOCH, Instant::now());
     apply_key_press(&mut server, &mut viewer, up_key_chord, Instant::now());
     assert_eq!(
         fake_pty_backend
@@ -303,7 +308,12 @@ fn a_buffered_key_reaches_no_pane_at_all_even_after_focus_moves() {
     );
     let focused_pane_id = get_focused_pane_id(&server, client_id);
     assert_ne!(focused_pane_id, original_pane_id);
-    server.handle_pty_output(focused_pane_id, b"\x1b[?1h");
+    server.handle_pty_output(
+        focused_pane_id,
+        b"\x1b[?1h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     // `<Up> x` makes a bare `<Up>` a prefix. Pressing `<Up>` opens a sequence.
     configure_normal_keybinding(
@@ -411,7 +421,7 @@ fn a_buffered_arrow_is_never_written_even_when_its_pane_flips_cursor_mode() {
     );
 
     // The pane now turns application-cursor-keys mode ON, mid-sequence.
-    server.handle_pty_output(pane_id, b"\x1b[?1h");
+    server.handle_pty_output(pane_id, b"\x1b[?1h", SystemTime::UNIX_EPOCH, Instant::now());
 
     // `z` continues nothing. It is discarded and the sequence stands. The pane
     // sees neither the arrow nor the `z`, in either cursor mode.
@@ -2696,7 +2706,12 @@ fn typing_leaves_a_scrolled_up_view_in_place_when_scroll_on_input_is_off() {
 #[test]
 fn typing_on_the_alternate_screen_leaves_the_view_to_the_program() {
     let (mut server, pane_id, client_id, mut viewer) = build_server_with_scrolled_client();
-    server.handle_pty_output(pane_id, b"\x1b[?1049h"); // enter the alternate screen
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    ); // enter the alternate screen
 
     apply_key_press(
         &mut server,
@@ -2883,7 +2898,7 @@ fn a_pane_that_pushed_flag_eight_reads_shift_enter_as_a_csi_u_report() {
     let pane_id = get_only_pane_id(&server);
 
     // The program in the pane asks for every key as an escape code.
-    server.handle_pty_output(pane_id, b"\x1b[>8u");
+    server.handle_pty_output(pane_id, b"\x1b[>8u", SystemTime::UNIX_EPOCH, Instant::now());
     server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
 
     assert_eq!(
@@ -2899,7 +2914,12 @@ fn a_pane_reads_the_flags_of_the_screen_it_is_on_at_the_write() {
 
     // The program pushes flag 8 on the primary screen, then enters the
     // alternate screen, whose own stack is empty.
-    server.handle_pty_output(pane_id, b"\x1b[>8u\x1b[?1049h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[>8u\x1b[?1049h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
@@ -2907,7 +2927,12 @@ fn a_pane_reads_the_flags_of_the_screen_it_is_on_at_the_write() {
     );
 
     // Back on the primary screen its own stack still holds flag 8.
-    server.handle_pty_output(pane_id, b"\x1b[?1049l");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049l",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.handle_key_inputs(client_id, &[build_shift_enter_press()]);
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
@@ -2943,7 +2968,12 @@ fn a_release_reaches_a_pane_only_when_that_pane_asked_for_event_kinds() {
         Vec::<u8>::new()
     );
 
-    server.handle_pty_output(pane_id, b"\x1b[>10u");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[>10u",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.handle_key_inputs(client_id, std::slice::from_ref(&a_key_release_input));
     assert_eq!(
         get_pane_write_bytes(&fake_pty_backend, pane_id),
@@ -3011,7 +3041,7 @@ fn the_keys_of_one_read_are_each_encoded_for_the_pane_flags_in_one_write() {
     let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
     let pane_id = get_only_pane_id(&server);
     // The program in the pane asks for every key as an escape code.
-    server.handle_pty_output(pane_id, b"\x1b[>8u");
+    server.handle_pty_output(pane_id, b"\x1b[>8u", SystemTime::UNIX_EPOCH, Instant::now());
 
     server.handle_key_inputs(client_id, &build_presses_for_text("ab"));
 
@@ -3027,7 +3057,12 @@ fn the_keys_of_one_read_are_each_encoded_for_the_pane_flags_in_one_write() {
 fn a_read_whose_write_the_backend_refuses_writes_none_of_its_keys() {
     let (mut server, fake_pty_backend, client_id, _viewer) = build_test_server();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, &b"\n".repeat(40));
+    server.handle_pty_output(
+        pane_id,
+        &b"\n".repeat(40),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.scroll_up(client_id, pane_id, 3);
     fake_pty_backend.fail_writes_on(
         pane_id,

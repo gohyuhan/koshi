@@ -716,14 +716,16 @@ impl Server {
     }
 
     /// Remove a pane's live ID, cached size, terminal engine, timed renders,
-    /// and every mouse button held in it, with no release written. Close and
-    /// drop its output queue ([`Self::remove_pane_output_queue`]). Clear each
-    /// attached client's scroll offset and selection for it. Every pane removal
-    /// calls this for runtime bookkeeping.
+    /// command start, and every mouse button held in it, with no release
+    /// written. Close and drop its output queue
+    /// ([`Self::remove_pane_output_queue`]). Clear each attached client's
+    /// scroll offset and selection for it. Every pane removal calls this for
+    /// runtime bookkeeping.
     pub(super) fn release_pane_bookkeeping(&mut self, session_id: SessionId, pane_id: PaneId) {
         self.live_pane_ids.remove(&pane_id);
         self.pty_size_by_pane_id.remove(&pane_id);
         self.terminal_engine_by_pane_id.remove(&pane_id);
+        self.command_started_at_by_pane_id.remove(&pane_id);
         self.pane_animation_deadlines
             .set_pane_render_deadline(pane_id, None);
         self.pane_synchronized_output_deadlines

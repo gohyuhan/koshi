@@ -74,11 +74,15 @@ fn build_image_record(
 }
 
 /// Feed `input_bytes` through a fresh parser into `terminal_state` as the
-/// engine does: each run of printed characters goes to
+/// engine does: a fresh OSC reader queues the OSC texts of `input_bytes`
+/// first, and each run of printed characters goes to
 /// [`TerminalState::print_text`] at once. A clone fed the same bytes one
 /// printed character at a time through `print` must end equal to
 /// `terminal_state`, and the call panics when it does not.
 pub(crate) fn process_terminal_bytes(terminal_state: &mut TerminalState, input_bytes: &[u8]) {
+    let mut osc_reader = crate::engine::osc_reader::OscReader::default();
+    osc_reader.process_terminal_bytes(input_bytes);
+    terminal_state.queue_osc_texts(osc_reader.take_osc_texts());
     let mut single_character_state = terminal_state.clone();
     let mut single_character_parser =
         vte::Parser::<{ crate::engine::OSC_BUFFER_BYTE_CAPACITY }>::new_with_size();
@@ -161,7 +165,7 @@ fn state_missing_any_field_the_writer_emits_is_refused() {
         .keys()
         .cloned()
         .collect();
-    assert_eq!(serialized_field_names.len(), 32);
+    assert_eq!(serialized_field_names.len(), 30);
 
     for serialized_field_name in serialized_field_names {
         let mut incomplete_state = serialized_state.clone();
@@ -3245,7 +3249,7 @@ fn a_resume_format_4_terminal_state_reads_back_with_insert_mode_off() {
 }
 
 #[test]
-fn a_resume_format_4_held_shell_finish_reads_back_without_its_exit_code() {
+fn a_resume_format_4_terminal_state_reads_back_without_its_held_shell_facts_and_replies() {
     let terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 6,
         row_count: 2,
@@ -3254,19 +3258,39 @@ fn a_resume_format_4_held_shell_finish_reads_back_without_its_exit_code() {
     terminal_state_json["shell_integration_facts"] = serde_json::json!([
         "CommandStarted",
         {"CommandFinished": {"exit_code": 137}},
-        {"CommandFinished": {"exit_code": null}},
     ]);
+    terminal_state_json["device_query_replies"] = serde_json::json!([27, 91, 48, 110]);
 
-    let read_terminal_state = read_as_resume_format_4(terminal_state_json);
+    let mut read_terminal_state = read_as_resume_format_4(terminal_state_json);
 
+    assert_eq!(read_terminal_state.take_program_facts(), Vec::new());
     assert_eq!(
-        read_terminal_state.shell_integration_facts,
-        vec![
-            ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished,
-            ShellIntegrationFact::CommandFinished,
-        ]
+        read_terminal_state.take_device_query_replies(),
+        Vec::<u8>::new()
     );
+    assert_eq!(read_terminal_state, terminal_state);
+}
+
+#[test]
+fn a_resume_format_5_terminal_state_reads_back_without_its_held_shell_facts_and_replies() {
+    let terminal_state = TerminalState::from_pty_size(PtySize {
+        column_count: 6,
+        row_count: 2,
+    });
+    let mut terminal_state_json =
+        serde_json::to_value(&terminal_state).expect("the terminal state serializes");
+    terminal_state_json["shell_integration_facts"] = serde_json::json!(["CommandStarted"]);
+    terminal_state_json["device_query_replies"] = serde_json::json!([27, 91, 48, 110]);
+
+    let mut read_terminal_state: TerminalState =
+        serde_json::from_value(terminal_state_json).expect("the state reads back");
+
+    assert_eq!(read_terminal_state.take_program_facts(), Vec::new());
+    assert_eq!(
+        read_terminal_state.take_device_query_replies(),
+        Vec::<u8>::new()
+    );
+    assert_eq!(read_terminal_state, terminal_state);
 }
 
 #[test]

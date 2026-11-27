@@ -1673,12 +1673,18 @@ fn build_terminal_runtime_event(client_id: ClientId, host_event: Event) -> Optio
             );
             None
         }
-        Event::FocusIn
-        | Event::PrimaryDeviceAttributes(_)
+        Event::PrimaryDeviceAttributes(_)
         | Event::TerminalFeatures(_)
         | Event::SixelGraphicsAttributeReply(_)
         | Event::KittyGraphicsReply(_) => None,
-        Event::FocusOut => Some(RuntimeEvent::OuterTerminalFocusLost { client_id }),
+        Event::FocusIn => Some(RuntimeEvent::OuterTerminalFocusChanged {
+            client_id,
+            is_terminal_focused: true,
+        }),
+        Event::FocusOut => Some(RuntimeEvent::OuterTerminalFocusChanged {
+            client_id,
+            is_terminal_focused: false,
+        }),
     }
 }
 

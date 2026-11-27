@@ -455,7 +455,7 @@ fn a_copy_applied_while_the_swap_runs_reaches_the_clients_own_terminal() {
         .keys()
         .next()
         .expect("the root pane holds a terminal engine");
-    server.handle_pty_output(pane_id, b"hello");
+    server.handle_pty_output(pane_id, b"hello", SystemTime::UNIX_EPOCH, Instant::now());
     queue_command(
         &runtime_event_sender,
         attached_client.client_id,
@@ -711,11 +711,16 @@ fn the_carried_state_reads_back_with_every_tab_pane_and_screen() {
     let pane_ids: Vec<PaneId> = server.list_terminal_engines().keys().copied().collect();
     assert_eq!(pane_ids.len(), 2, "two tabs means two panes");
     for (pane_index, pane_id) in pane_ids.iter().enumerate() {
-        server.handle_pty_output(*pane_id, format!("pane {pane_index}").as_bytes());
+        server.handle_pty_output(
+            *pane_id,
+            format!("pane {pane_index}").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
         // Carrying the state out cancels the sequence each engine is still
         // decoding, which settles the grapheme cluster it holds too. Settling
         // it here makes the screen read below the one that is carried.
-        server.handle_pty_output(*pane_id, &[0x18]);
+        server.handle_pty_output(*pane_id, &[0x18], SystemTime::UNIX_EPOCH, Instant::now());
     }
     let expected_tabs = server.list_sessions()[&session_id].tabs.clone();
     let expected_pane_records = server.list_sessions()[&session_id].panes.clone();
@@ -3873,7 +3878,12 @@ fn a_carried_state_that_brings_no_pane_back_comes_back_as_one_fresh_shell_showin
     assert_eq!(fresh_pane_ids.len(), 1, "one fresh shell");
     assert_eq!(restored_session.session_name, session_start.session_name);
     let screen_text = get_joined_screen_text(&session_server, fresh_pane_ids[0]);
-    session_server.handle_pty_output(fresh_pane_ids[0], b"\x1b[2J\x1b[H");
+    session_server.handle_pty_output(
+        fresh_pane_ids[0],
+        b"\x1b[2J\x1b[H",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     assert_eq!(
         list_session_notifications(&session_server, session_start.session_id),
         vec![(

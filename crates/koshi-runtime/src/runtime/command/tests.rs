@@ -1804,7 +1804,12 @@ fn a_client_sourced_write_to_pane_snaps_that_client_view_to_live_output() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200)); // push lines into history
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    ); // push lines into history
     runtime.scroll_up(client_id, split_pane_id, 3);
     assert_eq!(
         get_client_scroll_offset(&runtime, client_id, split_pane_id),
@@ -1840,7 +1845,12 @@ fn an_external_write_naming_no_pane_snaps_the_sole_client_view_to_live_output() 
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     runtime.scroll_up(client_id, split_pane_id, 3);
 
     let command_envelope = build_command_envelope(
@@ -1870,7 +1880,12 @@ fn a_client_sourced_write_clears_the_clients_highlight_in_the_pane() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     runtime.scroll_up(client_id, split_pane_id, 3);
     runtime
         .get_client_mut(client_id)
@@ -1914,7 +1929,12 @@ fn an_empty_client_sourced_write_leaves_a_parked_view_alone() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     runtime.scroll_up(client_id, split_pane_id, 3);
 
     let command_envelope = build_command_envelope(
@@ -3661,7 +3681,12 @@ fn a_host_paste_wraps_in_bracketed_markers_when_the_pane_turned_them_on() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, b"\x1b[?2004h");
+    runtime.handle_pty_output(
+        split_pane_id,
+        b"\x1b[?2004h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     runtime.handle_host_paste(client_id, "ok");
     let input_write_batches = fake_pty_backend
@@ -11014,7 +11039,12 @@ fn scroll_pane_uses_the_named_clients_view_and_signed_lines() {
         tab_id,
         Some(split_pane_id),
     );
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let scroll_up_command_envelope = build_command_envelope(
         CommandSource::from_external_cli(Some(session_id), Some(second_client_id)),
@@ -11061,7 +11091,12 @@ fn scroll_pane_with_zero_lines_keeps_the_view_unchanged() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     runtime.scroll_up(client_id, split_pane_id, 4);
 
     let command_envelope = build_command_envelope(
@@ -11089,7 +11124,12 @@ fn scroll_pane_accepts_the_minimum_negative_line_count() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, &b"\n".repeat(200));
+    runtime.handle_pty_output(
+        split_pane_id,
+        &b"\n".repeat(200),
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     runtime.scroll_up(client_id, split_pane_id, 4);
 
     let command_envelope = build_command_envelope(
@@ -15871,7 +15911,12 @@ fn a_pane_exit_the_session_survives_posts_by_its_outcome_and_never_the_pane_cont
     ] {
         let (mut runtime, _runtime_event_sender, session_id, exiting_pane_id) =
             build_two_pane_exit_fixture(is_command_pane);
-        runtime.handle_pty_output(exiting_pane_id, b"password: hunter2\r\n");
+        runtime.handle_pty_output(
+            exiting_pane_id,
+            b"password: hunter2\r\n",
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
 
         let emitted_events = runtime.handle_child_exit(exiting_pane_id, exit_status);
 
@@ -18850,14 +18895,19 @@ fn output_arriving_after_a_child_exit_is_dropped_and_a_live_pane_still_updates()
         .contains_key(&exited_pane_id));
 
     // Late output for the now-engineless pane is a no-op.
-    runtime.handle_pty_output(exited_pane_id, b"late");
+    runtime.handle_pty_output(
+        exited_pane_id,
+        b"late",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     assert!(!runtime
         .list_terminal_engines()
         .contains_key(&exited_pane_id));
 
     // The live sibling still parses its output: two printable bytes advance its
     // cursor to column 2.
-    runtime.handle_pty_output(live_pane_id, b"hi");
+    runtime.handle_pty_output(live_pane_id, b"hi", SystemTime::UNIX_EPOCH, Instant::now());
     let (row_index, column_index) = runtime
         .list_terminal_engines()
         .get(&live_pane_id)
@@ -20089,7 +20139,12 @@ fn new_pane_with_no_working_directory_opens_in_the_source_panes_reported_directo
         ..
     } = build_resize_fixture();
     // The shell in the focused pane reports its directory over OSC 7.
-    runtime.handle_pty_output(split_pane_id, b"\x1b]7;file:///tmp/reported\x07");
+    runtime.handle_pty_output(
+        split_pane_id,
+        b"\x1b]7;file:///tmp/reported\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -20121,7 +20176,12 @@ fn the_shells_report_wins_over_the_os_answer() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, b"\x1b]7;file:///tmp/reported\x07");
+    runtime.handle_pty_output(
+        split_pane_id,
+        b"\x1b]7;file:///tmp/reported\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     fake_pty_backend.set_live_working_directory(split_pane_id, "/tmp/os-answer");
 
     let command_envelope = build_command_envelope(
@@ -20156,7 +20216,12 @@ fn a_remote_shells_reported_directory_is_not_inherited() {
     } = build_resize_fixture();
     // A shell over SSH reports a directory on another machine; the OS's
     // answer for the local child (the ssh process) is used instead.
-    runtime.handle_pty_output(split_pane_id, b"\x1b]7;file://build-server/srv/remote\x07");
+    runtime.handle_pty_output(
+        split_pane_id,
+        b"\x1b]7;file://build-server/srv/remote\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     fake_pty_backend.set_live_working_directory(split_pane_id, "/tmp/os-answer");
 
     let command_envelope = build_command_envelope(
@@ -20272,7 +20337,12 @@ fn an_explicit_working_directory_wins_over_the_source_panes_directory() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, b"\x1b]7;file:///tmp/reported\x07");
+    runtime.handle_pty_output(
+        split_pane_id,
+        b"\x1b]7;file:///tmp/reported\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
@@ -20332,7 +20402,12 @@ fn new_tab_with_no_working_directory_opens_in_the_focused_panes_directory() {
         split_pane_id,
         ..
     } = build_resize_fixture();
-    runtime.handle_pty_output(split_pane_id, b"\x1b]7;file:///tmp/reported\x07");
+    runtime.handle_pty_output(
+        split_pane_id,
+        b"\x1b]7;file:///tmp/reported\x07",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),

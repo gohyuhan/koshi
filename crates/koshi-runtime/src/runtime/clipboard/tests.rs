@@ -7,7 +7,7 @@
 //! the copy.
 
 use std::sync::{mpsc, Arc};
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use crate::runtime::command::tests::create_session_with_attached_client;
 use crate::runtime::pty_inbox::InboxSink;
@@ -433,9 +433,12 @@ fn a_pane_copy_that_one_clients_waiting_host_writes_refuse_still_reaches_the_oth
 fn pane_output_with_an_osc_52_copy_reaches_each_focusing_client_while_writes_are_allowed() {
     let mut fixture = build_clipboard_routing_fixture(ALLOWED_PANE_CLIPBOARD_WRITES);
 
-    fixture
-        .server
-        .handle_pty_output(fixture.pane_id, b"a\x1b]52;c;aGk=\x07b");
+    fixture.server.handle_pty_output(
+        fixture.pane_id,
+        b"a\x1b]52;c;aGk=\x07b",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     assert_eq!(
         fixture
@@ -455,9 +458,12 @@ fn pane_output_with_an_osc_52_copy_reaches_each_focusing_client_while_writes_are
 fn pane_output_with_an_osc_52_copy_reaches_no_client_while_writes_are_off() {
     let mut fixture = build_clipboard_routing_fixture(PaneClipboardWriteConfig::default());
 
-    fixture
-        .server
-        .handle_pty_output(fixture.pane_id, b"a\x1b]52;c;aGk=\x07b");
+    fixture.server.handle_pty_output(
+        fixture.pane_id,
+        b"a\x1b]52;c;aGk=\x07b",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     assert_eq!(
         fixture

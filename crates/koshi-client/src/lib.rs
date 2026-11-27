@@ -473,6 +473,10 @@ pub struct Client {
     /// This viewer's own notification queue, and every entry it took from its
     /// session's queue, merged in one bounded history.
     notification_history: NotificationHistory,
+    /// The keyboard focus the outer terminal last reported: `Some(true)` after
+    /// `CSI I`, `Some(false)` after `CSI O`, and `None` before its first
+    /// report.
+    reported_is_terminal_focused: Option<bool>,
     /// Restores the outer terminal when the client ends or the process
     /// panics. Held to be dropped with the client; nothing reads it.
     _terminal_cleanup_guard: TerminalCleanupGuard,
@@ -530,6 +534,7 @@ impl Client {
             pane_move_mode: None,
             floating_pane_tray: None,
             notification_history: NotificationHistory::from_client_id(client_id),
+            reported_is_terminal_focused: None,
             _terminal_cleanup_guard: terminal_cleanup_guard,
         }
     }

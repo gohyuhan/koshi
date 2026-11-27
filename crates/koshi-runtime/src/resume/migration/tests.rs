@@ -106,6 +106,9 @@ fn write_stored_rows_as_format_four_cells(decoded_pane_json: &mut Value) {
     .expect("encode the history lines");
 }
 
+/// Formats 4 and 5 store `device_query_replies` and `shell_integration_facts`
+/// in each carried terminal state, and the decoded pane holds neither. The
+/// format-4 fixture carries 4 panes and the format-5 fixture carries 6.
 #[test]
 fn every_migrated_field_of_each_released_fixture_survives_decoding() {
     let mut lost_json_paths = Vec::new();
@@ -155,11 +158,13 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
         )
         .expect("read the pane states");
         for (pane_key, raw_pane_state) in pane_states {
-            if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
+            if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_TERMINAL_STATE {
                 let saved_pane: Value =
                     serde_json::from_str(raw_pane_state.get()).expect("read the saved pane");
-                let decoded_pane: CarriedPaneState =
-                    serde_json::from_str(raw_pane_state.get()).expect("decode the saved pane");
+                let decoded_pane =
+                    serde_json::from_str::<ResumeFormat5CarriedPaneState>(raw_pane_state.get())
+                        .expect("decode the saved pane")
+                        .into_carried_pane_state();
                 lost_json_paths.extend(list_json_paths_lost_by_decoding(
                     &saved_pane,
                     &serde_json::to_value(&decoded_pane).expect("encode the decoded pane"),
@@ -196,7 +201,19 @@ fn every_migrated_field_of_each_released_fixture_survives_decoding() {
         }
     }
 
-    assert_eq!(lost_json_paths, Vec::<String>::new());
+    let mut expected_lost_json_paths = Vec::new();
+    for (source_resume_format, carried_pane_count) in [(4, 4), (5, 6)] {
+        for _ in 0..carried_pane_count {
+            for field_name in ["device_query_replies", "shell_integration_facts"] {
+                expected_lost_json_paths.push(format!(
+                    "format {source_resume_format} pane.terminal_state.{field_name}"
+                ));
+            }
+        }
+    }
+    expected_lost_json_paths.sort();
+    lost_json_paths.sort();
+    assert_eq!(lost_json_paths, expected_lost_json_paths);
 }
 
 #[test]
@@ -1027,6 +1044,9 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                         "focused_floating_pane_id": null
                     }
                 }},
+                "panes": {"pane_record_by_id": {
+                    "P0": {"pane_id": "P0", "spawn_spec": null, "working_directory": null}
+                }},
                 "notification_queue": {"queued_entries": [
                     {"severity": "Error", "text": "pane …a1b2 killed by signal 9"},
                     {"severity": "Warning", "text": "koshi.kdl: unknown key `tab-bar`"}
@@ -1127,6 +1147,14 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                             "unannounced_arrival": null
                         }
                     }},
+                    "panes": {"pane_record_by_id": {
+                        "P0": {
+                            "pane_id": "P0",
+                            "spawn_spec": null,
+                            "working_directory": null,
+                            "attention": null
+                        }
+                    }},
                     "notification_queue": {"queued_entries": [
                         {
                             "severity": "Error",
@@ -1182,12 +1210,14 @@ fn step_five_moves_each_client_after_the_first_holder_of_an_index_to_the_lowest_
                 "D": build_client_record(0),
                 "E": build_client_record(5)
             }},
+            "panes": {"pane_record_by_id": {}},
             "notification_queue": {"queued_entries": []}
         },
         "T": {
             "floating_set": {"members": []},
             "tabs": {},
             "clients": {"client_by_id": {"F": build_client_record(0)}},
+            "panes": {"pane_record_by_id": {}},
             "notification_queue": {"queued_entries": []}
         }
     }});
@@ -1214,12 +1244,14 @@ fn step_five_moves_each_client_after_the_first_holder_of_an_index_to_the_lowest_
 }
 
 /// A format-5 session holding `session_fields`, with an empty floating set,
-/// no tab and no client wherever `session_fields` names none of them.
+/// no tab, no client and no pane record wherever `session_fields` names none
+/// of them.
 fn build_step_five_session(session_fields: Value) -> Value {
     let mut session = serde_json::json!({
         "floating_set": {"members": []},
         "tabs": {},
-        "clients": {"client_by_id": {}}
+        "clients": {"client_by_id": {}},
+        "panes": {"pane_record_by_id": {}}
     });
     let Value::Object(session_fields) = session_fields else {
         panic!("the session fields are an object");
@@ -1374,6 +1406,30 @@ fn step_five_names_the_missing_or_misshapen_field() {
                 "floating_pane_view_by_pane_id": {}
             }}}})),
             "body.session_by_id.S.clients.client_by_id.C.color_index must be a whole number",
+        ),
+        (
+            serde_json::json!({"session_by_id": {"S": {
+                "floating_set": {"members": []},
+                "tabs": {},
+                "clients": {"client_by_id": {}}
+            }}}),
+            "body.session_by_id.S.panes is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"panes": 7})),
+            "body.session_by_id.S.panes must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"panes": {}})),
+            "body.session_by_id.S.panes.pane_record_by_id is missing",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"panes": {"pane_record_by_id": 7}})),
+            "body.session_by_id.S.panes.pane_record_by_id must be an object",
+        ),
+        (
+            build_step_five_session(serde_json::json!({"panes": {"pane_record_by_id": {"P": 7}}})),
+            "body.session_by_id.S.panes.pane_record_by_id.P must be an object",
         ),
         (
             build_step_five_session(serde_json::json!({})),

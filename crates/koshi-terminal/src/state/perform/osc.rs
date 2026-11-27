@@ -1,10 +1,57 @@
-//! OSC parsing for shell reports and working-directory updates.
+//! OSC parsing for shell markers and working-directory updates, and the OSC
+//! commands whose whole text the engine's OSC reader keeps.
 
 use std::path::PathBuf;
 
 use percent_encoding::percent_decode;
 
 use crate::state::ReportedWorkingDirectory;
+
+/// An OSC command whose text the engine's OSC reader keeps whole: every byte
+/// after the command's first `;`, with each `;` after it kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OscTextCommand {
+    /// `OSC 0`, `OSC 1` and `OSC 2`: the window title.
+    Title,
+    /// `OSC 7`: the working-directory URI.
+    WorkingDirectory,
+    /// `OSC 9`: a notification body.
+    Osc9Notification,
+    /// `OSC 777`: a subcommand and its fields.
+    Osc777Notification,
+    /// `OSC 99`: the metadata and the payload of one notification part.
+    Osc99Notification,
+}
+
+impl OscTextCommand {
+    /// The command that `command_number_bytes`, the bytes of an OSC before
+    /// its first `;`, names, or `None` for every other command number:
+    /// `2` → `Title`, `99` → `Osc99Notification`, `52` and `02` → `None`.
+    pub(crate) fn from_command_number(command_number_bytes: &[u8]) -> Option<Self> {
+        match command_number_bytes {
+            b"0" | b"1" | b"2" => Some(Self::Title),
+            b"7" => Some(Self::WorkingDirectory),
+            b"9" => Some(Self::Osc9Notification),
+            b"777" => Some(Self::Osc777Notification),
+            b"99" => Some(Self::Osc99Notification),
+            _ => None,
+        }
+    }
+}
+
+/// The text of one finished OSC whose command is an [`OscTextCommand`].
+///
+/// `ESC ] 9 ; a ; b BEL` gives `Osc9Notification` with `argument_bytes:
+/// Some(b"a;b")`, and `ESC ] 9 BEL` gives `argument_bytes: None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OscText {
+    /// The command the OSC names.
+    pub(crate) osc_text_command: OscTextCommand,
+    /// The bytes after the first `;`, without the control bytes that an OSC
+    /// skips, and cut to [`OSC_BUFFER_BYTE_CAPACITY`](crate::engine::OSC_BUFFER_BYTE_CAPACITY)
+    /// bytes. `None` when the OSC holds no `;`.
+    pub(crate) argument_bytes: Option<Vec<u8>>,
+}
 
 /// A semantic shell marker carried by OSC 133.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,15 +62,16 @@ pub(super) enum Osc133 {
     Input,
     /// The shell started executing the command.
     CommandStart,
-    /// The shell finished the command.
-    CommandFinished,
+    /// The shell finished the command, with the exit code it reported, or
+    /// `None` when it reported none.
+    CommandFinished(Option<i32>),
 }
 
 /// Parse an OSC 133 payload, split on `;` by `vte`, into its marker.
 ///
 /// Accepts `133;A`, `133;B`, `133;C`, `133;D`, and `133;D;<code>` where
-/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`). The code is checked
-/// and not kept: `133;D;137` and `133;D` give the same finish.
+/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`): `133;D;137` gives
+/// `CommandFinished(Some(137))`, and `133;D` gives `CommandFinished(None)`.
 ///
 /// Parameters after the marker are options the shell adds (`cl=m`, `aid=1`)
 /// and are skipped: `133;A;cl=m;aid=1` is the prompt mark and `133;D;0;aid=1`
@@ -45,11 +93,11 @@ pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
         (b"D", [exit_code_bytes, ..]) if !exit_code_bytes.is_empty() => {
             let exit_code_text = std::str::from_utf8(exit_code_bytes).ok()?;
             match exit_code_text.parse::<i32>() {
-                Ok(_) => Some(Osc133::CommandFinished),
+                Ok(exit_code) => Some(Osc133::CommandFinished(Some(exit_code))),
                 Err(_) => None,
             }
         }
-        (b"D", _) => Some(Osc133::CommandFinished),
+        (b"D", _) => Some(Osc133::CommandFinished(None)),
         _ => None,
     }
 }
@@ -58,16 +106,9 @@ pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
 /// `None` and leaves the last reported working directory in place.
 pub(super) const MAX_OSC7_URI_BYTE_COUNT: usize = 4 * 1024;
 
-/// The bytes an OSC 7 payload carries ahead of the URI on the wire: the command
-/// number `7` and the `;` after it.
-const OSC7_PAYLOAD_PREFIX_BYTE_COUNT: usize = 2;
-
-// A URI of exactly `MAX_OSC7_URI_BYTE_COUNT` fits the parser's OSC buffer whole. A
-// URI the parser cut short is longer than the limit and yields `None`.
-const _: () = assert!(
-    MAX_OSC7_URI_BYTE_COUNT + OSC7_PAYLOAD_PREFIX_BYTE_COUNT
-        <= crate::engine::OSC_BUFFER_BYTE_CAPACITY
-);
+// A URI of exactly `MAX_OSC7_URI_BYTE_COUNT` bytes is an `OscText` whole. A URI
+// the OSC reader cut short is longer than the limit and yields `None`.
+const _: () = assert!(MAX_OSC7_URI_BYTE_COUNT < crate::engine::OSC_BUFFER_BYTE_CAPACITY);
 
 /// Parse an OSC 7 working-directory URI (`file://host/path`) into a
 /// [`ReportedWorkingDirectory`], or

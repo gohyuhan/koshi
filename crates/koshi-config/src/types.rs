@@ -22,6 +22,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use koshi_core::action::ActionReference;
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::constant::DEFAULT_MAX_FRAMES_PER_SECOND;
 use koshi_core::geometry::Direction;
 use koshi_core::key::{BindingModifierFlags, ExtendedKeysMode, Key, KeyChord, KeySequence};
@@ -64,8 +65,9 @@ pub const HIGHEST_MAX_LOG_FILE_SIZE_IN_MB: u32 = 1024;
 
 /// The settings the session host reads: the shared layout floor, the
 /// scrollback buffers it owns, the environment it spawns children into, its
-/// own log file, who else on this machine may reach it, and whether its panes
-/// may write the clipboard.
+/// own log file, who else on this machine may reach it, whether its panes
+/// may write the clipboard, and which program signals make a pane wait for a
+/// person.
 ///
 /// One session has one of these however many viewers are attached. Every
 /// field here describes something all of them share. A viewer's own
@@ -101,6 +103,8 @@ pub struct ServerConfig {
     /// Whether a program in a pane may write the clipboard of the clients that
     /// focus that pane, and the largest copy it may write.
     pub pane_clipboard_writes: PaneClipboardWriteConfig,
+    /// Which program signals make a pane wait for a person.
+    pub attention: AttentionConfig,
 }
 
 impl Default for ServerConfig {
@@ -117,6 +121,50 @@ impl Default for ServerConfig {
             shared_sessions_directory: None,
             should_auto_close_session: false,
             pane_clipboard_writes: PaneClipboardWriteConfig::default(),
+            attention: AttentionConfig::default(),
+        }
+    }
+}
+
+/// The `attention` block: which program signals make a pane wait for a
+/// person. Each field is `true` by default.
+///
+/// The session reads it when it starts and when it restarts into a new build.
+/// A new value applies to the next signal: a pane that already waits keeps
+/// waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttentionConfig {
+    /// Whether a standalone BEL raises attention: the `bell` key.
+    pub should_raise_for_bell: bool,
+    /// Whether an OSC 9, OSC 777 or OSC 99 notification raises attention: the
+    /// `notify` key.
+    pub should_raise_for_notify: bool,
+    /// Whether a command that ran for
+    /// [`MIN_ATTENTION_COMMAND_SECONDS`](koshi_core::attention::MIN_ATTENTION_COMMAND_SECONDS)
+    /// or more raises attention when it finishes: the `command-finished` key.
+    pub should_raise_for_command_finished: bool,
+}
+
+impl Default for AttentionConfig {
+    fn default() -> Self {
+        Self {
+            should_raise_for_bell: true,
+            should_raise_for_notify: true,
+            should_raise_for_command_finished: true,
+        }
+    }
+}
+
+impl AttentionConfig {
+    /// Whether a signal of `attention_reason_kind` raises attention. With
+    /// `bell #false`, [`AttentionReasonKind::Bell`] gives `false` and
+    /// [`AttentionReasonKind::Notify`] gives `true`.
+    #[must_use]
+    pub fn should_raise_for(&self, attention_reason_kind: AttentionReasonKind) -> bool {
+        match attention_reason_kind {
+            AttentionReasonKind::Bell => self.should_raise_for_bell,
+            AttentionReasonKind::Notify => self.should_raise_for_notify,
+            AttentionReasonKind::CommandFinished => self.should_raise_for_command_finished,
         }
     }
 }

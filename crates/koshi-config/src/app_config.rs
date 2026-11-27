@@ -50,9 +50,10 @@ use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::error::ConfigError;
 use crate::layer::{
-    PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig,
-    PartialMouseConfig, PartialNotificationConfig, PartialPaneClipboardWriteConfig,
-    PartialPaneConfig, PartialScrollbackConfig, PartialTerminalConfig, PartialUpdateConfig,
+    PartialAttentionConfig, PartialCopyConfig, PartialKoshiConfig, PartialLayoutDefaults,
+    PartialLoggingConfig, PartialMouseConfig, PartialNotificationConfig,
+    PartialPaneClipboardWriteConfig, PartialPaneConfig, PartialScrollbackConfig,
+    PartialTerminalConfig, PartialUpdateConfig,
 };
 use crate::parser::{
     find_newer_version_error, find_section_block, format_unknown_key, parse_boolean_kdl_value,
@@ -91,6 +92,7 @@ const APP_CONFIG_SECTION_NAMES: &[&str] = &[
     "shared-sessions-dir",
     "auto-close-session",
     "pane-clipboard-writes",
+    "attention",
 ];
 
 /// A parsed `koshi.kdl`.
@@ -320,6 +322,10 @@ pub(crate) fn parse_app_config_from_document(
                 partial_koshi_config.pane_clipboard_writes = Some(
                     parse_pane_clipboard_write_config(config_node, &mut parse_problems),
                 );
+            }
+            "attention" => {
+                partial_koshi_config.attention =
+                    Some(parse_attention_config(config_node, &mut parse_problems));
             }
             unknown_section_name => parse_problems.record_warning(
                 config_node.span(),
@@ -875,6 +881,51 @@ fn parse_pane_clipboard_write_config(
         }
     }
     partial_pane_clipboard_write_config
+}
+
+/// Reads the `attention { … }` block: `bell`, `notify` and
+/// `command-finished`, each a boolean.
+fn parse_attention_config(
+    config_node: &KdlNode,
+    parse_problems: &mut ParseProblems,
+) -> PartialAttentionConfig {
+    let mut partial_attention_config = PartialAttentionConfig::default();
+    let Some(section_children) = find_section_block(config_node, parse_problems) else {
+        return partial_attention_config;
+    };
+    for field_node in section_children.nodes() {
+        let field_name = field_node.name().value();
+        let attention_field = match field_name {
+            "bell" => &mut partial_attention_config.should_raise_for_bell,
+            "notify" => &mut partial_attention_config.should_raise_for_notify,
+            "command-finished" => &mut partial_attention_config.should_raise_for_command_finished,
+            unknown_field_name => {
+                parse_problems.record_warning(
+                    field_node.span(),
+                    format!(
+                        "ignored {}",
+                        format_unknown_key(
+                            &format!("attention.{unknown_field_name}"),
+                            &[
+                                "attention.bell",
+                                "attention.notify",
+                                "attention.command-finished",
+                            ],
+                        )
+                    ),
+                );
+                continue;
+            }
+        };
+        set_parsed_field(
+            attention_field,
+            parse_boolean_kdl_value(field_node),
+            "attention",
+            field_node,
+            parse_problems,
+        );
+    }
+    partial_attention_config
 }
 
 /// Reads the largest copy a pane may write, in decoded bytes. A value below

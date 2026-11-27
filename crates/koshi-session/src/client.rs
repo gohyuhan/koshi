@@ -209,6 +209,20 @@ pub enum ArrivalNotice {
     Reconnected,
 }
 
+/// Whether the terminal a client runs in has keyboard focus, as the client
+/// last reported it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum TerminalFocus {
+    /// No report arrived since the client attached: its terminal reports no
+    /// focus change, or the client sends no report.
+    #[default]
+    Unreported,
+    /// The terminal reported `CSI I`: it gained focus.
+    Focused,
+    /// The terminal reported `CSI O`: it lost focus.
+    Unfocused,
+}
+
 /// One attached client: a single terminal connected to a session, holding the
 /// identity the server gave it at attach and the view state that is the
 /// client's alone. Two clients on the same session — and even viewing the same
@@ -298,6 +312,11 @@ pub struct Client {
     /// carry it.
     #[serde(skip)]
     is_viewer_local_input_mode_on: bool,
+    /// Whether the terminal this client runs in has keyboard focus, as the
+    /// client last reported it. [`TerminalFocus::Unreported`] at each attach.
+    /// The resume file does not carry it.
+    #[serde(skip)]
+    terminal_focus: TerminalFocus,
     /// Whether this client grabs the mouse for text selection: while on, a drag
     /// highlights in koshi even over a program that asked for the mouse. Toggled
     /// by `core:mouse-select`; independent of [`lock_mode`](Self::lock_mode).
@@ -409,6 +428,7 @@ impl Client {
             input_pane_moved_by_others_count: 0,
             dropped_input_request_count: 0,
             is_viewer_local_input_mode_on: false,
+            terminal_focus: TerminalFocus::Unreported,
             is_mouse_selection_enabled: false,
             scroll_offset_by_pane_id: HashMap::new(),
             selection_by_pane_id: HashMap::new(),
@@ -821,6 +841,18 @@ impl Client {
             self.input_pane_moved_by_others_count =
                 self.input_pane_moved_by_others_count.saturating_add(1);
         }
+    }
+
+    /// Whether the terminal this client runs in has keyboard focus, as the
+    /// client last reported it.
+    #[must_use]
+    pub fn get_terminal_focus(&self) -> TerminalFocus {
+        self.terminal_focus
+    }
+
+    /// Record the terminal focus this client reported. Marks no view change.
+    pub fn set_terminal_focus(&mut self, terminal_focus: TerminalFocus) {
+        self.terminal_focus = terminal_focus;
     }
 
     /// Record whether this client's viewer keeps its keys in one of its local

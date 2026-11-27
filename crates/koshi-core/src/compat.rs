@@ -162,6 +162,11 @@ pub struct Surface {
 ///   `Attached` answer to its `Attach`. Until it arrives, the session sends
 ///   the client no frame, event or host write, and any request other than it,
 ///   `Ping` and `Leaving` ends the connection. 5 has no such request.
+/// - The `TerminalFocus` request says whether the terminal the client runs in
+///   has keyboard focus. 5 has no such request.
+/// - The session's event stream carries `PaneAttentionRaised` and
+///   `PaneAttentionCleared`: a pane that began or stopped waiting for a
+///   person. 5 has neither event.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -317,7 +322,14 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// view store holds `presented_token_hash_by_client_id`, the presented token
 /// hash that still stands for each client, and a format 5 store takes an
 /// empty map. Each saved view record holds `connection_token_hashes`, where
-/// format 5 held one `connection_token_hash`. A session
+/// format 5 held one `connection_token_hash`. Each pane record holds
+/// `attention`, what the pane last asked a person to look at and since when,
+/// and a format 5 pane record takes `null`. A pane's terminal state holds no
+/// device query reply and no shell-integration fact: a pane of format 5 or
+/// older drops the ones it held. A pane's open synchronized-output group holds
+/// `held_chunk_read_times`, the wall time koshi read each chunk among its
+/// bytes. A group of format 5 or older takes one read time for all its bytes:
+/// its deadline less 150 ms. A session
 /// of format 5 keeps its clients, and the body keeps its saved views and resume-token
 /// hashes. Format 5 adds each session's floating panes, each client's view of
 /// them, each session's starting tab, each tab's solved tab size, the views
@@ -333,8 +345,7 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// size. In every other tab, the resize delta of each child with a `preferred`
 /// target moves onto its trailing-most flexible sibling. Format 5 also adds
 /// each session's notification queue, and drops each session's
-/// `is_recovery_notice_visible`. A pane's held shell-integration finish loses
-/// the exit code it carried in format 4. A format 4 session gets a queue in a
+/// `is_recovery_notice_visible`. A format 4 session gets a queue in a
 /// new epoch, which holds one `Error` entry when its
 /// `is_recovery_notice_visible` was `true`, and is empty otherwise. Formats 4
 /// through 6 use the declared field names in the saved records. Formats 1

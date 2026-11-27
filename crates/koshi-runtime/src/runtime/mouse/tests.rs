@@ -1137,7 +1137,12 @@ fn a_click_in_the_focused_pane_forwards_a_report_when_the_program_asks() {
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // The program turns on normal tracking with SGR encoding.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     dispatch_mouse_input(
@@ -1183,7 +1188,12 @@ fn a_press_drag_release_gesture_forwards_each_event() {
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // Button-event tracking reports drags; SGR encoding.
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     dispatch_mouse_input(
@@ -1229,7 +1239,12 @@ fn a_drag_reports_the_cell_it_moved_to_with_the_column_and_row_the_right_way_rou
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // Button-event tracking reports drags; SGR encoding.
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (start_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     dispatch_mouse_input(
@@ -1261,7 +1276,12 @@ fn a_mouse_select_gesture_over_a_mouse_aware_program_forwards_nothing() {
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
     // Button-event tracking would report a bare drag; SGR encoding.
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     // Grab the mouse for koshi selection, the way the binding does; the viewer
     // reads the change off the frame it applies before the next event.
     let _ = server.submit_command(CommandEnvelope::from_parts(
@@ -1328,7 +1348,12 @@ fn a_forwarded_press_is_written_only_to_a_pane_that_asked_for_the_mouse() {
     );
 
     // Normal tracking with SGR encoding: the press is written.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.forward_mouse_to_pane(
         client_id,
         pane_id,
@@ -1371,7 +1396,12 @@ fn a_click_from_a_starving_sole_viewer_forwards_nothing() {
     let pane_id = get_only_pane_id(&server);
     // Read the cell off the layout while the client still sizes the tab.
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let _ = server.handle_client_resize(
         client_id,
@@ -1412,7 +1442,12 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
     };
 
     // Normal tracking does not report motion: the move forwards nothing.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     dispatch_mouse_input(&mut server, &mut viewer, motion_input);
     assert_eq!(
         fake_pty_backend
@@ -1423,7 +1458,12 @@ fn a_bare_move_forwards_only_in_any_motion_mode() {
     );
 
     // Any-motion tracking reports it: no-button 3 + motion bit 32 = 35.
-    server.handle_pty_output(pane_id, b"\x1b[?1003h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1003h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     dispatch_mouse_input(&mut server, &mut viewer, motion_input);
     assert_eq!(
         fake_pty_backend
@@ -1439,7 +1479,12 @@ fn a_captured_release_is_re_stamped_to_the_pressed_button() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     // A right press captures the gesture (button 2).
@@ -1481,7 +1526,12 @@ fn a_drag_with_no_captured_press_is_dropped() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
     // A drag arrives without a press to capture the gesture (a release with no
@@ -1515,7 +1565,12 @@ fn a_captured_drag_that_leaves_the_pane_clamps_to_its_edge() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
     // Press inside the pane to capture the gesture, then drag far past its top-
@@ -1600,7 +1655,12 @@ fn a_click_on_an_unfocused_pane_focuses_it_rather_than_forwarding() {
         .map(|pane_slot| pane_slot.pane_id)
         .find(|&pane_id| pane_id != focused_pane_id)
         .expect("a second pane");
-    server.handle_pty_output(other_pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        other_pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, other_pane_id);
 
     dispatch_mouse_input(
@@ -1675,7 +1735,7 @@ fn find_hovered_pane_id(server: &Server, viewer: &ViewerClient) -> Option<PaneId
 /// Fill `pane_id`'s scrollback by printing `line_count` lines of `x`.
 fn feed_pane_scrollback(server: &mut Server, pane_id: PaneId, line_count: usize) {
     for _line_index in 0..line_count {
-        server.handle_pty_output(pane_id, b"x\r\n");
+        server.handle_pty_output(pane_id, b"x\r\n", SystemTime::UNIX_EPOCH, Instant::now());
     }
 }
 
@@ -1792,7 +1852,12 @@ fn a_wheel_over_a_mouse_reporting_pane_forwards_a_report() {
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
     // The program turns on normal tracking with SGR encoding.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
 
@@ -1822,7 +1887,12 @@ fn a_wheel_on_the_alternate_screen_with_alternate_scroll_sends_arrow_keys() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     // Enter the alternate screen and turn alternate-scroll on, with no mouse mode.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
 
@@ -1860,7 +1930,12 @@ fn alternate_scroll_uses_application_cursor_keys_when_the_program_asks() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     // Alternate screen, alternate-scroll on, application cursor keys on.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h\x1b[?1h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h\x1b[?1h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
 
@@ -2048,7 +2123,12 @@ fn a_wheel_over_an_unfocused_mouse_app_forwards_to_that_pane() {
         .expect("a second pane");
 
     // The unfocused pane's program wants the mouse: normal tracking, SGR.
-    server.handle_pty_output(other_pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        other_pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, pane_column, pane_row) =
         find_pane_content_cell(&server, client_id, other_pane_id);
     let mut viewer = build_viewer(client_id);
@@ -2085,7 +2165,12 @@ fn a_highlight_holds_the_view_even_over_a_mouse_reporting_program() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     feed_pane_scrollback(&mut server, pane_id, 40);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     set_pane_highlight(&mut server, client_id, pane_id);
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
@@ -2117,7 +2202,12 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
     // live mode when it writes and drops the wheel event.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
     let wheel_input = build_wheel_input(ScrollDirection::Up, screen_point);
@@ -2138,7 +2228,12 @@ fn a_forwarded_wheel_is_dropped_when_the_program_turned_the_mouse_off() {
     );
 
     // The program turns mouse reporting off between that frame and the write.
-    server.handle_pty_output(pane_id, b"\x1b[?1000l");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000l",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.forward_mouse_to_pane(
         client_id,
         pane_id,
@@ -2162,7 +2257,12 @@ fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_wri
     // viewer decided from was painted.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
@@ -2183,7 +2283,7 @@ fn alternate_scroll_arrows_follow_the_cursor_key_mode_at_the_moment_they_are_wri
     );
 
     // The program switches to application cursor keys before the write.
-    server.handle_pty_output(pane_id, b"\x1b[?1h");
+    server.handle_pty_output(pane_id, b"\x1b[?1h", SystemTime::UNIX_EPOCH, Instant::now());
     server.write_alternate_scroll_arrows(client_id, pane_id, true, 3);
 
     assert_eq!(
@@ -2201,7 +2301,12 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
     // program has since left the alternate screen.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
@@ -2223,7 +2328,12 @@ fn arrow_keys_are_dropped_when_the_pane_left_the_alternate_screen_before_the_wri
     );
 
     // The program leaves the alternate screen before the write.
-    server.handle_pty_output(pane_id, b"\x1b[?1049l");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049l",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     server.write_alternate_scroll_arrows(client_id, pane_id, true, 3);
 
     assert_eq!(
@@ -2288,7 +2398,12 @@ fn a_zero_line_notch_sends_no_arrow_keys() {
     // of zero.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     server.write_alternate_scroll_arrows(client_id, pane_id, true, 0);
 
@@ -2308,7 +2423,12 @@ fn arrows_whose_bytes_would_pass_the_pane_input_limit_write_nothing() {
     // allocated for them.
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     server.write_alternate_scroll_arrows(client_id, pane_id, true, usize::MAX);
     server.write_alternate_scroll_arrows(
@@ -2332,7 +2452,12 @@ fn arrows_whose_bytes_would_pass_the_pane_input_limit_write_nothing() {
 fn a_one_line_notch_sends_one_arrow() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     server.write_alternate_scroll_arrows(client_id, pane_id, false, 1);
 
@@ -2352,7 +2477,12 @@ fn a_scroll_of_a_pane_on_the_alternate_screen_stores_no_offset() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Enter the alternate screen. `scroll_pane_view` is called directly, with
     // no viewer deciding anything first.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let view_top_row_index = server.scroll_pane_view(client_id, pane_id, true, 5);
 
@@ -2400,7 +2530,12 @@ fn a_wheel_on_the_alternate_screen_without_alternate_scroll_stores_no_offset() {
     feed_pane_scrollback(&mut server, pane_id, 40);
     // Enter the alternate screen with neither mouse mode nor alt-scroll (?1007):
     // a full-screen app that ignores the wheel.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
     let mut viewer = build_viewer(client_id);
 
@@ -2448,7 +2583,12 @@ fn a_wheel_over_chrome_reaches_the_focused_mouse_app() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     // The focused pane's program wants the mouse: normal tracking, SGR.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     // A wheel over chrome (no pane under the pointer) goes to the focused pane,
     // clamped to its edge, instead of being dropped.
@@ -2484,7 +2624,12 @@ fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let mut viewer = build_viewer(client_id);
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (screen_point, _, _) = find_pane_content_cell(&server, client_id, pane_id);
 
     let mouse_frame = crate::runtime::tests::build_mouse_frame(
@@ -2506,7 +2651,12 @@ fn a_forward_decided_from_a_stale_frame_writes_nothing_once_tracking_is_off() {
     );
 
     // The program turns reporting off; no frame is painted in between.
-    server.handle_pty_output(pane_id, b"\x1b[?1000l");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000l",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     apply_mouse_actions(&mut server, &mut viewer, &mouse_frame, mouse_actions);
 
     assert_eq!(
@@ -2728,7 +2878,12 @@ fn a_round_holding_one_forward_writes_the_report_and_answers_with_an_empty_list(
         build_server_with_mouse_event_queue();
     let pane_id = get_only_pane_id(&server);
     // The program turns on normal tracking with SGR encoding.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
 
     server.run_client_mouse(
@@ -2757,7 +2912,12 @@ fn a_round_holding_one_alternate_scroll_writes_the_arrows_and_answers_with_an_em
         build_server_with_mouse_event_queue();
     let pane_id = get_only_pane_id(&server);
     // Enter the alternate screen and turn alternate-scroll on.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h\x1b[?1007h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1049h\x1b[?1007h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     server.run_client_mouse(
         client_id,
@@ -2818,7 +2978,12 @@ fn a_round_that_reports_nothing_is_still_answered() {
     let (mut server, fake_pty_backend, client_id, mouse_event_queue) =
         build_server_with_mouse_event_queue();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let forward_mouse_action = build_wire_left_press(pane_id, pane_column, pane_row);
 
@@ -2866,7 +3031,12 @@ fn the_answers_follow_the_order_of_the_actions_that_reported() {
     let pane_id = get_only_pane_id(&server);
     split_focused_pane(&mut server, client_id);
     feed_pane_scrollback(&mut server, pane_id, 40);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let (_, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let initial_column_count = get_pane_column_count(&server, client_id, pane_id);
 
@@ -3911,7 +4081,12 @@ fn forward_mouse_at(
 fn a_release_is_written_only_for_a_button_the_client_holds_in_that_pane() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let pane_local_cell = Point { column: 0, row: 0 };
     let other_client_id = ClientId::new();
 
@@ -3974,7 +4149,12 @@ fn a_release_is_written_only_for_a_button_the_client_holds_in_that_pane() {
 fn removing_a_client_releases_its_held_button_at_the_cell_of_its_last_drag() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let other_client_id = ClientId::new();
     forward_mouse_at(
         &mut server,
@@ -4043,7 +4223,12 @@ fn a_press_the_program_did_not_take_is_never_released() {
         MouseKind::Press(MouseButton::Left),
         pane_local_cell,
     );
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     forward_mouse_at(
         &mut server,
         client_id,
@@ -4068,7 +4253,12 @@ fn a_release_the_tracking_level_does_not_report_still_ends_the_held_button() {
     let pane_id = get_only_pane_id(&server);
     let pane_local_cell = Point { column: 0, row: 0 };
     // X10 compatibility reports presses only.
-    server.handle_pty_output(pane_id, b"\x1b[?9h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?9h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     forward_mouse_at(
         &mut server,
         client_id,
@@ -4084,7 +4274,12 @@ fn a_release_the_tracking_level_does_not_report_still_ends_the_held_button() {
         pane_local_cell,
     );
     // Normal tracking reports releases.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let _ = server.handle_returning_client_detach(client_id);
 
@@ -4101,7 +4296,12 @@ fn a_release_the_tracking_level_does_not_report_still_ends_the_held_button() {
 fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
     let (mut server, fake_pty_backend, _genesis_client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let viewport_size = Size {
         column_count: 80,
         row_count: 24,
@@ -4162,7 +4362,12 @@ fn a_token_that_takes_a_client_over_releases_the_button_that_client_held() {
 fn carrying_the_session_out_releases_every_held_button_in_press_order() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     forward_mouse_at(
         &mut server,
         client_id,
@@ -4198,7 +4403,12 @@ fn carrying_the_session_out_releases_every_held_button_in_press_order() {
 fn a_second_press_of_a_held_button_keeps_one_held_button_at_the_newer_cell() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     forward_mouse_at(
         &mut server,
         client_id,
@@ -4233,7 +4443,12 @@ fn a_second_press_of_a_held_button_keeps_one_held_button_at_the_newer_cell() {
 fn a_detach_for_a_client_the_session_does_not_hold_still_releases_its_buttons() {
     let (mut server, fake_pty_backend, _client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     // A round from a client whose record a take-over already removed.
     let removed_client_id = ClientId::new();
     forward_mouse_at(
@@ -4268,7 +4483,12 @@ fn a_drag_is_written_only_for_a_button_the_client_holds_in_that_pane() {
         MouseKind::Press(MouseButton::Left),
         Point { column: 0, row: 0 },
     );
-    server.handle_pty_output(pane_id, b"\x1b[?1002h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1002h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     forward_mouse_at(
         &mut server,
         client_id,
@@ -4328,7 +4548,12 @@ fn a_drag_the_tracking_level_does_not_report_leaves_the_release_at_the_press_cel
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     // Normal tracking reports presses and releases, not drags.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     forward_mouse_at(
         &mut server,
         client_id,
@@ -4366,7 +4591,12 @@ fn closing_a_pane_ends_the_buttons_held_in_it_and_keeps_the_others() {
         .find(|&&pane_id| pane_id != kept_pane_id)
         .expect("the split pane");
     for pane_id in [kept_pane_id, closed_pane_id] {
-        server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+        server.handle_pty_output(
+            pane_id,
+            b"\x1b[?1000h\x1b[?1006h",
+            SystemTime::UNIX_EPOCH,
+            Instant::now(),
+        );
         forward_mouse_at(
             &mut server,
             client_id,
@@ -4414,7 +4644,12 @@ fn a_click_in_a_press_only_mode_leaves_no_release_to_write_when_the_client_leave
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
     // X10 compatibility reports presses only.
-    server.handle_pty_output(pane_id, b"\x1b[?9h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?9h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let mut viewer = build_viewer(client_id);
     let (screen_point, pane_column, pane_row) = find_pane_content_cell(&server, client_id, pane_id);
     let mouse_gesture = |mouse_kind| MouseInput {
@@ -4433,7 +4668,12 @@ fn a_click_in_a_press_only_mode_leaves_no_release_to_write_when_the_client_leave
         mouse_gesture(MouseKind::Release(MouseButton::Left)),
     );
     // Normal tracking reports releases.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
 
     let _ = server.handle_returning_client_detach(client_id);
 
@@ -4450,7 +4690,12 @@ fn a_click_in_a_press_only_mode_leaves_no_release_to_write_when_the_client_leave
 fn a_release_written_when_the_client_leaves_follows_the_pointer_cell_into_a_grown_grid() {
     let (mut server, fake_pty_backend, client_id) = build_runtime_with_fake_pty_backend();
     let pane_id = get_only_pane_id(&server);
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(
+        pane_id,
+        b"\x1b[?1000h\x1b[?1006h",
+        SystemTime::UNIX_EPOCH,
+        Instant::now(),
+    );
     let resize_pane_grid = |server: &mut Server, column_count: u16, row_count: u16| {
         server
             .terminal_engine_by_pane_id

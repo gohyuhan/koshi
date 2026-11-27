@@ -15,7 +15,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Condvar, Mutex, Weak};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use koshi_core::ids::PaneId;
 use koshi_core::process::{ExitStatus, PtySize};
@@ -52,11 +52,23 @@ pub struct PaneOutputQueue {
     queue_registry: Weak<PaneOutputQueueRegistry>,
 }
 
+/// One read of a pane's child output.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PaneOutputChunk {
+    /// The bytes the read gave, never empty.
+    pub(crate) output_bytes: Vec<u8>,
+    /// The wall time at which the sink took the bytes, right after the read.
+    pub(crate) read_at: SystemTime,
+    /// The instant at which the sink took the bytes, the same moment as
+    /// `read_at`.
+    pub(crate) read_instant: Instant,
+}
+
 /// What one pane's output queue holds.
 #[derive(Debug, Default)]
 struct PaneOutputQueueState {
     /// The chunks not yet taken, oldest first.
-    output_chunks: VecDeque<Vec<u8>>,
+    output_chunks: VecDeque<PaneOutputChunk>,
     /// The byte count of `output_chunks`.
     queued_byte_count: usize,
     /// The child's exit, taken after the last chunk.
@@ -74,7 +86,7 @@ struct PaneOutputQueueState {
 pub(crate) struct PaneOutputTurn {
     /// The chunks taken, oldest first, at most [`PANE_OUTPUT_TURN_BYTE_LIMIT`]
     /// bytes together unless the first chunk alone is larger.
-    pub(crate) output_chunks: Vec<Vec<u8>>,
+    pub(crate) output_chunks: Vec<PaneOutputChunk>,
     /// The child's exit, taken only once no chunk is left.
     pub(crate) exit_status: Option<ExitStatus>,
     /// Whether the queue still holds chunks or an exit after this turn.
@@ -103,7 +115,11 @@ impl PaneOutputQueue {
         let mut queue_state = self.queue_state.lock().expect("pane output queue");
         let mut output_chunks = Vec::new();
         let mut taken_byte_count = 0usize;
-        while let Some(next_chunk_byte_count) = queue_state.output_chunks.front().map(Vec::len) {
+        while let Some(next_chunk_byte_count) = queue_state
+            .output_chunks
+            .front()
+            .map(|output_chunk| output_chunk.output_bytes.len())
+        {
             if !output_chunks.is_empty()
                 && taken_byte_count + next_chunk_byte_count > PANE_OUTPUT_TURN_BYTE_LIMIT
             {
@@ -235,17 +251,21 @@ impl InboxSink {
 }
 
 impl PtySink for InboxSink {
-    /// Queue one chunk of child output on `pane_id`'s queue. While the queue
+    /// Queue one chunk of child output on `pane_id`'s queue, stamped with the
+    /// wall time and the instant at which the sink takes it. While the queue
     /// holds [`PANE_OUTPUT_QUEUE_BYTE_LIMIT`] bytes or more, a waiting sink
-    /// waits first. Returns `false` when the queue this push found closes
-    /// before the chunk is queued, as while the push waits for room, or when
-    /// the inbox is closed, which tells the reader to stop reading this pane.
-    /// A push that starts after the pane's queue closed starts a new queue. An
-    /// empty chunk queues nothing and returns `true`.
+    /// waits after the stamp, before it queues the chunk. Returns `false` when
+    /// the queue this push found closes before the chunk is queued, as while
+    /// the push waits for room, or when the inbox is closed, which tells the
+    /// reader to stop reading this pane. A push that starts after the pane's
+    /// queue closed starts a new queue. An empty chunk queues nothing and
+    /// returns `true`.
     fn accept_output_bytes(&self, pane_id: PaneId, output_bytes: Vec<u8>) -> bool {
         if output_bytes.is_empty() {
             return true;
         }
+        let read_at = SystemTime::now();
+        let read_instant = Instant::now();
         let pane_output_queue = self.find_or_start_output_queue(pane_id);
         let should_send_wake = {
             let mut queue_state = pane_output_queue
@@ -265,7 +285,11 @@ impl PtySink for InboxSink {
                 return false;
             }
             queue_state.queued_byte_count += output_bytes.len();
-            queue_state.output_chunks.push_back(output_bytes);
+            queue_state.output_chunks.push_back(PaneOutputChunk {
+                output_bytes,
+                read_at,
+                read_instant,
+            });
             !std::mem::replace(&mut queue_state.is_wake_sent, true)
         };
         !should_send_wake || self.send_readable_wake(pane_output_queue)
@@ -326,9 +350,18 @@ impl Server {
         let pane_output_queue = Arc::clone(self.pane_output_queue_by_pane_id.get(&pane_id)?);
         let output_turn = pane_output_queue.take_output_turn();
         for output_chunk in &output_turn.output_chunks {
-            self.handle_pty_output(pane_id, output_chunk);
+            self.handle_pty_output(
+                pane_id,
+                &output_chunk.output_bytes,
+                output_chunk.read_at,
+                output_chunk.read_instant,
+            );
         }
-        let parsed_byte_count: usize = output_turn.output_chunks.iter().map(Vec::len).sum();
+        let parsed_byte_count: usize = output_turn
+            .output_chunks
+            .iter()
+            .map(|output_chunk| output_chunk.output_bytes.len())
+            .sum();
         self.get_pty_backend()
             .grant_pane_output(pane_id, parsed_byte_count);
         if let Some(exit_status) = output_turn.exit_status {

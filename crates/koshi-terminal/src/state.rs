@@ -22,7 +22,7 @@
 //! as `koshi_terminal::state::*`.
 
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
@@ -55,6 +55,8 @@ pub(crate) use keyboard::KeyboardStack;
 use modes::ResumeFormat4TerminalModes;
 pub(crate) use modes::TerminalModes;
 pub use modes::{CursorShape, MouseEncoding, MouseTracking};
+use perform::notification::Osc99Notification;
+pub(crate) use perform::osc::{OscText, OscTextCommand};
 pub(crate) use render::{Charset, RenderState};
 pub use screen::Screen;
 pub use working_directory::ReportedWorkingDirectory;
@@ -71,35 +73,48 @@ enum ShellIntegrationState {
     Running,
 }
 
-/// A shell-integration fact produced by an OSC 133 marker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ShellIntegrationFact {
-    /// The shell reported that a command started.
+/// A fact a pane's program wrote in its output that koshi acts on outside the
+/// screen: an OSC 133 command marker, a bell, a desktop notification, or the
+/// withdrawal of one. [`TerminalState`] keeps the facts in the order the
+/// program wrote them until the engine caller takes them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramFact {
+    /// `OSC 133 ; C` while no command runs: the shell started a command.
     CommandStarted,
-    /// The shell reported that a command finished.
-    CommandFinished,
-}
-
-/// A shell-integration fact as resume format 4 writes it. Its finish holds
-/// the `exit_code` the shell reported; reading one drops that code.
-#[derive(Deserialize)]
-enum ResumeFormat4ShellIntegrationFact {
-    CommandStarted,
-    CommandFinished {},
-}
-
-impl ResumeFormat4ShellIntegrationFact {
-    /// The same fact, without the exit code.
-    fn into_shell_integration_fact(self) -> ShellIntegrationFact {
-        match self {
-            ResumeFormat4ShellIntegrationFact::CommandStarted => {
-                ShellIntegrationFact::CommandStarted
-            }
-            ResumeFormat4ShellIntegrationFact::CommandFinished {} => {
-                ShellIntegrationFact::CommandFinished
-            }
-        }
-    }
+    /// `OSC 133 ; D` while a command runs: the shell finished it.
+    /// `ESC ] 133 ; D ; 101 ST` gives `exit_code: Some(101)`, and
+    /// `ESC ] 133 ; D ST` gives `exit_code: None`.
+    CommandFinished {
+        /// The exit code the shell reported, or `None` when it reported none.
+        exit_code: Option<i32>,
+    },
+    /// A standalone BEL (`0x07`). A BEL that ends an OSC sequence is not a
+    /// bell. A bell written while the newest fact not yet taken is a `Bell`
+    /// adds no fact: 500 BEL bytes in one read give one `Bell`.
+    Bell,
+    /// A desktop notification: OSC 9, OSC 777 `notify`, or a finished OSC 99
+    /// notification.
+    Notify {
+        /// The title, or `None` for OSC 9, which sends one string, and for a
+        /// title that is empty after [`sanitize_reported_text`].
+        ///
+        /// [`sanitize_reported_text`]: koshi_core::text::sanitize_reported_text
+        title: Option<String>,
+        /// The text, at most [`MAX_REPORTED_TEXT_BYTE_COUNT`] bytes after
+        /// [`sanitize_reported_text`]. Empty when the program sent none.
+        ///
+        /// [`MAX_REPORTED_TEXT_BYTE_COUNT`]: koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT
+        /// [`sanitize_reported_text`]: koshi_core::text::sanitize_reported_text
+        body: String,
+        /// The OSC 99 `i` key that names the notification, or `None` for OSC 9,
+        /// OSC 777, and an OSC 99 notification with no `i`.
+        notification_id: Option<String>,
+    },
+    /// `OSC 99 ; i=<id> : p=close`: the program withdrew notification `<id>`.
+    NotificationWithdrawn {
+        /// The OSC 99 `i` key of the withdrawn notification.
+        notification_id: String,
+    },
 }
 
 /// The cells of the alternate screen.
@@ -217,8 +232,20 @@ pub struct TerminalState {
     is_working_directory_changed: bool,
     /// The shell lifecycle point last reported through OSC 133.
     shell_integration_state: ShellIntegrationState,
-    /// Shell-integration facts not yet taken by the terminal engine caller.
-    shell_integration_facts: Vec<ShellIntegrationFact>,
+    /// The program facts not yet taken by the terminal engine caller, oldest
+    /// first. The resume file does not carry them: a state read back holds
+    /// none.
+    program_facts: Vec<ProgramFact>,
+    /// The OSC 99 notification whose parts are still arriving (`d=0`), or
+    /// `None` when no notification is open. The resume file does not carry
+    /// it: a state read back holds `None`.
+    open_osc99_notification: Option<Osc99Notification>,
+    /// The whole texts that the engine's OSC reader read ahead of the VTE
+    /// parser, oldest first: one for each finished OSC whose command is an
+    /// [`OscTextCommand`]. Each such OSC that the parser dispatches takes the
+    /// oldest. The resume file does not carry them: a state read back holds
+    /// none.
+    osc_texts: VecDeque<OscText>,
     /// Lines that have scrolled off the top of the primary screen.
     scrollback: Scrollback,
     /// Primary screen's DECSTBM scroll-region margins, 0-based inclusive
@@ -252,7 +279,8 @@ pub struct TerminalState {
     /// Bytes queued for the running app in answer to its device queries
     /// (DA/DSR/DECRQM). The performer appends replies here; the runtime drains
     /// them via `take_device_query_replies` and writes them back into the pane's PTY.
-    /// Device-global: one queue regardless of the active screen.
+    /// Device-global: one queue regardless of the active screen. The resume
+    /// file does not carry it: a state read back holds no reply.
     device_query_replies: Vec<u8>,
 }
 
@@ -279,7 +307,6 @@ struct TerminalStateSerializeFields<'a> {
     title: &'a Option<String>,
     reported_working_directory: &'a Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
-    shell_integration_facts: &'a Vec<ShellIntegrationFact>,
     scrollback: &'a Scrollback,
     primary_scroll_region: &'a Option<(u16, u16)>,
     alternate_scroll_region: &'a Option<(u16, u16)>,
@@ -289,7 +316,6 @@ struct TerminalStateSerializeFields<'a> {
     alternate_keyboard_stack: &'a KeyboardStack,
     cluster: &'a String,
     cluster_base: &'a Option<(u16, u16)>,
-    device_query_replies: &'a Vec<u8>,
 }
 
 impl Serialize for TerminalState {
@@ -357,7 +383,6 @@ impl Serialize for TerminalState {
             title: &self.title,
             reported_working_directory: &self.reported_working_directory,
             shell_integration_state: self.shell_integration_state,
-            shell_integration_facts: &self.shell_integration_facts,
             scrollback: &self.scrollback,
             primary_scroll_region: &self.primary_scroll_region,
             alternate_scroll_region: &self.alternate_scroll_region,
@@ -367,7 +392,6 @@ impl Serialize for TerminalState {
             alternate_keyboard_stack: &self.alternate_keyboard_stack,
             cluster: &self.cluster,
             cluster_base: &self.cluster_base,
-            device_query_replies: &self.device_query_replies,
         }
         .serialize(serializer)
     }
@@ -394,7 +418,6 @@ struct TerminalStateFields {
     title: Option<String>,
     reported_working_directory: Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
-    shell_integration_facts: Vec<ShellIntegrationFact>,
     scrollback: Scrollback,
     primary_scroll_region: Option<(u16, u16)>,
     alternate_scroll_region: Option<(u16, u16)>,
@@ -404,7 +427,6 @@ struct TerminalStateFields {
     alternate_keyboard_stack: KeyboardStack,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
-    device_query_replies: Vec<u8>,
 }
 
 struct RawTerminalStateFields {
@@ -429,7 +451,6 @@ struct RawTerminalStateFields {
     title: Option<String>,
     reported_working_directory: Option<ReportedWorkingDirectory>,
     shell_integration_state: ShellIntegrationState,
-    shell_integration_facts: Vec<ShellIntegrationFact>,
     scrollback: Scrollback,
     primary_scroll_region: Option<(u16, u16)>,
     alternate_scroll_region: Option<(u16, u16)>,
@@ -439,7 +460,6 @@ struct RawTerminalStateFields {
     alternate_keyboard_stack: KeyboardStack,
     cluster: String,
     cluster_base: Option<(u16, u16)>,
-    device_query_replies: Vec<u8>,
 }
 
 #[derive(Debug)]
@@ -525,7 +545,6 @@ enum RawTerminalStateField {
     Title,
     ReportedWorkingDirectory,
     ShellIntegrationState,
-    ShellIntegrationFacts,
     Scrollback,
     PrimaryScrollRegion,
     AlternateScrollRegion,
@@ -535,7 +554,6 @@ enum RawTerminalStateField {
     AlternateKeyboardStack,
     Cluster,
     ClusterBase,
-    DeviceQueryReplies,
     Other,
 }
 
@@ -579,7 +597,6 @@ impl<'de> Deserialize<'de> for RawTerminalStateField {
                     "title" => RawTerminalStateField::Title,
                     "reported_working_directory" => RawTerminalStateField::ReportedWorkingDirectory,
                     "shell_integration_state" => RawTerminalStateField::ShellIntegrationState,
-                    "shell_integration_facts" => RawTerminalStateField::ShellIntegrationFacts,
                     "scrollback" => RawTerminalStateField::Scrollback,
                     "primary_scroll_region" => RawTerminalStateField::PrimaryScrollRegion,
                     "alternate_scroll_region" => RawTerminalStateField::AlternateScrollRegion,
@@ -591,7 +608,6 @@ impl<'de> Deserialize<'de> for RawTerminalStateField {
                     "alternate_keyboard_stack" => RawTerminalStateField::AlternateKeyboardStack,
                     "cluster" => RawTerminalStateField::Cluster,
                     "cluster_base" => RawTerminalStateField::ClusterBase,
-                    "device_query_replies" => RawTerminalStateField::DeviceQueryReplies,
                     _ => RawTerminalStateField::Other,
                 })
             }
@@ -652,7 +668,6 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut title = None;
         let mut reported_working_directory = None;
         let mut shell_integration_state = None;
-        let mut shell_integration_facts = None;
         let mut scrollback = None;
         let mut primary_scroll_region = None;
         let mut alternate_scroll_region = None;
@@ -662,7 +677,6 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
         let mut alternate_keyboard_stack = None;
         let mut cluster = None;
         let mut cluster_base = None;
-        let mut device_query_replies = None;
 
         while let Some(terminal_state_field) = map_access.next_key::<RawTerminalStateField>()? {
             match terminal_state_field {
@@ -821,19 +835,6 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     }
                     shell_integration_state = Some(map_access.next_value()?);
                 }
-                RawTerminalStateField::ShellIntegrationFacts => {
-                    if shell_integration_facts.is_some() {
-                        return Err(serde::de::Error::duplicate_field("shell_integration_facts"));
-                    }
-                    shell_integration_facts = Some(match self.stored_state_shape {
-                        StoredStateShape::Current => map_access.next_value()?,
-                        StoredStateShape::ResumeFormat4 => map_access
-                            .next_value::<Vec<ResumeFormat4ShellIntegrationFact>>()?
-                            .into_iter()
-                            .map(ResumeFormat4ShellIntegrationFact::into_shell_integration_fact)
-                            .collect(),
-                    });
-                }
                 RawTerminalStateField::Scrollback => {
                     if scrollback.is_some() {
                         return Err(serde::de::Error::duplicate_field("scrollback"));
@@ -899,12 +900,6 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                     }
                     cluster_base = Some(map_access.next_value()?);
                 }
-                RawTerminalStateField::DeviceQueryReplies => {
-                    if device_query_replies.is_some() {
-                        return Err(serde::de::Error::duplicate_field("device_query_replies"));
-                    }
-                    device_query_replies = Some(map_access.next_value()?);
-                }
                 RawTerminalStateField::Other => {
                     let _: serde::de::IgnoredAny = map_access.next_value()?;
                 }
@@ -949,8 +944,6 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
                 .ok_or_else(|| serde::de::Error::missing_field("reported_working_directory"))?,
             shell_integration_state: shell_integration_state
                 .ok_or_else(|| serde::de::Error::missing_field("shell_integration_state"))?,
-            shell_integration_facts: shell_integration_facts
-                .ok_or_else(|| serde::de::Error::missing_field("shell_integration_facts"))?,
             scrollback: scrollback.ok_or_else(|| serde::de::Error::missing_field("scrollback"))?,
             primary_scroll_region: primary_scroll_region
                 .ok_or_else(|| serde::de::Error::missing_field("primary_scroll_region"))?,
@@ -967,8 +960,6 @@ impl<'de> Visitor<'de> for RawTerminalStateVisitor<'_> {
             cluster: cluster.ok_or_else(|| serde::de::Error::missing_field("cluster"))?,
             cluster_base: cluster_base
                 .ok_or_else(|| serde::de::Error::missing_field("cluster_base"))?,
-            device_query_replies: device_query_replies
-                .ok_or_else(|| serde::de::Error::missing_field("device_query_replies"))?,
         })
     }
 }
@@ -1053,7 +1044,6 @@ impl TerminalStateFields {
             title: serialized_terminal_state.title,
             reported_working_directory: serialized_terminal_state.reported_working_directory,
             shell_integration_state: serialized_terminal_state.shell_integration_state,
-            shell_integration_facts: serialized_terminal_state.shell_integration_facts,
             scrollback: serialized_terminal_state.scrollback,
             primary_scroll_region: serialized_terminal_state.primary_scroll_region,
             alternate_scroll_region: serialized_terminal_state.alternate_scroll_region,
@@ -1063,7 +1053,6 @@ impl TerminalStateFields {
             alternate_keyboard_stack: serialized_terminal_state.alternate_keyboard_stack,
             cluster: serialized_terminal_state.cluster,
             cluster_base: serialized_terminal_state.cluster_base,
-            device_query_replies: serialized_terminal_state.device_query_replies,
         })
     }
 }
@@ -1100,8 +1089,8 @@ impl<'de> Deserialize<'de> for TerminalState {
 /// off. The alternate grid is freed when the primary screen is active, the
 /// alternate screen holds no image, and the grid equals a blank grid at the
 /// primary screen's size in the alternate pen's background fill. Any other
-/// alternate grid stays. A held shell-integration finish reads back without
-/// its exit code.
+/// alternate grid stays. Its `shell_integration_facts` and
+/// `device_query_replies` are not read.
 #[derive(Debug)]
 pub struct ResumeFormat4TerminalState(TerminalState);
 
@@ -1171,7 +1160,9 @@ impl TerminalState {
             is_title_changed: false,
             is_working_directory_changed: false,
             shell_integration_state: fields.shell_integration_state,
-            shell_integration_facts: fields.shell_integration_facts,
+            program_facts: Vec::new(),
+            open_osc99_notification: None,
+            osc_texts: VecDeque::new(),
             scrollback: fields.scrollback,
             primary_scroll_region: fields.primary_scroll_region,
             alternate_scroll_region: fields.alternate_scroll_region,
@@ -1181,7 +1172,7 @@ impl TerminalState {
             alternate_keyboard_stack: fields.alternate_keyboard_stack,
             cluster: fields.cluster,
             cluster_base: fields.cluster_base,
-            device_query_replies: fields.device_query_replies,
+            device_query_replies: Vec::new(),
         };
         terminal_state
             .restore_native_image_coverage()
@@ -1361,7 +1352,9 @@ impl TerminalState {
             is_title_changed: false,
             is_working_directory_changed: false,
             shell_integration_state: ShellIntegrationState::default(),
-            shell_integration_facts: Vec::new(),
+            program_facts: Vec::new(),
+            open_osc99_notification: None,
+            osc_texts: VecDeque::new(),
             scrollback: Scrollback::from_scrollback_limit(scrollback_limit),
             primary_scroll_region: None,
             alternate_scroll_region: None,
@@ -1716,9 +1709,34 @@ impl TerminalState {
         &self.scrollback
     }
 
-    /// Drain the queued shell-integration facts, leaving the queue empty.
-    pub(crate) fn take_shell_integration_facts(&mut self) -> Vec<ShellIntegrationFact> {
-        std::mem::take(&mut self.shell_integration_facts)
+    /// Drain the program facts, oldest first, leaving the list empty.
+    pub(crate) fn take_program_facts(&mut self) -> Vec<ProgramFact> {
+        std::mem::take(&mut self.program_facts)
+    }
+
+    /// The number of program facts not yet taken.
+    pub(crate) fn get_program_fact_count(&self) -> usize {
+        self.program_facts.len()
+    }
+
+    /// Queue `osc_texts`, oldest first, behind the texts already queued. The
+    /// next OSC whose command is an [`OscTextCommand`] that the VTE parser
+    /// dispatches takes the oldest queued text.
+    pub(crate) fn queue_osc_texts(&mut self, osc_texts: Vec<OscText>) {
+        self.osc_texts.extend(osc_texts);
+    }
+
+    /// Append `program_fact` after the facts not yet taken. A
+    /// [`ProgramFact::Bell`] is not appended when the newest fact not yet taken
+    /// is a `Bell`: BEL, BEL, BEL gives `[Bell]`, and BEL, OSC 9, BEL gives
+    /// `[Bell, Notify, Bell]`.
+    fn push_program_fact(&mut self, program_fact: ProgramFact) {
+        if program_fact == ProgramFact::Bell
+            && self.program_facts.last() == Some(&ProgramFact::Bell)
+        {
+            return;
+        }
+        self.program_facts.push(program_fact);
     }
 
     /// Drain the queued device-query replies (DA/DSR/DECRQM answers), leaving

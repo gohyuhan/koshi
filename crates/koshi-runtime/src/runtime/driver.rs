@@ -228,9 +228,10 @@ impl Server {
             RuntimeEvent::MouseInput { client_id, .. } => {
                 tracing::debug!(%client_id, "dropping a mouse event no attached viewer answered");
             }
-            RuntimeEvent::OuterTerminalFocusLost { client_id } => {
-                tracing::debug!(%client_id, "dropping an outer-terminal focus event");
-            }
+            RuntimeEvent::OuterTerminalFocusChanged {
+                client_id,
+                is_terminal_focused,
+            } => self.handle_terminal_focus_change(client_id, is_terminal_focused),
             // The viewer reads a raw paste against its input mode and sends it
             // as `ClientPaste`. A raw paste arriving here belongs to no
             // attached viewer, and is dropped.

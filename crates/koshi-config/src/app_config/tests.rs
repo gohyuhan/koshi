@@ -526,6 +526,61 @@ fn an_unknown_pane_clipboard_writes_key_warns_with_the_nearest_key() {
 }
 
 #[test]
+fn the_attention_section_records_each_key() {
+    let (app_config_layer, parse_warnings) = parse_with_warnings(
+        "attention {\n    bell #false\n    notify #true\n    command-finished #false\n}",
+    );
+    assert_eq!(
+        app_config_layer.attention,
+        Some(PartialAttentionConfig {
+            should_raise_for_bell: Some(false),
+            should_raise_for_notify: Some(true),
+            should_raise_for_command_finished: Some(false),
+        })
+    );
+    assert_eq!(parse_warnings, Vec::<String>::new());
+}
+
+#[test]
+fn an_absent_attention_section_sets_no_layer() {
+    assert_eq!(parse_config("").attention, None);
+}
+
+#[test]
+fn an_attention_section_sets_only_the_keys_it_lists() {
+    assert_eq!(
+        parse_config("attention {\n    command-finished #false\n}").attention,
+        Some(PartialAttentionConfig {
+            should_raise_for_bell: None,
+            should_raise_for_notify: None,
+            should_raise_for_command_finished: Some(false),
+        })
+    );
+}
+
+#[test]
+fn a_non_boolean_unknown_or_repeated_attention_entry_is_skipped_with_a_warning() {
+    let (app_config_layer, parse_warnings) = parse_with_warnings(
+        "attention {\n    bell \"off\"\n    bel #false\n}\nattention {\n    notify #false\n}",
+    );
+    assert_eq!(
+        app_config_layer.attention,
+        Some(PartialAttentionConfig::default())
+    );
+    assert_eq!(
+        parse_warnings,
+        vec![
+            "line 3, column 5: ignored `attention.bell`: expected a boolean (#true or #false)"
+                .to_string(),
+            "line 4, column 5: ignored unknown key `attention.bel`; did you mean \
+             `attention.bell`?"
+                .to_string(),
+            "line 6, column 1: ignored duplicate `attention` section".to_string(),
+        ]
+    );
+}
+
+#[test]
 fn a_colors_block_in_the_app_file_is_ignored() {
     // Colors belong to a theme file. An inline `colors` block in `koshi.kdl`
     // is an unknown top-level node and sets nothing.

@@ -1330,10 +1330,11 @@ fn serve_connection(
             }
             // A keyboard event, a resize, a cell size, a paste, a mouse round,
             // a placement preview target, a local input mode report, a
-            // placement confirm, a ping, a paint report and a viewer action
-            // answer belong on an attached client's connection, which the
-            // `Attach` arm above hands to `stream_events`. On this control
-            // path they name no client and close the connection.
+            // terminal focus report, a placement confirm, a ping, a paint
+            // report and a viewer action answer belong on an attached client's
+            // connection, which the `Attach` arm above hands to
+            // `stream_events`. On this control path they name no client and
+            // close the connection.
             IpcRequestKind::Keyboard { .. }
             | IpcRequestKind::Resize { .. }
             | IpcRequestKind::CellSize { .. }
@@ -1341,6 +1342,7 @@ fn serve_connection(
             | IpcRequestKind::Mouse(_)
             | IpcRequestKind::SetPanePlacementPreview { .. }
             | IpcRequestKind::SetViewerLocalInputMode { .. }
+            | IpcRequestKind::TerminalFocus { .. }
             | IpcRequestKind::ConfirmPanePlacement { .. }
             | IpcRequestKind::Ping
             | IpcRequestKind::AttachAnswerReceived
@@ -2037,6 +2039,12 @@ fn stream_events(
             } => RuntimeEvent::SetViewerLocalInputMode {
                 client_id,
                 is_viewer_local_input_mode_on,
+            },
+            IpcRequestKind::TerminalFocus {
+                is_terminal_focused,
+            } => RuntimeEvent::OuterTerminalFocusChanged {
+                client_id,
+                is_terminal_focused,
             },
             IpcRequestKind::ConfirmPanePlacement {
                 command_id,

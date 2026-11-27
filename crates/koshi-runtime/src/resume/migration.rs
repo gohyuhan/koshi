@@ -16,8 +16,11 @@ use koshi_core::naming::{generate_name, NameKind};
 use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSeverity};
 use koshi_session::session::state::{compute_floating_layout_size, Session};
 use koshi_storage::error::StorageError;
-use koshi_terminal::engine::{GraphicsEvent, GraphicsTransportState, SynchronizedOutputTransport};
+use koshi_terminal::engine::{
+    GraphicsEvent, GraphicsTransportState, ResumeFormat5SynchronizedOutputTransport,
+};
 use koshi_terminal::state::ResumeFormat4TerminalState;
+use koshi_terminal::state::TerminalState;
 
 use super::{
     CarriedPaneState, CarriedQuit, ResumeBody, RESUME_FORMAT,
@@ -26,9 +29,9 @@ use super::{
 use crate::runtime::saved_view::SavedViewStore;
 
 /// A pane state in the shape resume format 4 writes: the fields of
-/// [`CarriedPaneState`], with every grid row and history line of its terminal
-/// state stored as a list of JSON cells, and its terminal modes without
-/// insert mode.
+/// [`ResumeFormat5CarriedPaneState`], with every grid row and history line of
+/// its terminal state stored as a list of JSON cells, and its terminal modes
+/// without insert mode.
 #[derive(Deserialize)]
 struct ResumeFormat4CarriedPaneState {
     terminal_state: ResumeFormat4TerminalState,
@@ -36,18 +39,51 @@ struct ResumeFormat4CarriedPaneState {
     #[serde(deserialize_with = "super::deserialize_graphics_events")]
     graphics_events: Vec<GraphicsEvent>,
     graphics_transport: Option<GraphicsTransportState>,
-    synchronized_output: Option<SynchronizedOutputTransport>,
+    synchronized_output: Option<ResumeFormat5SynchronizedOutputTransport>,
 }
 
 impl ResumeFormat4CarriedPaneState {
-    /// The same pane state, with its terminal state's rows encoded.
+    /// The same pane state, with its terminal state's rows encoded and its
+    /// synchronized-output group converted
+    /// ([`ResumeFormat5SynchronizedOutputTransport::into_synchronized_output_transport`]).
     fn into_carried_pane_state(self) -> CarriedPaneState {
         CarriedPaneState {
             terminal_state: self.terminal_state.into_terminal_state(),
             undecoded_bytes: self.undecoded_bytes,
             graphics_events: self.graphics_events,
             graphics_transport: self.graphics_transport,
-            synchronized_output: self.synchronized_output,
+            synchronized_output: self
+                .synchronized_output
+                .map(ResumeFormat5SynchronizedOutputTransport::into_synchronized_output_transport),
+        }
+    }
+}
+
+/// A pane state in the shape resume format 5 writes: the fields of
+/// [`CarriedPaneState`], with a synchronized-output group that holds no read
+/// time for the chunks among its bytes.
+#[derive(Deserialize)]
+struct ResumeFormat5CarriedPaneState {
+    terminal_state: TerminalState,
+    undecoded_bytes: Vec<u8>,
+    #[serde(deserialize_with = "super::deserialize_graphics_events")]
+    graphics_events: Vec<GraphicsEvent>,
+    graphics_transport: Option<GraphicsTransportState>,
+    synchronized_output: Option<ResumeFormat5SynchronizedOutputTransport>,
+}
+
+impl ResumeFormat5CarriedPaneState {
+    /// The same pane state, with its synchronized-output group converted
+    /// ([`ResumeFormat5SynchronizedOutputTransport::into_synchronized_output_transport`]).
+    fn into_carried_pane_state(self) -> CarriedPaneState {
+        CarriedPaneState {
+            terminal_state: self.terminal_state,
+            undecoded_bytes: self.undecoded_bytes,
+            graphics_events: self.graphics_events,
+            graphics_transport: self.graphics_transport,
+            synchronized_output: self
+                .synchronized_output
+                .map(ResumeFormat5SynchronizedOutputTransport::into_synchronized_output_transport),
         }
     }
 }
@@ -363,7 +399,7 @@ const FORMAT_ONE_TO_THREE_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFie
     ],
 };
 
-/// The field names of a body saved at format 4 or later.
+/// The field names of a body saved at format 4 or newer.
 const FORMAT_FOUR_AND_LATER_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyFieldNames {
     sessions_field_name: "session_by_id",
     pane_states_field_name: "carried_pane_state_by_pane_id",
@@ -376,10 +412,10 @@ const FORMAT_FOUR_AND_LATER_BODY_FIELD_NAMES: ResumeBodyFieldNames = ResumeBodyF
 /// [`ResumeFormat4CarriedPaneState`] with no JSON step.
 const OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS: u32 = 4;
 
-/// The oldest format whose saved pane states have the [`CarriedPaneState`]
-/// shape. A pane state saved at this format decodes as a
-/// [`CarriedPaneState`].
-const OLDEST_FORMAT_WITH_CURRENT_PANE_STATE: u32 = 5;
+/// The oldest format whose saved pane states hold a [`TerminalState`] in
+/// its current shape. A pane state saved at this format decodes as a
+/// [`ResumeFormat5CarriedPaneState`].
+const OLDEST_FORMAT_WITH_CURRENT_TERMINAL_STATE: u32 = 5;
 
 /// The oldest format whose body carries client records, the saved-view store
 /// and the child processes left running.
@@ -636,8 +672,8 @@ fn migrate_previous_session_json(
 
 /// Read the saved pane state `raw_pane_state`, stored under `pane_key` in a
 /// body saved at `source_resume_format`, as a [`CarriedPaneState`]. A pane
-/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_PANE_STATE`] or later decodes
-/// as a [`CarriedPaneState`]. A pane state saved at
+/// state saved at [`OLDEST_FORMAT_WITH_CURRENT_TERMINAL_STATE`] or newer
+/// decodes as a [`ResumeFormat5CarriedPaneState`]. A pane state saved at
 /// [`OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS`] decodes as a
 /// [`ResumeFormat4CarriedPaneState`]. An older one first passes through every
 /// step together with its entries in `ancillary_pane_fields`, then decodes the
@@ -653,12 +689,12 @@ fn migrate_previous_pane_state(
     raw_pane_state: &RawValue,
     ancillary_pane_fields: &BTreeMap<&str, BTreeMap<String, &RawValue>>,
 ) -> Result<CarriedPaneState, StorageError> {
-    if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_STATE {
-        return serde_json::from_str::<CarriedPaneState>(raw_pane_state.get()).map_err(
-            |parse_error| {
+    if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_TERMINAL_STATE {
+        return serde_json::from_str::<ResumeFormat5CarriedPaneState>(raw_pane_state.get())
+            .map(ResumeFormat5CarriedPaneState::into_carried_pane_state)
+            .map_err(|parse_error| {
                 build_invalid_resume_error(format!("pane {pane_key} is unreadable: {parse_error}"))
-            },
-        );
+            });
     }
     if source_resume_format >= OLDEST_FORMAT_WITH_CURRENT_PANE_FIELDS {
         return serde_json::from_str::<ResumeFormat4CarriedPaneState>(raw_pane_state.get())
@@ -853,7 +889,7 @@ const FORMAT_THREE_SIXEL_REGISTER_COUNT: usize = 256;
 /// [`FORMAT_THREE_SIXEL_REGISTER_COLORS`] then black registers up to
 /// [`FORMAT_THREE_SIXEL_REGISTER_COUNT`], and `shell_integration_state` is
 /// `"Prompt"`.
-fn build_format_three_terminal_defaults() -> [(&'static str, Value); 11] {
+fn build_format_three_terminal_defaults() -> [(&'static str, Value); 10] {
     let mut sixel_register_colors: Vec<Value> = FORMAT_THREE_SIXEL_REGISTER_COLORS
         .iter()
         .map(|register_color| serde_json::json!(register_color))
@@ -873,7 +909,6 @@ fn build_format_three_terminal_defaults() -> [(&'static str, Value); 11] {
         ("next_image_placement_id", serde_json::json!(1)),
         ("sixel_palette", Value::Array(sixel_register_colors)),
         ("shell_integration_state", serde_json::json!("Prompt")),
-        ("shell_integration_facts", serde_json::json!([])),
     ]
 }
 
@@ -1320,11 +1355,13 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 /// 9. The saved-view store gains an empty `presented_token_hash_by_client_id`,
 ///    and each saved-view record's `connection_token_hash` `<h>` becomes
 ///    `connection_token_hashes: [<h>]`.
+/// 10. Each pane record of each session's `panes.pane_record_by_id` gains
+///     `attention: null`: no pane waits for a person.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
-/// a client record, a notification queue, a queued entry or a saved view is
-/// not an object, or misses a field that format 5 writes, or when a client
+/// a client record, a notification queue, a queued entry, a pane record or a
+/// saved view is not an object, or misses a field that format 5 writes, or when a client
 /// record's `color_index` is not a whole number, or its `origin` is neither
 /// `"Local"` nor `"Remote"`.
 fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageError> {
@@ -1366,6 +1403,22 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             },
         )?;
         assign_unique_color_indexes_five_to_six(client_by_id, &client_by_id_path)?;
+        let panes_path = format!("{session_path}.panes");
+        let panes = get_required_json_field(session_fields, "panes", session_path)?;
+        let pane_record_by_id = get_required_json_field(
+            get_json_object(panes, &panes_path)?,
+            "pane_record_by_id",
+            &panes_path,
+        )?;
+        migrate_json_object_members(
+            pane_record_by_id,
+            &format!("{panes_path}.pane_record_by_id"),
+            |pane_record, record_path| {
+                get_json_object(pane_record, record_path)?
+                    .insert("attention".to_string(), Value::Null);
+                Ok(())
+            },
+        )?;
         let notification_queue_path = format!("{session_path}.notification_queue");
         let notification_queue =
             get_required_json_field(session_fields, "notification_queue", session_path)?;
@@ -1586,12 +1639,13 @@ fn migrate_terminal_state(terminal_state: &mut Value, json_path: &str) -> Result
             "{json_path}.native_image_coverage must be a boolean"
         )));
     }
+    json_fields.remove("replies");
+    json_fields.remove("shell_integration_facts");
     rename_json_fields(
         json_fields,
         &[
             ("active", "active_screen"),
             ("reported_cwd", "reported_working_directory"),
-            ("replies", "device_query_replies"),
         ],
     );
     if let Some(reported_working_directory) = json_fields

@@ -1,23 +1,23 @@
-//! Tests for `ClipboardCopyParser`: the two endings, the payload rules, the
-//! targets filter, the size limits, the bytes the VTE parser skips, and the
-//! sequences that end a copy before it finishes.
+//! Tests for the `OSC 52` copy rules, read through `OscReader`: the two
+//! endings, the payload rules, the targets filter, the size limits, the bytes
+//! the VTE parser skips, and the sequences that end a copy before it finishes.
 
 use super::*;
+use crate::engine::osc_reader::OscReader;
 use crate::engine::tests::build_clipboard_copy;
 
 /// The most decoded bytes the tests allow per copy, unless a test names its own.
 const TEST_MAXIMUM_COPY_BYTE_COUNT: usize = 1024;
 
-/// The copies `terminal_bytes` finish, read in one chunk by a parser that keeps
+/// The copies `terminal_bytes` finish, read in one chunk by a reader that keeps
 /// copies of at most `maximum_copy_byte_count` decoded bytes.
 fn read_clipboard_copies(
     maximum_copy_byte_count: usize,
     terminal_bytes: &[u8],
 ) -> Vec<ClipboardCopy> {
-    let mut clipboard_copy_parser =
-        ClipboardCopyParser::with_maximum_copy_byte_count(maximum_copy_byte_count);
-    clipboard_copy_parser.process_terminal_bytes(terminal_bytes);
-    clipboard_copy_parser.take_clipboard_copies()
+    let mut osc_reader = OscReader::with_maximum_copy_byte_count(maximum_copy_byte_count);
+    osc_reader.process_terminal_bytes(terminal_bytes);
+    osc_reader.take_clipboard_copies()
 }
 
 #[test]
@@ -40,12 +40,11 @@ fn a_copy_ended_by_the_string_terminator_decodes_its_payload() {
 fn a_copy_split_at_every_byte_gives_one_copy() {
     let copy_bytes = b"\x1b]52;pc;aGVsbG8=\x1b\\";
     for split_index in 0..=copy_bytes.len() {
-        let mut clipboard_copy_parser =
-            ClipboardCopyParser::with_maximum_copy_byte_count(TEST_MAXIMUM_COPY_BYTE_COUNT);
-        clipboard_copy_parser.process_terminal_bytes(&copy_bytes[..split_index]);
-        clipboard_copy_parser.process_terminal_bytes(&copy_bytes[split_index..]);
+        let mut osc_reader = OscReader::with_maximum_copy_byte_count(TEST_MAXIMUM_COPY_BYTE_COUNT);
+        osc_reader.process_terminal_bytes(&copy_bytes[..split_index]);
+        osc_reader.process_terminal_bytes(&copy_bytes[split_index..]);
         assert_eq!(
-            clipboard_copy_parser.take_clipboard_copies(),
+            osc_reader.take_clipboard_copies(),
             vec![build_clipboard_copy("pc", b"hello")],
             "split at byte {split_index}"
         );
@@ -54,13 +53,12 @@ fn a_copy_split_at_every_byte_gives_one_copy() {
 
 #[test]
 fn a_copy_read_one_byte_at_a_time_gives_one_copy() {
-    let mut clipboard_copy_parser =
-        ClipboardCopyParser::with_maximum_copy_byte_count(TEST_MAXIMUM_COPY_BYTE_COUNT);
+    let mut osc_reader = OscReader::with_maximum_copy_byte_count(TEST_MAXIMUM_COPY_BYTE_COUNT);
     for copy_byte in b"\x1b]52;c;aGVsbG8=\x07" {
-        clipboard_copy_parser.process_terminal_bytes(std::slice::from_ref(copy_byte));
+        osc_reader.process_terminal_bytes(std::slice::from_ref(copy_byte));
     }
     assert_eq!(
-        clipboard_copy_parser.take_clipboard_copies(),
+        osc_reader.take_clipboard_copies(),
         vec![build_clipboard_copy("c", b"hello")]
     );
 }
@@ -183,14 +181,13 @@ fn two_copies_in_one_chunk_come_back_in_order() {
 
 #[test]
 fn taking_the_copies_leaves_none() {
-    let mut clipboard_copy_parser =
-        ClipboardCopyParser::with_maximum_copy_byte_count(TEST_MAXIMUM_COPY_BYTE_COUNT);
-    clipboard_copy_parser.process_terminal_bytes(b"\x1b]52;c;aGk=\x07");
+    let mut osc_reader = OscReader::with_maximum_copy_byte_count(TEST_MAXIMUM_COPY_BYTE_COUNT);
+    osc_reader.process_terminal_bytes(b"\x1b]52;c;aGk=\x07");
     assert_eq!(
-        clipboard_copy_parser.take_clipboard_copies(),
+        osc_reader.take_clipboard_copies(),
         vec![build_clipboard_copy("c", b"hi")]
     );
-    assert_eq!(clipboard_copy_parser.take_clipboard_copies(), Vec::new());
+    assert_eq!(osc_reader.take_clipboard_copies(), Vec::new());
 }
 
 #[test]
@@ -325,12 +322,12 @@ fn a_payload_longer_than_the_held_limit_makes_no_copy_and_the_next_copy_is_read(
 
 #[test]
 fn a_payload_that_passes_the_held_limit_across_chunks_makes_no_copy() {
-    let mut clipboard_copy_parser = ClipboardCopyParser::with_maximum_copy_byte_count(3);
-    clipboard_copy_parser.process_terminal_bytes(b"\x1b]52;c;aGVs");
-    clipboard_copy_parser.process_terminal_bytes(b"b");
-    clipboard_copy_parser.process_terminal_bytes(b"G8=\x07\x1b]52;p;aGk=\x07");
+    let mut osc_reader = OscReader::with_maximum_copy_byte_count(3);
+    osc_reader.process_terminal_bytes(b"\x1b]52;c;aGVs");
+    osc_reader.process_terminal_bytes(b"b");
+    osc_reader.process_terminal_bytes(b"G8=\x07\x1b]52;p;aGk=\x07");
     assert_eq!(
-        clipboard_copy_parser.take_clipboard_copies(),
+        osc_reader.take_clipboard_copies(),
         vec![build_clipboard_copy("p", b"hi")]
     );
 }
@@ -338,15 +335,15 @@ fn a_payload_that_passes_the_held_limit_across_chunks_makes_no_copy() {
 #[test]
 fn the_largest_size_rounds_the_held_payload_up_to_whole_base64_groups() {
     assert_eq!(
-        ClipboardCopyParser::with_maximum_copy_byte_count(4).maximum_payload_byte_count,
+        ClipboardCopyLimit::with_maximum_copy_byte_count(4).maximum_payload_byte_count,
         8
     );
     assert_eq!(
-        ClipboardCopyParser::with_maximum_copy_byte_count(6).maximum_payload_byte_count,
+        ClipboardCopyLimit::with_maximum_copy_byte_count(6).maximum_payload_byte_count,
         8
     );
     assert_eq!(
-        ClipboardCopyParser::with_maximum_copy_byte_count(usize::MAX).maximum_payload_byte_count,
+        ClipboardCopyLimit::with_maximum_copy_byte_count(usize::MAX).maximum_payload_byte_count,
         usize::MAX
     );
 }

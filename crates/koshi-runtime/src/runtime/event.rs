@@ -171,10 +171,16 @@ pub enum RuntimeEvent {
         /// The decoded event: kind, cell position, and modifiers.
         mouse_input: MouseInput,
     },
-    /// The outer terminal lost focus while this client was attached.
-    OuterTerminalFocusLost {
-        /// Client whose outer terminal lost focus.
+    /// The outer terminal reported a change of its keyboard focus while this
+    /// client was attached: `CSI I` or `CSI O` in the viewer, and the
+    /// client's `TerminalFocus` request in the session
+    /// (`Server::handle_terminal_focus_change`).
+    OuterTerminalFocusChanged {
+        /// Client whose outer terminal reported its focus.
         client_id: ClientId,
+        /// Whether the outer terminal has keyboard focus: `true` for `CSI I`,
+        /// `false` for `CSI O`.
+        is_terminal_focused: bool,
     },
     /// Text the client's outer terminal pasted — the OS paste key pressed in
     /// the terminal koshi runs in, delivered whole. No character of it fires a
@@ -468,7 +474,7 @@ impl RuntimeEvent {
             | RuntimeEvent::ClientKeyboard { client_id, .. }
             | RuntimeEvent::ClientMouse { client_id, .. }
             | RuntimeEvent::MouseInput { client_id, .. }
-            | RuntimeEvent::OuterTerminalFocusLost { client_id }
+            | RuntimeEvent::OuterTerminalFocusChanged { client_id, .. }
             | RuntimeEvent::HostPaste { client_id, .. }
             | RuntimeEvent::ClientPaste { client_id, .. }
             | RuntimeEvent::ClientActionAnswer { client_id, .. }

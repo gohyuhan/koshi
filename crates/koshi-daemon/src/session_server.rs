@@ -1013,8 +1013,15 @@ fn seed_shell_after_failed_restore(
         .flat_map(|session| session.panes.list_pane_records())
         .map(|pane_record| pane_record.get_pane_id())
         .collect();
+    let notice_written_at = SystemTime::now();
+    let notice_written_instant = Instant::now();
     for fresh_pane_id in fresh_pane_ids {
-        session_server.handle_pty_output(fresh_pane_id, SESSION_NOT_RESTORED_NOTICE_BYTES);
+        session_server.handle_pty_output(
+            fresh_pane_id,
+            SESSION_NOT_RESTORED_NOTICE_BYTES,
+            notice_written_at,
+            notice_written_instant,
+        );
     }
     Ok(())
 }
