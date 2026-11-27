@@ -57,7 +57,10 @@ fn each_text_command_number_gives_its_command() {
 
 #[test]
 fn every_other_command_number_gives_no_text() {
-    for command_number in ["", "3", "8", "52", "90", "133", "09", "7777", "9a", "9\x7f"] {
+    for command_number in [
+        "", "3", "8", "52", "90", "133", "09", "7777", "9a", "9\x7f", "750", "7501", "7502",
+        "75010", "07501",
+    ] {
         assert_eq!(
             read_osc_texts(format!("\x1b]{command_number};a\x07").as_bytes()),
             Vec::new(),
@@ -179,6 +182,164 @@ fn a_reader_that_keeps_no_copy_skips_a_copy() {
     assert_eq!(
         osc_reader.take_osc_texts(),
         vec![build_osc_text(OscTextCommand::Osc9Notification, b"after")]
+    );
+}
+
+/// The program status sequences that `terminal_bytes` finish, read in one
+/// chunk.
+fn read_program_status_sequences(terminal_bytes: &[u8]) -> Vec<ProgramStatusSequence> {
+    let mut osc_reader = OscReader::default();
+    osc_reader.process_terminal_bytes(terminal_bytes);
+    osc_reader.take_program_status_sequences()
+}
+
+/// The program status sequence with `argument_bytes` that ended with BEL when
+/// `is_bell_terminated`, right before `end_byte_index`.
+fn build_program_status_sequence(
+    argument_bytes: &[u8],
+    is_bell_terminated: bool,
+    end_byte_index: usize,
+) -> ProgramStatusSequence {
+    ProgramStatusSequence {
+        argument_bytes: argument_bytes.to_vec(),
+        is_bell_terminated,
+        end_byte_index,
+    }
+}
+
+#[test]
+fn a_program_status_sequence_keeps_every_argument_byte_as_written() {
+    assert_eq!(
+        read_program_status_sequences(b"\x1b]7501;id=a\tb:\x01\r\n\x7f;\xc3\xa9\x07"),
+        vec![build_program_status_sequence(
+            b"id=a\tb:\x01\r\n\x7f;\xc3\xa9",
+            true,
+            22
+        )]
+    );
+}
+
+#[test]
+fn a_program_status_sequence_finishes_only_at_bel_or_the_string_terminator() {
+    assert_eq!(
+        read_program_status_sequences(b"\x1b]7501;state=idle\x07"),
+        vec![build_program_status_sequence(b"state=idle", true, 18)]
+    );
+    assert_eq!(
+        read_program_status_sequences(b"\x1b]7501;state=idle\x1b\\"),
+        vec![build_program_status_sequence(b"state=idle", false, 19)]
+    );
+    for ending_bytes in [
+        &b"\x18"[..],
+        b"\x1a",
+        b"\x1b[0m",
+        b"\x1b\x01\\",
+        b"\x1b\x1b\\",
+    ] {
+        let mut sequence_bytes = b"\x1b]7501;state=idle".to_vec();
+        sequence_bytes.extend_from_slice(ending_bytes);
+        assert_eq!(
+            read_program_status_sequences(&sequence_bytes),
+            Vec::new(),
+            "ending {ending_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn a_byte_inside_the_program_status_introducer_skips_the_command() {
+    for skipped_sequence_bytes in [
+        &b"\x1b\x01]7501;state=idle\x07"[..],
+        b"\x1b\x7f]7501;state=idle\x07",
+        b"\x1b]75\x0101;state=idle\x07",
+        b"\x1b]7501\n;state=idle\x07",
+        b"\x1b]7501\x07",
+    ] {
+        let mut sequence_bytes = skipped_sequence_bytes.to_vec();
+        sequence_bytes.extend_from_slice(b"\x1b]7501;ok\x07");
+        assert_eq!(
+            read_program_status_sequences(&sequence_bytes),
+            vec![build_program_status_sequence(
+                b"ok",
+                true,
+                sequence_bytes.len()
+            )],
+            "{skipped_sequence_bytes:?}"
+        );
+    }
+    assert_eq!(
+        read_osc_texts(b"\x1b\x01]9;hi\x07"),
+        vec![build_osc_text(OscTextCommand::Osc9Notification, b"hi")]
+    );
+
+    let mut osc_reader = OscReader::with_maximum_copy_byte_count(1024);
+    osc_reader.process_terminal_bytes(b"\x1b]52;c;aGk=\x1b\x01]7501;state=idle\x07");
+    assert_eq!(osc_reader.take_clipboard_copies(), Vec::new());
+    assert_eq!(osc_reader.take_program_status_sequences(), Vec::new());
+}
+
+#[test]
+fn a_program_status_sequence_split_at_every_byte_gives_one_sequence() {
+    let sequence_bytes = b"\x1b]7501;state=idle\x1b\\";
+    for split_index in 0..sequence_bytes.len() {
+        let mut osc_reader = OscReader::default();
+        osc_reader.process_terminal_bytes(&sequence_bytes[..split_index]);
+        let mut program_status_sequences = osc_reader.take_program_status_sequences();
+        osc_reader.process_terminal_bytes(&sequence_bytes[split_index..]);
+        program_status_sequences.extend(osc_reader.take_program_status_sequences());
+        assert_eq!(
+            program_status_sequences,
+            vec![build_program_status_sequence(
+                b"state=idle",
+                false,
+                sequence_bytes.len() - split_index
+            )],
+            "split at byte {split_index}"
+        );
+    }
+}
+
+#[test]
+fn an_open_program_status_sequence_serializes_to_the_bytes_that_rebuild_it() {
+    let mut osc_reader = OscReader::default();
+    assert_eq!(osc_reader.serialize_open_program_status_sequence(), None);
+
+    osc_reader.process_terminal_bytes(b"\x1b]7501;id=a\tb");
+    assert_eq!(
+        osc_reader.serialize_open_program_status_sequence(),
+        Some(b"\x1b]7501;id=a\tb".to_vec())
+    );
+    osc_reader.process_terminal_bytes(b"\x1b");
+    let serialized_sequence_bytes = osc_reader.serialize_open_program_status_sequence();
+    assert_eq!(
+        serialized_sequence_bytes,
+        Some(b"\x1b]7501;id=a\tb\x1b".to_vec())
+    );
+
+    let mut rebuilt_osc_reader = OscReader::default();
+    rebuilt_osc_reader.process_terminal_bytes(&serialized_sequence_bytes.unwrap_or_default());
+    rebuilt_osc_reader.process_terminal_bytes(b"\\");
+    assert_eq!(
+        rebuilt_osc_reader.take_program_status_sequences(),
+        vec![build_program_status_sequence(b"id=a\tb", false, 1)]
+    );
+
+    osc_reader.process_terminal_bytes(b"\\");
+    assert_eq!(osc_reader.serialize_open_program_status_sequence(), None);
+}
+
+#[test]
+fn a_program_status_sequence_keeps_at_most_the_osc_buffer_capacity_of_argument_bytes() {
+    let mut sequence_bytes = b"\x1b]7501;".to_vec();
+    sequence_bytes.extend(std::iter::repeat_n(b'x', OSC_BUFFER_BYTE_CAPACITY));
+    sequence_bytes.extend_from_slice(b"\x01yyyyy\x07");
+    assert_eq!(
+        read_program_status_sequences(&sequence_bytes),
+        vec![build_program_status_sequence(
+            &vec![b'x'; OSC_BUFFER_BYTE_CAPACITY],
+            true,
+            sequence_bytes.len()
+        )]
     );
 }
 

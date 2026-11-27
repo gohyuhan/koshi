@@ -2,10 +2,10 @@
 //! does not control, and counting a noun in the ones it prints.
 //!
 //! Reported text is what a pane's own program reports about itself through
-//! `OSC 0/1/2`, `OSC 7` and the notifications of `OSC 9`, `OSC 777` and
-//! `OSC 99`, and what a remote peer reports about its sessions, tabs, panes and
-//! server. A pane's screen content is not reported text and
-//! passes through untouched.
+//! `OSC 0/1/2`, `OSC 7`, the notifications of `OSC 9`, `OSC 777` and `OSC 99`,
+//! and the `title` and `msg` of an `OSC 7501` program status report, and what a
+//! remote peer reports about its sessions, tabs, panes and server. A pane's
+//! screen content is not reported text and passes through untouched.
 
 /// The longest string [`sanitize_reported_text`] returns, in bytes. A longer
 /// one is cut at the last character boundary that fits. 512 bytes holds 512

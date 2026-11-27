@@ -57,6 +57,7 @@ impl Server {
     ///   id when it has one.
     /// - `NotificationWithdrawn` ends the wait whose withdrawable id it names.
     ///   Another id ends nothing.
+    /// - `ProgramStatus` changes nothing and gives no event.
     ///
     /// A raise is dropped when `koshi.kdl` switches its kind off
     /// (`AttentionConfig::should_raise_for`), and every raise is dropped when
@@ -150,6 +151,7 @@ impl Server {
                 ProgramFact::NotificationWithdrawn { notification_id } => {
                     self.withdraw_pane_notification(pane_id, &notification_id);
                 }
+                ProgramFact::ProgramStatus(_) => {}
             }
         }
         emitted_events.extend(self.report_pane_attention_change(pane_id, attention_before));

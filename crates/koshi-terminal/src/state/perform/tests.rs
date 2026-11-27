@@ -7399,7 +7399,10 @@ fn ris_returns_the_shell_marker_state_to_prompt_and_keeps_pending_facts() {
     );
     assert_eq!(
         terminal_state.take_program_facts(),
-        vec![ProgramFact::CommandStarted]
+        vec![
+            ProgramFact::CommandStarted,
+            ProgramFact::ProgramStatus(ProgramStatusFact::TerminalReset),
+        ]
     );
     process_terminal_bytes(&mut terminal_state, b"\x1b]133;D;0\x07"); // the reset forgot the running command
     assert_eq!(

@@ -19,6 +19,7 @@
 
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::iter::Peekable;
 use std::mem;
 use std::ops::Range;
 use std::time::{Duration, Instant, SystemTime};
@@ -39,7 +40,7 @@ use crate::graphics::{
 use crate::scrollback::ScrollbackLimit;
 use crate::state::{ProgramFact, TerminalState};
 pub use clipboard_copy::ClipboardCopy;
-use osc_reader::OscReader;
+use osc_reader::{OscReader, ProgramStatusSequence};
 
 /// The byte every escape sequence starts with: `ESC`, `0x1b`.
 const ESCAPE_BYTE: u8 = 0x1b;
@@ -1157,8 +1158,9 @@ pub struct TerminalEngine {
     working_directory_change_count: u64,
     /// Reads the bytes `parser` reads, before `parser` reads them, and keeps
     /// the whole text of each OSC whose command is an
-    /// [`OscTextCommand`](crate::state::OscTextCommand), and the `OSC 52`
-    /// clipboard copies. It keeps no copy until
+    /// [`OscTextCommand`](crate::state::OscTextCommand), each `OSC 7501`
+    /// program status sequence, and the `OSC 52` clipboard copies. It keeps no
+    /// copy until
     /// [`start_reading_clipboard_copies`](Self::start_reading_clipboard_copies)
     /// runs.
     osc_reader: OscReader,
@@ -1291,32 +1293,32 @@ impl TerminalEngine {
         self.osc_reader.process_terminal_bytes(terminal_bytes);
         self.terminal_state
             .queue_osc_texts(self.osc_reader.take_osc_texts());
+        let mut program_status_sequences = self
+            .osc_reader
+            .take_program_status_sequences()
+            .into_iter()
+            .peekable();
         let mut parser_byte_index = 0;
         for (graphics_byte_offset, graphics_event) in graphics_advance.completed_graphics_events {
             let graphics_event_end_index = compute_terminal_byte_offset_without_inert_ranges(
                 graphics_byte_offset + 1,
                 &graphics_advance.terminal_inert_ranges,
             );
-            if graphics_event_end_index > parser_byte_index {
-                advance_terminal_parser(
-                    &mut self.parser,
-                    &mut self.terminal_state,
-                    &mut self.printed_text,
-                    &terminal_bytes[parser_byte_index..graphics_event_end_index],
-                );
-                parser_byte_index = graphics_event_end_index;
-            }
+            parser_byte_index = self.advance_terminal_parser_to(
+                terminal_bytes,
+                parser_byte_index,
+                graphics_event_end_index,
+                &mut program_status_sequences,
+            );
             let cursor_position = self.terminal_state.get_active_cursor_position();
             self.process_graphics_operation(graphics_event, cursor_position);
         }
-        if parser_byte_index < terminal_bytes.len() {
-            advance_terminal_parser(
-                &mut self.parser,
-                &mut self.terminal_state,
-                &mut self.printed_text,
-                &terminal_bytes[parser_byte_index..],
-            );
-        }
+        self.advance_terminal_parser_to(
+            terminal_bytes,
+            parser_byte_index,
+            terminal_bytes.len(),
+            &mut program_status_sequences,
+        );
         if self.terminal_state.take_title_change() {
             self.title_change_count += 1;
         }
@@ -1324,6 +1326,50 @@ impl TerminalEngine {
             self.working_directory_change_count += 1;
         }
         self.capture_undecoded_terminal_bytes(terminal_bytes);
+    }
+
+    /// Feed `terminal_bytes[parser_byte_index..end_byte_index]` to the VTE
+    /// parser, and return the index the parser stands at: `end_byte_index`,
+    /// or `parser_byte_index` when that is not before `end_byte_index`.
+    ///
+    /// Each sequence at the front of `program_status_sequences` whose
+    /// `end_byte_index` is at most `end_byte_index` is taken and applied with
+    /// [`TerminalState::apply_program_status_sequence`], right after the
+    /// parser reads the last byte of that sequence.
+    fn advance_terminal_parser_to(
+        &mut self,
+        terminal_bytes: &[u8],
+        mut parser_byte_index: usize,
+        end_byte_index: usize,
+        program_status_sequences: &mut Peekable<std::vec::IntoIter<ProgramStatusSequence>>,
+    ) -> usize {
+        while let Some(program_status_sequence) =
+            program_status_sequences.next_if(|program_status_sequence| {
+                program_status_sequence.end_byte_index <= end_byte_index
+            })
+        {
+            advance_terminal_parser(
+                &mut self.parser,
+                &mut self.terminal_state,
+                &mut self.printed_text,
+                &terminal_bytes[parser_byte_index..program_status_sequence.end_byte_index],
+            );
+            parser_byte_index = program_status_sequence.end_byte_index;
+            self.terminal_state.apply_program_status_sequence(
+                &program_status_sequence.argument_bytes,
+                program_status_sequence.is_bell_terminated,
+            );
+        }
+        if end_byte_index > parser_byte_index {
+            advance_terminal_parser(
+                &mut self.parser,
+                &mut self.terminal_state,
+                &mut self.printed_text,
+                &terminal_bytes[parser_byte_index..end_byte_index],
+            );
+            parser_byte_index = end_byte_index;
+        }
+        parser_byte_index
     }
 
     /// An engine wrapped around an existing `terminal_state`, with the VTE
@@ -1515,6 +1561,12 @@ impl TerminalEngine {
     /// 64 KiB the engine stops holding it and reports empty until it ends. A
     /// swap in that window leaves the next parser on a sequence boundary, and
     /// the rest of the body prints as text.
+    ///
+    /// An `OSC 7501` that the OSC reader has not finished keeps
+    /// `ESC ] 7501 ;` and the argument bytes the reader kept, and the `ESC`
+    /// when the reader waits for the `\` of its `ESC \`. Example: the chunk
+    /// ends with `ESC ] 7501 ; state=idle ESC` → those bytes, and the next
+    /// chunk's `\` finishes the report.
     pub fn get_undecoded_terminal_bytes(&self) -> &[u8] {
         &self.undecoded_terminal_bytes
     }
@@ -1774,6 +1826,9 @@ impl TerminalEngine {
     /// The scan holds at most [`MAX_UNDECODED_BYTE_COUNT`] bytes of one sequence. Past
     /// that it releases the buffer and holds nothing more until the sequence
     /// ends.
+    ///
+    /// While the OSC reader is inside an `OSC 7501`, the bytes are the
+    /// reader's own, from [`OscReader::serialize_open_program_status_sequence`].
     fn capture_undecoded_terminal_bytes(&mut self, normalized_bytes: &[u8]) {
         let mut normalized_byte_index = 0;
         if let Some(last_escape_byte_index) = memchr::memrchr(ESCAPE_BYTE, normalized_bytes) {
@@ -1827,6 +1882,11 @@ impl TerminalEngine {
                 find_incomplete_utf8_code_point_bytes(&self.undecoded_terminal_bytes).len();
             let decoded_byte_count = self.undecoded_terminal_bytes.len() - incomplete_byte_count;
             self.undecoded_terminal_bytes.drain(..decoded_byte_count);
+        }
+        if let Some(program_status_sequence_bytes) =
+            self.osc_reader.serialize_open_program_status_sequence()
+        {
+            self.undecoded_terminal_bytes = program_status_sequence_bytes;
         }
     }
 }

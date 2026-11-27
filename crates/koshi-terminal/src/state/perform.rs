@@ -30,7 +30,9 @@
 //!   parser's parameters, and the OSC 0/1/2 window title, OSC 7
 //!   working-directory report, and OSC 9, OSC 777 and OSC 99 desktop
 //!   notifications, read from the whole text the engine's OSC reader queued.
-//!   The notifications add program facts.
+//!   The notifications and the OSC 133 `A`, `C` and `D` markers add program
+//!   facts. OSC 7501 is ignored here: the engine applies each program status
+//!   sequence that its OSC reader finishes.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
 //!   ends a text run like any non-printing event); the payload and `put`
@@ -42,7 +44,8 @@
 //! stacks ([`keyboard`]), cursor motion / scrolling
 //! / the scroll region ([`motion`]), alternate-screen entry/exit
 //! ([`alt_screen`]), hard/soft reset ([`reset`]), SGR ([`sgr`]), OSC parsing
-//! ([`osc`]), desktop notification parsing ([`notification`]), and CSI
+//! ([`osc`]), desktop notification parsing ([`notification`]), program
+//! status reports and the query reply ([`program_status`]), and CSI
 //! parameter accessors ([`params`]) — while the
 //! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
@@ -51,8 +54,8 @@ use koshi_core::text::sanitize_reported_text;
 
 use crate::grid::state::{Cell, ImagePlaceholder, RowEnd};
 use crate::state::{
-    CursorShape, MouseEncoding, MouseTracking, ProgramFact, Screen, ShellIntegrationState,
-    TerminalState,
+    CursorShape, MouseEncoding, MouseTracking, ProgramFact, ProgramStatusFact, Screen,
+    ShellIntegrationState, TerminalState,
 };
 
 use self::motion::{find_next_tab_stop, find_previous_tab_stop};
@@ -75,6 +78,7 @@ mod motion;
 pub(super) mod notification;
 pub(super) mod osc;
 mod params;
+mod program_status;
 mod reset;
 mod sgr;
 
@@ -906,10 +910,12 @@ impl vte::Perform for TerminalState {
     }
 
     /// Handle an Operating System Command (OSC) sequence. A shell marker
-    /// (OSC 133) is read from `osc_parameters`. The window/icon title (OSC
+    /// (OSC 133) is read from `osc_parameters`; `OSC 133 ; A` adds a
+    /// [`ProgramStatusFact::PromptStarted`]. The window/icon title (OSC
     /// 0/1/2), the working-directory report (OSC 7) and the desktop
     /// notifications (OSC 9, OSC 777, OSC 99) take the oldest queued OSC text
-    /// (`apply_next_osc_text`). Any other OSC command is ignored.
+    /// (`apply_next_osc_text`). Any other OSC command, `OSC 7501` among
+    /// them, is ignored.
     fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], _is_bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -920,6 +926,9 @@ impl vte::Perform for TerminalState {
                     self.get_active_grid_mut()
                         .set_prompt_mark(prompt_row_index, true);
                     self.shell_integration_state = ShellIntegrationState::Prompt;
+                    self.push_program_fact(ProgramFact::ProgramStatus(
+                        ProgramStatusFact::PromptStarted,
+                    ));
                 }
                 Osc133::Input => {
                     self.shell_integration_state = ShellIntegrationState::Input;

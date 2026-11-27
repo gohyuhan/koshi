@@ -27,6 +27,7 @@ use std::fmt::{Display, Formatter};
 use std::sync::Arc;
 
 use koshi_core::process::PtySize;
+use koshi_core::program_status::{BlockedKind, ProgramStatusState};
 use koshi_sixel::{SixelGraphic, SixelPalette};
 
 use serde::de::Visitor;
@@ -74,9 +75,10 @@ enum ShellIntegrationState {
 }
 
 /// A fact a pane's program wrote in its output that koshi acts on outside the
-/// screen: an OSC 133 command marker, a bell, a desktop notification, or the
-/// withdrawal of one. [`TerminalState`] keeps the facts in the order the
-/// program wrote them until the engine caller takes them.
+/// screen: an OSC 133 command marker, a bell, a desktop notification, the
+/// withdrawal of one, or a [`ProgramStatusFact`]. [`TerminalState`] keeps the
+/// facts in the order the program wrote them until the engine caller takes
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramFact {
     /// `OSC 133 ; C` while no command runs: the shell started a command.
@@ -115,6 +117,62 @@ pub enum ProgramFact {
         /// The OSC 99 `i` key of the withdrawn notification.
         notification_id: String,
     },
+    /// An OSC 7501 report or `clear`, an `OSC 133 ; A`, or a RIS.
+    ProgramStatus(ProgramStatusFact),
+}
+
+/// What one OSC 7501 report or `clear`, one `OSC 133 ; A` or one RIS says
+/// about the program status records of a pane. The terminal keeps no record.
+///
+/// `ESC ] 7501 ; state=working:id=deploy:progress=40:app=cargo ESC \` gives
+/// `Reported { record_id: "deploy", program_status_state: Working,
+/// blocked_kind: None, progress_percent: Some(40), app_name: Some("cargo"),
+/// title: None, message: None }`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProgramStatusFact {
+    /// A report that passed every limit of the Program Status Protocol.
+    Reported {
+        /// The record's path, such as `deploy/us-east`. Empty for the root
+        /// record.
+        record_id: String,
+        /// The state the report names.
+        program_status_state: ProgramStatusState,
+        /// What the blocked program needs. `None` unless
+        /// `program_status_state` is `Blocked`, and `None` when the report names no kind or an
+        /// unknown one.
+        blocked_kind: Option<BlockedKind>,
+        /// 0 to 100. `None` unless `program_status_state` is `Working` or `Blocked`, and
+        /// `None` when the report names no whole number from 0 to 100.
+        progress_percent: Option<u8>,
+        /// The `app` name, such as `cargo`: 1 to 32 bytes of
+        /// `A-Z a-z 0-9 _ . + -`. `None` when the report names no `app`, or
+        /// an `app` such as `a/b` that is not 1 to 32 of those bytes.
+        app_name: Option<String>,
+        /// The decoded `title` after [`sanitize_reported_text`]. `None` when
+        /// the report names no title, or the text is empty after the filter.
+        ///
+        /// [`sanitize_reported_text`]: koshi_core::text::sanitize_reported_text
+        title: Option<String>,
+        /// The decoded `msg` after [`sanitize_reported_text`], at most
+        /// [`MAX_REPORTED_TEXT_BYTE_COUNT`] bytes. `None` when the report
+        /// names no message, or the text is empty after the filter.
+        ///
+        /// [`MAX_REPORTED_TEXT_BYTE_COUNT`]: koshi_core::text::MAX_REPORTED_TEXT_BYTE_COUNT
+        /// [`sanitize_reported_text`]: koshi_core::text::sanitize_reported_text
+        message: Option<String>,
+    },
+    /// `state=clear`: the program removed the record `record_id` and every
+    /// record beneath it. An empty `record_id` names the root record, which
+    /// every record is beneath.
+    Cleared {
+        /// The path of the removed record, such as `deploy`. Empty for the
+        /// root record.
+        record_id: String,
+    },
+    /// `OSC 133 ; A`: a shell prompt started.
+    PromptStarted,
+    /// RIS (`ESC c`): the terminal reset.
+    TerminalReset,
 }
 
 /// The cells of the alternate screen.

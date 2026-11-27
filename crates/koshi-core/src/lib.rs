@@ -15,7 +15,8 @@
 //!   for.
 //! - [`notification`] — the entries koshi posts to tell a person something,
 //!   and the bounded queue each client and session keeps them in;
-//!   [`attention`] — what a pane's program asked a person to look at.
+//!   [`attention`] — what a pane's program asked a person to look at;
+//!   [`program_status`] — the state a pane's program reports about itself.
 //! - [`process`] — spawn, kill, and exit types; [`naming`] — generated names
 //!   for sessions, tabs, and clients; [`client`] — where a client connected
 //!   from; [`clipboard`] — the targets of a clipboard copy that a program in
@@ -55,6 +56,7 @@ pub mod mouse;
 pub mod naming;
 pub mod notification;
 pub mod process;
+pub mod program_status;
 pub mod random;
 pub mod recent_event;
 pub mod redact;
