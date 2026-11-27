@@ -125,9 +125,9 @@ pub enum ProgramFact {
 /// about the program status records of a pane. The terminal keeps no record.
 ///
 /// `ESC ] 7501 ; state=working:id=deploy:progress=40:app=cargo ESC \` gives
-/// `Reported { record_id: "deploy", state: Working, blocked_kind: None,
-/// progress_percent: Some(40), app_name: Some("cargo"), title: None, message:
-/// None }`.
+/// `Reported { record_id: "deploy", program_status_state: Working,
+/// blocked_kind: None, progress_percent: Some(40), app_name: Some("cargo"),
+/// title: None, message: None }`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProgramStatusFact {
     /// A report that passed every limit of the Program Status Protocol.
