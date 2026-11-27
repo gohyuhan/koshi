@@ -18,6 +18,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize, Serializer};
 
+use crate::attention::AttentionReasonKind;
 use crate::client::ClientOrigin;
 use crate::geometry::{PaneArea, Size};
 use crate::ids::{ClientId, LayoutAreaId, PaneId, SessionId, TabId};
@@ -89,6 +90,23 @@ pub struct PaneDiscovery {
     pub lifecycle: PaneLifecycle,
     /// Ids of the clients whose focus is on this pane.
     pub focused_by_client_ids: Vec<ClientId>,
+    /// The kind of the reason the pane waits for a person and the time the
+    /// wait began, or `None` for a pane that waits for nobody.
+    /// A row without `attention` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub attention: Option<PaneAttentionDiscovery>,
+}
+
+/// A pane's wait for a person, as `list-panes` reports it: the kind of
+/// the reason and the time the pane began to wait, and no title, body or exit
+/// code. A pane that waits since 14:02:11 on a notification titled
+/// `build done` reports `{ reason_kind: Notify, raised_at: 14:02:11 }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAttentionDiscovery {
+    /// The kind of the reason the pane waits for.
+    pub reason_kind: AttentionReasonKind,
+    /// The read time of the first signal since the last clear.
+    pub raised_at: SystemTime,
 }
 
 /// One attached client, as `inspect client` reports it and `list-clients`

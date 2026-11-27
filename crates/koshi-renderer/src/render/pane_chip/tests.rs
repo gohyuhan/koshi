@@ -907,6 +907,7 @@ fn state_4_and_5_a_peer_in_a_floating_pane_this_viewer_does_not_draw_draws_no_ch
             pane_id: float_pane_id,
             pane_title: None,
             pane_count: std::num::NonZeroUsize::MIN,
+            is_waiting: false,
         });
     render_snapshot.session_snapshot.peers =
         vec![build_peer_snapshot(BOB_COLOR_INDEX, Some(float_pane_id))];

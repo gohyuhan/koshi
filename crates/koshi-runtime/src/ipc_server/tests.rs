@@ -218,6 +218,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: vec![PaneSnapshot {
             pane_id,
@@ -249,6 +250,7 @@ fn build_image_snapshot(client_id: ClientId, image_record: Arc<ImageRecord>) -> 
             scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },
+            is_waiting: false,
         }],
         client_snapshot: ClientSnapshot {
             client_id,

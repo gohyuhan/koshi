@@ -98,6 +98,9 @@ pub struct FrameSession {
     /// Every floating pane of the session, in the order they were created,
     /// shown or minimized for the viewing client.
     pub floating_panes: Vec<FrameFloatingPane>,
+    /// How many panes of the session wait for a person, the panes of its
+    /// floating panes included. A frame without it fails to decode.
+    pub waiting_pane_count: usize,
     /// Every other client attached to the session, in `color_index` order.
     /// Empty while the viewing client is the only one. A frame without it
     /// fails to decode.
@@ -148,7 +151,7 @@ pub struct FramePeer {
 /// `{"Shown": {"floating_pane_id": …, "pane_id": …}}`, and a minimized one of
 /// 3 panes whose input pane is titled `htop` as
 /// `{"Minimized": {"floating_pane_id": …, "pane_id": …, "pane_title": "htop",
-/// "pane_count": 3}}`.
+/// "pane_count": 3, "is_waiting": false}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FrameFloatingPane {
     /// The viewing client shows the pane. The frame holds the pane's slot in
@@ -178,6 +181,9 @@ pub enum FrameFloatingPane {
         /// The panes the floating pane holds. A frame with `0` fails to
         /// decode.
         pane_count: NonZeroUsize,
+        /// Whether a pane of the floating pane waits for a person. A frame
+        /// without it fails to decode.
+        is_waiting: bool,
     },
 }
 
@@ -234,6 +240,9 @@ pub struct FrameTabMetadata {
     pub tab_index: usize,
     /// Whether this is the client's active tab, drawn with the active marker.
     pub is_active: bool,
+    /// Whether a pane of the tab's layout tree waits for a person. A floating
+    /// pane belongs to no tab. A frame without it fails to decode.
+    pub has_waiting_pane: bool,
 }
 
 /// One pane's placement in the solved layout: where its box sits, its content
@@ -759,6 +768,9 @@ pub struct FramePane {
     /// including one scrolled entirely out of the visible rows, where
     /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
+    /// Whether the pane waits for a person. A frame without it fails to
+    /// decode.
+    pub is_waiting: bool,
 }
 
 /// Which cells of a pane are highlighted this frame, as a column range per

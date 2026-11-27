@@ -15,13 +15,15 @@ use crate::layout::{ClientFocus, SolvedPane, SolvedTab, TabLayout};
 use crate::plane::Plane;
 use crate::router::RouterRequestKind;
 use crate::wire::{MaybeKnown, WireName, WireVariants};
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::command::{
     Command, CommandSource, MoveFloatingPaneArgs, MovePaneArgs, NewPaneArgs, NewPanePlacement,
     PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, ScrollPaneArgs, TiledPlacementTarget,
     ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
-    ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery,
+    TabDiscovery,
 };
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{
@@ -216,6 +218,10 @@ fn build_populated_test_session_overview() -> SessionOverview {
             command_argv: None,
             lifecycle: PaneLifecycle::Running,
             focused_by_client_ids: vec![client_id],
+            attention: Some(PaneAttentionDiscovery {
+                reason_kind: AttentionReasonKind::Notify,
+                raised_at: event_timestamp,
+            }),
         }],
         clients: vec![ClientDiscovery {
             client_id,
@@ -662,7 +668,11 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
                 "working_directory": "/home/user",
                 "command_argv": null,
                 "lifecycle": "Running",
-                "focused_by_client_ids": ["00000000-0000-0000-0000-000000000001"]
+                "focused_by_client_ids": ["00000000-0000-0000-0000-000000000001"],
+                "attention": {
+                    "reason_kind": "Notify",
+                    "raised_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 }
+                }
             }],
             "clients": [{
                 "client_id": "00000000-0000-0000-0000-000000000001",

@@ -1038,8 +1038,9 @@ impl Server {
     }
 
     /// Whether `view_changes_by_session_id` lists a state that a frame of
-    /// `client_id` shows: the tab bar, the floating panes or the pane sizing of
-    /// the client's session, the client's own view, the peer entry of another
+    /// `client_id` shows: the tab bar, the floating panes, the pane sizing or
+    /// the panes that wait for a person of the client's session, the client's
+    /// own view, the peer entry of another
     /// client of the session, or the layout of its active tab. `false` for a
     /// client attached to no session.
     fn is_client_frame_changed(
@@ -1056,6 +1057,7 @@ impl Server {
         view_changes.is_tab_bar_changed
             || view_changes.is_floating_set_changed
             || view_changes.is_pane_sizing_changed
+            || view_changes.is_attention_changed
             || view_changes.changed_client_ids.contains(&client_id)
             || view_changes
                 .presence_changed_client_ids

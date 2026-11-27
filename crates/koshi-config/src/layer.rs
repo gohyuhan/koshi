@@ -667,6 +667,8 @@ pub struct PartialColorPalette {
     pub border_unfocused: Option<RgbColor>,
     /// Border of the pane the pointer is hovering over.
     pub border_hover: Option<RgbColor>,
+    /// The marker of a pane that waits for a person.
+    pub border_attention: Option<RgbColor>,
     /// Text of a collapsed stack member's header strip.
     pub stack_header_fg: Option<RgbColor>,
     /// Background of a collapsed stack member's header strip.
@@ -688,6 +690,7 @@ impl PartialColorPalette {
         merge_override_field(&mut color_palette.border_focused, self.border_focused);
         merge_override_field(&mut color_palette.border_unfocused, self.border_unfocused);
         merge_override_field(&mut color_palette.border_hover, self.border_hover);
+        merge_override_field(&mut color_palette.border_attention, self.border_attention);
         merge_override_field(&mut color_palette.stack_header_fg, self.stack_header_fg);
         merge_override_field(&mut color_palette.stack_header_bg, self.stack_header_bg);
         merge_override_field(&mut color_palette.letterbox, self.letterbox);

@@ -1,5 +1,7 @@
 //! Tests for layout tree structure and navigation.
 
+use std::cell::RefCell;
+
 use koshi_core::geometry::{Direction, SplitDirection};
 use koshi_core::ids::PaneId;
 use serde_json::json;
@@ -126,6 +128,35 @@ fn nested_layout_tree_lists_leaves_depth_first() {
     );
     assert!(layout_tree.has_pane(upper_right_pane_id));
     assert!(!layout_tree.has_pane(PaneId::new()));
+}
+
+#[test]
+fn has_pane_matching_visits_leaves_depth_first_and_stops_at_the_first_match() {
+    let (left_pane_id, upper_right_pane_id, lower_right_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let layout_tree =
+        build_nested_layout_tree(left_pane_id, upper_right_pane_id, lower_right_pane_id);
+    let visited_pane_ids = RefCell::new(Vec::new());
+    let is_upper_right_pane = |pane_id: PaneId| {
+        visited_pane_ids.borrow_mut().push(pane_id);
+        pane_id == upper_right_pane_id
+    };
+    assert!(layout_tree.has_pane_matching(&is_upper_right_pane));
+    assert_eq!(
+        visited_pane_ids.into_inner(),
+        [left_pane_id, upper_right_pane_id]
+    );
+}
+
+#[test]
+fn has_pane_matching_is_false_when_no_leaf_matches_and_for_an_empty_split() {
+    let layout_tree = build_nested_layout_tree(PaneId::new(), PaneId::new(), PaneId::new());
+    assert!(!layout_tree.has_pane_matching(&|_| false));
+    let empty_split_node = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        Vec::new(),
+    ));
+    assert!(!empty_split_node.has_pane_matching(&|_| true));
 }
 
 #[test]

@@ -68,7 +68,7 @@ pub fn remove_pane_cascade(
 ) -> Vec<Event> {
     // Both checks run before anything is removed: an unknown pane and an
     // unknown tab each leave the session as it was.
-    if !session.tabs.contains_key(&tab_id) || session.panes.remove_pane_record(pane_id).is_none() {
+    if !session.tabs.contains_key(&tab_id) || session.remove_pane_record(pane_id).is_none() {
         return Vec::new();
     }
     let mut emitted_events = vec![
@@ -433,7 +433,7 @@ pub fn remove_pane_from_floating_pane(session: &mut Session, pane_id: PaneId) ->
     }
     let focused_client_rects =
         list_floating_pane_focused_client_rects(session, floating_pane_id, pane_id);
-    session.panes.remove_pane_record(pane_id);
+    session.remove_pane_record(pane_id);
     let mut emitted_events = vec![
         Event::PaneClosing(PaneClosing { pane_id }),
         Event::PaneRemoved(PaneRemoved {
@@ -600,7 +600,7 @@ pub fn remove_floating_pane(session: &mut Session, floating_pane_id: FloatingPan
     let _ = session.remove_floating_pane(floating_pane_id);
     let mut emitted_events = Vec::new();
     for pane_id in pane_ids {
-        session.panes.remove_pane_record(pane_id);
+        session.remove_pane_record(pane_id);
         emitted_events.push(Event::PaneClosing(PaneClosing { pane_id }));
         emitted_events.push(Event::PaneRemoved(PaneRemoved {
             pane_id,

@@ -373,6 +373,7 @@ pub(crate) fn build_placement_frame(
             tab_name: String::from("tab"),
             tab_index,
             is_active: tab_id == active_tab_id,
+            has_waiting_pane: false,
         })
         .collect();
     render_snapshot.client_snapshot.active_tab_id = active_tab_id;
@@ -1571,6 +1572,7 @@ pub(crate) fn build_render_snapshot(
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {
@@ -2384,6 +2386,7 @@ fn the_focused_pane_is_floating_only_when_the_session_lists_it_as_floating() {
         pane_id: floating_slot_pane_id,
         pane_title: None,
         pane_count: NonZeroUsize::MIN,
+        is_waiting: false,
     }];
     for (focused_pane_id, expected_is_focused_pane_floating) in [
         (Some(floating_slot_pane_id), true),

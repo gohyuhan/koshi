@@ -11,8 +11,10 @@ use std::time::{Duration, SystemTime};
 use koshi_config::layer::PartialKeybindingsConfig;
 use koshi_config::types::{BoundAction, ModeName, SCHEMA_VERSION};
 use koshi_core::action::{build_core_action_seeds, ActionReference, ActionScope, TargetKind};
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::discovery::{
-    ClientDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery, TabDiscovery,
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery,
+    TabDiscovery,
 };
 use koshi_core::event::{Event, InputModeChanged, PaneCreated, PaneFocused, QuitCause, TabCreated};
 use koshi_core::geometry::{
@@ -83,6 +85,7 @@ fn build_test_pane_discovery() -> PaneDiscovery {
         command_argv: Some(vec!["htop".to_string(), "--tree".to_string()]),
         lifecycle: PaneLifecycle::Running,
         focused_by_client_ids: vec![ClientId::from_uuid(build_fixed_test_uuid())],
+        attention: None,
     }
 }
 
@@ -114,6 +117,7 @@ fn build_test_pane_row() -> PaneRow {
         },
         session_id: SessionId::from_uuid(build_fixed_test_uuid()),
         session_name: "quiet-lake".to_string(),
+        attention: None,
     }
 }
 
@@ -257,7 +261,8 @@ fn pane_list_json_carries_the_whole_id_chain() {
     "tab_name": "amber-fox",
     "floating_pane_id": null,
     "session_id": "session-00000000-0000-0000-0000-000000000001",
-    "session_name": "quiet-lake"
+    "session_name": "quiet-lake",
+    "attention": null
   }
 ]
 "#;
@@ -283,7 +288,8 @@ fn an_untitled_pane_lists_a_null_name_in_json() {
     "tab_name": "amber-fox",
     "floating_pane_id": null,
     "session_id": "session-00000000-0000-0000-0000-000000000001",
-    "session_name": "quiet-lake"
+    "session_name": "quiet-lake",
+    "attention": null
   }
 ]
 "#
@@ -582,8 +588,8 @@ tab-00000000-0000-0000-0000-000000000001  amber-fox  session-00000000-0000-0000-
 #[test]
 fn pane_table_names_the_owning_tab_and_session() {
     let expected_text = "\
-id                                         name  tab                                       tab_name   floating_pane  session                                       session_name
-pane-00000000-0000-0000-0000-000000000001  htop  tab-00000000-0000-0000-0000-000000000001  amber-fox  -              session-00000000-0000-0000-0000-000000000001  quiet-lake
+id                                         name  tab                                       tab_name   floating_pane  session                                       session_name  attention
+pane-00000000-0000-0000-0000-000000000001  htop  tab-00000000-0000-0000-0000-000000000001  amber-fox  -              session-00000000-0000-0000-0000-000000000001  quiet-lake    -
 ";
     assert_eq!(
         render_panes(&[build_test_pane_row()], OutputFormat::Table),
@@ -610,7 +616,62 @@ fn an_untitled_pane_lists_a_dash_for_its_name() {
             "-",
             "session-00000000-0000-0000-0000-000000000001",
             "quiet-lake",
+            "-",
         ]
+    );
+}
+
+#[test]
+fn a_waiting_pane_lists_the_kind_of_its_attention_as_the_last_table_cell() {
+    for (reason_kind, expected_cell) in [
+        (AttentionReasonKind::Bell, "bell"),
+        (AttentionReasonKind::Notify, "notify"),
+        (AttentionReasonKind::CommandFinished, "command-finished"),
+    ] {
+        let waiting_pane_row = PaneRow {
+            attention: Some(PaneAttentionDiscovery {
+                reason_kind,
+                raised_at: build_fixed_test_time(),
+            }),
+            ..build_test_pane_row()
+        };
+        let rendered_text = render_panes(&[waiting_pane_row], OutputFormat::Table);
+        let rendered_row = rendered_text.lines().nth(1).expect("one data row");
+        assert_eq!(
+            rendered_row.split_whitespace().last(),
+            Some(expected_cell),
+            "{reason_kind:?}"
+        );
+    }
+}
+
+#[test]
+fn a_waiting_pane_lists_its_attention_kind_and_raise_time_in_json() {
+    let waiting_pane_row = PaneRow {
+        attention: Some(PaneAttentionDiscovery {
+            reason_kind: AttentionReasonKind::Notify,
+            raised_at: build_fixed_test_time(),
+        }),
+        ..build_test_pane_row()
+    };
+    assert_eq!(
+        render_panes(&[waiting_pane_row], OutputFormat::Json),
+        r#"[
+  {
+    "pane_id": "pane-00000000-0000-0000-0000-000000000001",
+    "pane_name": "htop",
+    "tab_id": "tab-00000000-0000-0000-0000-000000000001",
+    "tab_name": "amber-fox",
+    "floating_pane_id": null,
+    "session_id": "session-00000000-0000-0000-0000-000000000001",
+    "session_name": "quiet-lake",
+    "attention": {
+      "kind": "notify",
+      "raised_at": "1970-01-01T00:20:34Z"
+    }
+  }
+]
+"#
     );
 }
 
@@ -632,7 +693,8 @@ fn a_floating_pane_lists_its_floating_pane_id_and_a_null_tab_in_json() {
     "tab_name": null,
     "floating_pane_id": "floating-pane-00000000-0000-0000-0000-000000000011",
     "session_id": "session-00000000-0000-0000-0000-000000000001",
-    "session_name": "quiet-lake"
+    "session_name": "quiet-lake",
+    "attention": null
   }
 ]
 "#
@@ -648,10 +710,10 @@ fn panes_of_one_floating_pane_list_the_same_floating_pane_id_and_dashes_for_thei
         ..build_test_pane_row()
     });
     let expected_text = "\
-id                                         name  tab  tab_name  floating_pane                                       session                                       session_name
-pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000011  session-00000000-0000-0000-0000-000000000001  quiet-lake
-pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000011  session-00000000-0000-0000-0000-000000000001  quiet-lake
-pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000012  session-00000000-0000-0000-0000-000000000001  quiet-lake
+id                                         name  tab  tab_name  floating_pane                                       session                                       session_name  attention
+pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000011  session-00000000-0000-0000-0000-000000000001  quiet-lake    -
+pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000011  session-00000000-0000-0000-0000-000000000001  quiet-lake    -
+pane-00000000-0000-0000-0000-000000000001  htop  -    -         floating-pane-00000000-0000-0000-0000-000000000012  session-00000000-0000-0000-0000-000000000001  quiet-lake    -
 ";
     assert_eq!(render_panes(&pane_rows, OutputFormat::Table), expected_text);
 }

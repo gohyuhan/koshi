@@ -19,7 +19,9 @@
 //! background (black by default) before anything is painted, and each modifier
 //! group takes one stop on the theme's chrome ramp (light-purple → light-blue
 //! by default), matching the tab list above; hints that don't fit are dropped
-//! whole with a trailing `…` marker.
+//! whole with a trailing `…` marker. While a pane of the session waits for a
+//! person, ` 2 waiting ` sits at the row's right end and the hints stop
+//! before it.
 
 use std::collections::BTreeMap;
 
@@ -32,7 +34,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Clear, Widget};
 
 use crate::region::StatuslineInputs;
-use crate::render::{compute_bar_style, get_line_width, set_line_clipped};
+use crate::render::{
+    compute_attention_border_style, compute_bar_style, get_line_width, set_line_clipped,
+};
 use crate::snapshot::KeymapHints;
 use crate::theme::Theme;
 
@@ -42,12 +46,18 @@ use crate::theme::Theme;
 /// Does nothing for a zero-size area. Otherwise paints in this order:
 ///
 /// 1. Blanks the row, then fills it with the theme's bar background.
-/// 2. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
+/// 2. While `waiting_pane_count` is above `0`, draws ` N waiting ` in the
+///    theme's attention color at the right end of the row, when the row has
+///    room for all of it. Every later step ends before it: 3 waiting panes on
+///    an 80-column row draw ` 3 waiting ` on columns 69 to 79, and the hints
+///    end by column 68. When the count takes the whole row, no later step
+///    draws.
+/// 3. Draws one accent ribbon per already-pressed chord of `pending_key_sequence`, left to
 ///    right, then a ` ▶ ` arrow. Only the first chord's ribbon carries that
 ///    chord's prefix label, and only when bindings sit under it.
-/// 3. Draws each modifier group left to right: its ` Ctrl + ` header, then one
+/// 4. Draws each modifier group left to right: its ` Ctrl + ` header, then one
 ///    two-block ribbon per action.
-/// 4. Draws a `…` marker where the row ran out of room, and stops there.
+/// 5. Draws a `…` marker where the row ran out of room, and stops there.
 pub(crate) fn draw_statusline(
     statusline_inputs: StatuslineInputs<'_>,
     theme: &Theme,
@@ -60,6 +70,7 @@ pub(crate) fn draw_statusline(
     let StatuslineInputs {
         keymap_hints,
         pending_key_sequence,
+        waiting_pane_count,
     } = statusline_inputs;
     // Clear drops stale cells, then the bar background fills the row whole.
     // Ribbons painted after this set their own background; plain text such as
@@ -68,7 +79,27 @@ pub(crate) fn draw_statusline(
     screen_buffer.set_style(statusline_area, compute_bar_style(theme));
 
     let pending_chords = pending_key_sequence.map_or(&[][..], KeySequence::list_chords);
-    let right_edge_column = statusline_area.right();
+    let mut right_edge_column = statusline_area.right();
+    if waiting_pane_count > 0 {
+        let waiting_count_line = Line::from(Span::styled(
+            format!(" {waiting_pane_count} waiting "),
+            compute_attention_border_style(theme),
+        ));
+        let waiting_count_width = get_line_width(&waiting_count_line);
+        if waiting_count_width <= statusline_area.width {
+            right_edge_column -= waiting_count_width;
+            set_line_clipped(
+                screen_buffer,
+                right_edge_column,
+                statusline_area.y,
+                &waiting_count_line,
+                waiting_count_width,
+            );
+        }
+    }
+    if right_edge_column == statusline_area.x {
+        return;
+    }
 
     let mut current_column = statusline_area.x;
     if !pending_chords.is_empty() {

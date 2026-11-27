@@ -156,7 +156,8 @@ pub(crate) fn list_placed_floating_panes<'a>(
 ///    is pinned), the minimize button `–` and the close button `✕` on the
 ///    strip row, each where [`compute_floating_pane_strip`] places it, in the
 ///    style [`compute_pane_border_style`] gives the slot's input pane: the
-///    placement hover style while `viewer_chrome.placement_handle_hover` is
+///    attention style while that pane waits for a person, else the placement
+///    hover style while `viewer_chrome.placement_handle_hover` is
 ///    [`FloatingHandle`](PlacementHandleHover::FloatingHandle) of that pane
 ///    with its pin state.
 /// 3. Draws the layout area at the layout origin as the tiled layer draws a
@@ -202,6 +203,9 @@ pub(super) fn draw_floating_pane(
         let strip_style = compute_pane_border_style(
             render_snapshot,
             floating_pane_slot.pane_id,
+            render_snapshot
+                .find_pane_snapshot(floating_pane_slot.pane_id)
+                .is_some_and(|pane_snapshot| pane_snapshot.is_waiting),
             is_grab_handle_hovered,
             viewer_chrome,
             theme,

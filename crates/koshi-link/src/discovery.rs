@@ -21,7 +21,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use koshi_core::discovery::{ClientDiscovery, PaneDiscovery, SessionOverview, TabDiscovery};
+use koshi_core::discovery::{
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, SessionOverview, TabDiscovery,
+};
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, FloatingPaneId, LayoutAreaId, PaneId, SessionId, TabId};
 use koshi_core::redact::redact_command_argv;
@@ -101,6 +103,9 @@ pub struct PaneRow {
     pub session_id: SessionId,
     /// That session's display name.
     pub session_name: String,
+    /// The kind of the reason the pane waits for a person and the time the
+    /// wait began, or `None` for a pane that waits for nobody.
+    pub attention: Option<PaneAttentionDiscovery>,
 }
 
 /// The layout tree that holds the pane of a `list-panes` row.
@@ -847,6 +852,7 @@ pub fn build_pane_rows(session_overviews: &[SessionOverview]) -> Vec<PaneRow> {
                     layout_area,
                     session_id: session_overview.session.session_id,
                     session_name: sanitize_reported_text(&session_overview.session.session_name),
+                    attention: pane_discovery.attention,
                 })
             })
         })

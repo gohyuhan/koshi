@@ -35,6 +35,7 @@ fn build_pane_discovery(working_directory: Option<PathBuf>) -> PaneDiscovery {
         command_argv: None,
         lifecycle: PaneLifecycle::Running,
         focused_by_client_ids: Vec::new(),
+        attention: None,
     }
 }
 
@@ -394,4 +395,55 @@ fn a_client_row_missing_its_id_is_rejected() {
         serde_json::from_value::<ClientDiscovery>(client_discovery_json).expect_err("rejects");
 
     assert_eq!(client_parse_error.to_string(), "missing field `client_id`");
+}
+
+#[test]
+fn a_pane_attention_encodes_its_reason_kind_and_raise_time_and_round_trips() {
+    let pane_discovery = PaneDiscovery {
+        attention: Some(PaneAttentionDiscovery {
+            reason_kind: AttentionReasonKind::CommandFinished,
+            raised_at: SystemTime::UNIX_EPOCH + Duration::new(1234, 500),
+        }),
+        ..build_pane_discovery(None)
+    };
+
+    let pane_discovery_json = serde_json::to_value(&pane_discovery).expect("serializes");
+
+    assert_eq!(
+        pane_discovery_json["attention"],
+        json!({
+            "reason_kind": "CommandFinished",
+            "raised_at": {"secs_since_epoch": 1234, "nanos_since_epoch": 500}
+        })
+    );
+    let decoded_pane_discovery: PaneDiscovery =
+        serde_json::from_value(pane_discovery_json).expect("deserializes");
+    assert_eq!(decoded_pane_discovery, pane_discovery);
+}
+
+#[test]
+fn a_pane_with_a_null_attention_decodes_as_waiting_for_nobody() {
+    let pane_discovery_json = serde_json::to_value(build_pane_discovery(None)).expect("serializes");
+    assert_eq!(pane_discovery_json["attention"], serde_json::Value::Null);
+
+    let decoded_pane_discovery: PaneDiscovery =
+        serde_json::from_value(pane_discovery_json).expect("a null attention decodes");
+
+    assert_eq!(decoded_pane_discovery.attention, None);
+}
+
+#[test]
+fn a_pane_without_its_attention_field_is_refused() {
+    let mut pane_discovery_json =
+        serde_json::to_value(build_pane_discovery(None)).expect("serializes");
+    pane_discovery_json
+        .as_object_mut()
+        .expect("a pane encodes as an object")
+        .remove("attention")
+        .expect("the attention field is present");
+
+    let decode_error = serde_json::from_value::<PaneDiscovery>(pane_discovery_json)
+        .expect_err("a pane without its attention field decoded instead of failing");
+
+    assert_eq!(decode_error.to_string(), "missing field `attention`");
 }

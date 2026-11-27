@@ -112,10 +112,12 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
             tab_name: "shell".to_string(),
             tab_index: 0,
             is_active: true,
+            has_waiting_pane: false,
         }],
         floating_pane_slots: Vec::new(),
         floating_panes: Vec::new(),
         peers: Vec::new(),
+        waiting_pane_count: 0,
     };
 
     let pane_snapshot = PaneSnapshot {
@@ -140,6 +142,7 @@ fn build_render_snapshot_fixture(terminal_grid: Grid) -> RenderSnapshot {
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
+        is_waiting: false,
     };
 
     let client_snapshot = ClientSnapshot {
@@ -1112,6 +1115,7 @@ fn same_floating_pane_visibility_needs_the_same_panes_in_order_each_shown_or_min
             pane_id,
             pane_title: Some(pane_title.to_string()),
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         };
     let session_snapshot = build_session_snapshot(vec![
         FloatingPane::Shown {

@@ -1019,6 +1019,10 @@ pub struct SessionSnapshot {
     /// `b` and `c` made in that order and `b` minimized, it holds `Shown` `a`,
     /// `Minimized` `b` with `b`'s title, and `Shown` `c`.
     pub floating_panes: Vec<FloatingPane>,
+    /// How many panes of the session wait for a person, the panes of its
+    /// floating panes included. The statusline draws `2 waiting` for `2`, and
+    /// nothing for `0`.
+    pub waiting_pane_count: usize,
     /// Every other client attached to the session, in `color_index` order. A
     /// client the session restored after a restart is left out until it
     /// attaches again. Empty while the viewing client is the only one.
@@ -1150,6 +1154,8 @@ pub enum FloatingPane {
         pane_title: Option<String>,
         /// The panes the floating pane holds.
         pane_count: NonZeroUsize,
+        /// Whether a pane of the floating pane waits for a person.
+        is_waiting: bool,
     },
 }
 
@@ -1198,6 +1204,9 @@ pub struct TabMetadata {
     pub tab_index: usize,
     /// Whether this is the client's active tab (drawn with the active marker).
     pub is_active: bool,
+    /// Whether a pane of the tab's layout tree waits for a person: the tab
+    /// draws `●` before its name. A floating pane belongs to no tab.
+    pub has_waiting_pane: bool,
 }
 
 /// The active tab, with its layout already solved into placed pane slots.
@@ -1569,6 +1578,10 @@ pub struct PaneSnapshot {
     /// one scrolled entirely out of the visible rows, where
     /// [`selection_spans`](Self::selection_spans) is `None`.
     pub has_selection: bool,
+    /// Whether the pane waits for a person: its border, and its stack header
+    /// while it is a collapsed stack member, draw in the theme's attention
+    /// color.
+    pub is_waiting: bool,
     /// Scrollback state for the scroll-position indicator.
     pub scrollback_metadata: ScrollbackMetadata,
 }
@@ -1576,8 +1589,8 @@ pub struct PaneSnapshot {
 impl PaneSnapshot {
     /// A snapshot of `pane_id` that shows nothing: no title, no grid, no
     /// images, a hidden non-blinking cursor at `(0, 0)` with no shape, mouse
-    /// tracking off, the primary screen at view row `0`, no highlight, and no
-    /// retained scrollback lines.
+    /// tracking off, the primary screen at view row `0`, no highlight, no
+    /// wait for a person, and no retained scrollback lines.
     #[must_use]
     pub fn from_empty_pane(pane_id: PaneId) -> Self {
         Self {
@@ -1599,6 +1612,7 @@ impl PaneSnapshot {
             view_top_row_index: 0,
             selection_spans: None,
             has_selection: false,
+            is_waiting: false,
             scrollback_metadata: ScrollbackMetadata {
                 retained_line_count: 0,
             },

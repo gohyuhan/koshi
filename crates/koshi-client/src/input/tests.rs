@@ -3544,6 +3544,7 @@ fn the_selection_passes_over_pinned_and_hidden_floating_panes() {
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         });
     let mut client = build_client_viewing(&mouse_frame);
     client.apply_client_action(ClientActionKind::BeginFloatingPaneMove, Some(&mouse_frame));

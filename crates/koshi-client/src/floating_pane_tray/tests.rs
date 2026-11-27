@@ -80,6 +80,7 @@ pub(crate) fn build_tray_mouse_frame(is_shown_by_tile: &[bool]) -> (MouseFrame, 
                     pane_id: floating_slot_pane_id,
                     pane_title: None,
                     pane_count: NonZeroUsize::MIN,
+                    is_waiting: false,
                 });
         }
     }
@@ -1057,6 +1058,7 @@ fn a_tray_opened_before_its_frame_repaints_leaves_the_cells_beside_it_to_the_pan
             pane_id: PaneId::new(),
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         });
     mouse_frame.client_snapshot.is_mouse_selection_enabled = true;
     let mut client = build_client_with_open_tray(&mouse_frame);

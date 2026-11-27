@@ -144,6 +144,7 @@ fn build_pane_snapshot(pane_id: PaneId) -> PaneSnapshot {
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 500,
         },
+        is_waiting: false,
     }
 }
 
@@ -215,17 +216,20 @@ pub(crate) fn build_render_snapshot(
                     tab_name: String::from("tab"),
                     tab_index: 0,
                     is_active: true,
+                    has_waiting_pane: false,
                 },
                 TabMetadata {
                     tab_id: other_tab_id,
                     tab_name: String::from("other"),
                     tab_index: 1,
                     is_active: false,
+                    has_waiting_pane: false,
                 },
             ],
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: vec![
             build_pane_snapshot(content_pane_id),
@@ -414,7 +418,9 @@ fn a_pane_with_no_grid_travels_with_its_remaining_fields_at_rest() {
 #[test]
 fn the_title_mode_and_selection_scalars_come_through_unchanged() {
     let source_pane_id = PaneId::new();
-    let painted_frame = build_wire_frame(&build_render_snapshot(source_pane_id, PaneId::new()));
+    let mut render_snapshot = build_render_snapshot(source_pane_id, PaneId::new());
+    render_snapshot.pane_snapshots[0].is_waiting = true;
+    let painted_frame = build_wire_frame(&render_snapshot);
 
     let pane_snapshot = &painted_frame.pane_snapshots[0];
     assert_eq!(pane_snapshot.pane_id, source_pane_id);
@@ -429,6 +435,14 @@ fn the_title_mode_and_selection_scalars_come_through_unchanged() {
         Some(FrameSelection {
             row_spans: vec![(0, 1, 2)],
         })
+    );
+    assert_eq!(
+        painted_frame
+            .pane_snapshots
+            .iter()
+            .map(|frame_pane| frame_pane.is_waiting)
+            .collect::<Vec<_>>(),
+        [true, false]
     );
 }
 
@@ -630,6 +644,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             pane_id: minimized_pane_id,
             pane_title: Some("htop".to_string()),
             pane_count: NonZeroUsize::new(3).expect("3 is above 0"),
+            is_waiting: true,
         },
         FloatingPane::Shown {
             floating_pane_id: build_floating_pane_id(lower_floating_pane_id),
@@ -640,6 +655,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
             pane_id: untitled_minimized_pane_id,
             pane_title: None,
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         },
     ];
 
@@ -716,6 +732,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
                 pane_id: minimized_pane_id,
                 pane_title: Some("htop".to_string()),
                 pane_count: NonZeroUsize::new(3).expect("3 is above 0"),
+                is_waiting: true,
             },
             FrameFloatingPane::Shown {
                 floating_pane_id: build_floating_pane_id(lower_floating_pane_id),
@@ -726,6 +743,7 @@ fn floating_pane_slots_copy_straight_across_back_to_front() {
                 pane_id: untitled_minimized_pane_id,
                 pane_title: None,
                 pane_count: NonZeroUsize::MIN,
+                is_waiting: false,
             },
         ]
     );
@@ -746,9 +764,12 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
         .client_snapshot
         .input_pane_moved_by_others_count = 4;
     render_snapshot.client_snapshot.dropped_input_request_count = 5;
+    render_snapshot.session_snapshot.tabs_metadata[1].has_waiting_pane = true;
+    render_snapshot.session_snapshot.waiting_pane_count = 2;
 
     let painted_frame = build_wire_frame(&render_snapshot);
 
+    assert_eq!(painted_frame.session_snapshot.waiting_pane_count, 2);
     assert_eq!(
         painted_frame.session_snapshot.session_id,
         render_snapshot.session_snapshot.session_id
@@ -848,12 +869,14 @@ fn the_session_tab_slot_and_client_fields_copy_straight_across() {
                 tab_name: String::from("tab"),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: false,
             },
             FrameTabMetadata {
                 tab_id: render_snapshot.session_snapshot.tabs_metadata[1].tab_id,
                 tab_name: String::from("other"),
                 tab_index: 1,
                 is_active: false,
+                has_waiting_pane: true,
             },
         ]
     );

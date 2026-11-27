@@ -137,12 +137,20 @@ impl LayoutNode {
     /// `true` when some leaf of this subtree references `pane_id`.
     #[must_use]
     pub fn has_pane(&self, pane_id: PaneId) -> bool {
+        self.has_pane_matching(&|candidate_pane_id| candidate_pane_id == pane_id)
+    }
+
+    /// `true` when `is_matching_pane` returns `true` for the pane id of
+    /// some leaf of this subtree. Visits the leaves depth-first and stops at the
+    /// first match. An empty split matches nothing.
+    #[must_use]
+    pub fn has_pane_matching(&self, is_matching_pane: &impl Fn(PaneId) -> bool) -> bool {
         match self {
-            Self::Pane(candidate_pane_id) => *candidate_pane_id == pane_id,
+            Self::Pane(pane_id) => is_matching_pane(*pane_id),
             Self::Split(split_node) => split_node
                 .children
                 .iter()
-                .any(|child_node| child_node.has_pane(pane_id)),
+                .any(|child_node| child_node.has_pane_matching(is_matching_pane)),
         }
     }
 

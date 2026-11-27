@@ -106,6 +106,7 @@ fn build_test_render_snapshot() -> Box<RenderSnapshot> {
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: Vec::new(),
         client_snapshot: ClientSnapshot {

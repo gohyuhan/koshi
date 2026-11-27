@@ -29,6 +29,7 @@ pub fn resolve_theme(theme_config: &ThemeConfig) -> Theme {
         focused_border_color: convert_rgb_color(theme_colors.border_focused),
         unfocused_border_color: convert_rgb_color(theme_colors.border_unfocused),
         hover_border_color: convert_rgb_color(theme_colors.border_hover),
+        attention_border_color: convert_rgb_color(theme_colors.border_attention),
         stack_header_text_color: convert_rgb_color(theme_colors.stack_header_fg),
         stack_header_background_color: convert_rgb_color(theme_colors.stack_header_bg),
         letterbox_color: convert_rgb_color(theme_colors.letterbox),

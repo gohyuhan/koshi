@@ -158,6 +158,7 @@ fn build_pane_snapshot(
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: 0,
         },
+        is_waiting: false,
     }
 }
 
@@ -179,6 +180,7 @@ fn build_render_snapshot(
             tab_name: (*tab_name).to_string(),
             tab_index,
             is_active: tab_index == 0,
+            has_waiting_pane: false,
         })
         .collect();
     RenderSnapshot {
@@ -201,6 +203,7 @@ fn build_render_snapshot(
             floating_pane_slots: Vec::new(),
             floating_panes: Vec::new(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots,
         client_snapshot: ClientSnapshot {
@@ -700,6 +703,7 @@ fn every_open_tray_cell_classifies_as_what_was_painted() {
             pane_id: PaneId::new(),
             pane_title: Some("logs".to_string()),
             pane_count: NonZeroUsize::MIN,
+            is_waiting: false,
         },
     ];
     let viewer_chrome = ViewerChrome {

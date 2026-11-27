@@ -399,6 +399,7 @@ colors {
     stack-header-fg "#00000b"
     stack-header-bg "#00000c"
     letterbox "#00000d"
+    border-attention "#00000e"
 }
 "##;
 
@@ -423,6 +424,7 @@ colors {
                     stack_header_fg: Some(RgbColor::from_channels(0, 0, 11)),
                     stack_header_bg: Some(RgbColor::from_channels(0, 0, 12)),
                     letterbox: Some(RgbColor::from_channels(0, 0, 13)),
+                    border_attention: Some(RgbColor::from_channels(0, 0, 14)),
                 }),
             },
             Vec::new(),

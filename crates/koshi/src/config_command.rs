@@ -480,6 +480,12 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "Pane border under the pointer.",
     ),
     build_config_field_help(
+        "theme.colors.border-attention",
+        "themes/<name>.kdl",
+        "\"#ffaf00\"",
+        "Marker of a pane that waits for a person.",
+    ),
+    build_config_field_help(
         "theme.colors.stack-header-fg",
         "themes/<name>.kdl",
         "\"#f4f1fa\"",

@@ -671,22 +671,25 @@ impl Server {
             .set_pane_render_deadline(pane_id, synchronized_output_deadline);
     }
 
-    /// Mark the views the pass changed and build again the placement previews
-    /// that read a changed state (`mark_changed_views`), bring each
-    /// subscriber's marks of other clients' input up to date at
-    /// `current_time` (`Server::update_peer_input_marks`),
-    /// run the timed renders due at `current_time`
-    /// ([`advance_due_pane_renders`](Self::advance_due_pane_renders)), hand a
-    /// fresh snapshot to each paused subscriber that can take one
+    /// Run the timed renders due at `current_time`
+    /// ([`advance_due_pane_renders`](Self::advance_due_pane_renders)), mark
+    /// the views the pass changed and build again the placement previews that
+    /// read a changed state (`mark_changed_views`), bring each subscriber's
+    /// marks of other clients' input up to date at `current_time`
+    /// (`Server::update_peer_input_marks`), hand a fresh snapshot to each
+    /// paused subscriber that can take one
     /// ([`resync_lagged`](Self::resync_lagged)), then put each client's
     /// current frame on its queue when its frame is due
-    /// ([`push_frames`](Self::push_frames)). The snapshots and the frames are
-    /// built from the same state. A serve loop calls it once per pass, after
-    /// the events it read.
+    /// ([`push_frames`](Self::push_frames)). A view change that a timed render
+    /// makes reaches the frames of the same pass: a bell that a
+    /// synchronized-output timeout releases marks the frame of every client of
+    /// the session in that pass. The snapshots and the frames are built from
+    /// the same state. A serve loop calls it once per pass, after the events it
+    /// read.
     pub fn push_due_frames(&mut self, current_time: Instant) {
+        self.advance_due_pane_renders(current_time);
         self.mark_changed_views();
         self.update_peer_input_marks(current_time);
-        self.advance_due_pane_renders(current_time);
         self.resync_lagged(current_time);
         self.push_frames(current_time);
     }

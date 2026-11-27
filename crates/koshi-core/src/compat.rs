@@ -167,6 +167,13 @@ pub struct Surface {
 /// - The session's event stream carries `PaneAttentionRaised` and
 ///   `PaneAttentionCleared`: a pane that began or stopped waiting for a
 ///   person. 5 has neither event.
+/// - A painted frame says which panes wait for a person: the session carries
+///   `waiting_pane_count`, each tab entry `has_waiting_pane`, each pane
+///   `is_waiting`, and each minimized floating pane `is_waiting`. A frame
+///   without one of them fails to decode. 5 has none of the four.
+/// - Each pane of a `Discovery` answer carries `attention`: the reason kind
+///   and the start of the pane's wait for a person, or `null`. A row without
+///   it fails to decode. 5 has no such field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A

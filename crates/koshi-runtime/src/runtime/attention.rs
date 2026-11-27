@@ -185,7 +185,8 @@ impl Server {
     /// (`AttentionConfig::should_raise_for`) and when no session holds the
     /// pane. A pane that waits for nobody takes `raised_at: read_at`. A pane
     /// that already waits keeps its `raised_at`, and takes `reason` and
-    /// `withdrawable_notification_id`.
+    /// `withdrawable_notification_id`. The session writes the attention
+    /// ([`Session::set_pane_attention`](koshi_session::session::state::Session::set_pane_attention)).
     fn raise_pane_attention(
         &mut self,
         pane_id: PaneId,
@@ -200,25 +201,22 @@ impl Server {
         {
             return;
         }
-        let Some(pane_record) = self
-            .get_session_for_pane_mut(pane_id)
-            .and_then(|session| session.panes.get_pane_record_mut_by_id(pane_id))
-        else {
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        match pane_record.attention.as_mut() {
-            Some(attention) => {
-                attention.reason = reason;
-                attention.withdrawable_notification_id = withdrawable_notification_id;
-            }
-            None => {
-                pane_record.attention = Some(Attention {
-                    raised_at: read_at,
-                    reason,
-                    withdrawable_notification_id,
-                });
-            }
-        }
+        let raised_at = session
+            .panes
+            .get_pane_record_by_id(pane_id)
+            .and_then(|pane_record| pane_record.attention.as_ref())
+            .map_or(read_at, |attention| attention.raised_at);
+        session.set_pane_attention(
+            pane_id,
+            Some(Attention {
+                raised_at,
+                reason,
+                withdrawable_notification_id,
+            }),
+        );
     }
 
     /// End `pane_id`'s wait because its program withdrew the OSC 99
@@ -226,17 +224,18 @@ impl Server {
     /// withdrawable by `notification_id`. Every other attention, and a pane
     /// that waits for nobody, stays as it is.
     fn withdraw_pane_notification(&mut self, pane_id: PaneId, notification_id: &str) {
-        let Some(pane_record) = self
-            .get_session_for_pane_mut(pane_id)
-            .and_then(|session| session.panes.get_pane_record_mut_by_id(pane_id))
-        else {
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
         };
-        let is_withdrawable = pane_record.attention.as_ref().is_some_and(|attention| {
-            attention.withdrawable_notification_id.as_deref() == Some(notification_id)
-        });
+        let is_withdrawable = session
+            .panes
+            .get_pane_record_by_id(pane_id)
+            .and_then(|pane_record| pane_record.attention.as_ref())
+            .is_some_and(|attention| {
+                attention.withdrawable_notification_id.as_deref() == Some(notification_id)
+            });
         if is_withdrawable {
-            pane_record.attention = None;
+            session.set_pane_attention(pane_id, None);
         }
     }
 
@@ -292,11 +291,7 @@ impl Server {
         client_id: Option<ClientId>,
     ) -> Option<Event> {
         let session = self.get_session_for_pane_mut(pane_id)?;
-        session
-            .panes
-            .get_pane_record_mut_by_id(pane_id)?
-            .attention
-            .take()?;
+        session.set_pane_attention(pane_id, None)?;
         let tab_id = session
             .find_tab_by_pane_id(pane_id)
             .map(|tab| tab.get_tab_id());

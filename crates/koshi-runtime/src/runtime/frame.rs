@@ -105,14 +105,17 @@ pub(crate) fn build_wire_frame_with_content_ids(
                         pane_id,
                         pane_title,
                         pane_count,
+                        is_waiting,
                     } => FrameFloatingPane::Minimized {
                         floating_pane_id: *floating_pane_id,
                         pane_id: *pane_id,
                         pane_title: pane_title.clone(),
                         pane_count: *pane_count,
+                        is_waiting: *is_waiting,
                     },
                 })
                 .collect(),
+            waiting_pane_count: session_snapshot.waiting_pane_count,
             peers: session_snapshot
                 .peers
                 .iter()
@@ -284,6 +287,7 @@ fn build_wire_tab_metadata(tab_metadata: &TabMetadata) -> FrameTabMetadata {
         tab_name: tab_metadata.tab_name.clone(),
         tab_index: tab_metadata.tab_index,
         is_active: tab_metadata.is_active,
+        has_waiting_pane: tab_metadata.has_waiting_pane,
     }
 }
 
@@ -317,6 +321,7 @@ fn build_wire_pane(
                 row_spans: selection_spans.row_spans.clone(),
             }),
         has_selection: pane_snapshot.has_selection,
+        is_waiting: pane_snapshot.is_waiting,
     }
 }
 

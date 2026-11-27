@@ -66,6 +66,7 @@ fn build_engine_pane_snapshot(
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: scrollback.get_retained_line_count(),
         },
+        is_waiting: false,
     }
 }
 

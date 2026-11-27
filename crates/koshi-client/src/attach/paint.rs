@@ -129,14 +129,17 @@ fn build_render_snapshot_with_images(
                         pane_id,
                         pane_title,
                         pane_count,
+                        is_waiting,
                     } => FloatingPane::Minimized {
                         floating_pane_id: *floating_pane_id,
                         pane_id: *pane_id,
                         pane_title: pane_title.as_deref().map(sanitize_reported_text),
                         pane_count: *pane_count,
+                        is_waiting: *is_waiting,
                     },
                 })
                 .collect(),
+            waiting_pane_count: painted_frame.session_snapshot.waiting_pane_count,
             peers: painted_frame
                 .session_snapshot
                 .peers
@@ -851,6 +854,7 @@ fn build_tab_metadata(frame_tab_metadata: &FrameTabMetadata) -> TabMetadata {
         tab_name: sanitize_reported_text(&frame_tab_metadata.tab_name),
         tab_index: frame_tab_metadata.tab_index,
         is_active: frame_tab_metadata.is_active,
+        has_waiting_pane: frame_tab_metadata.has_waiting_pane,
     }
 }
 
@@ -887,6 +891,7 @@ fn build_pane_snapshot(
                 row_spans: frame_selection_spans.row_spans.clone(),
             }),
         has_selection: frame_pane.has_selection,
+        is_waiting: frame_pane.is_waiting,
         scrollback_metadata: ScrollbackMetadata {
             retained_line_count: pane_view.retained_line_count,
         },

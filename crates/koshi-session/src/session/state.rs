@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::SystemTime;
 
 use koshi_core::{
+    attention::Attention,
     constant::{
         FLOATING_TITLEBAR_STRIP_ROW_COUNT, MAX_FLOATING_PANES_PER_SESSION,
         MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
@@ -29,7 +30,7 @@ use koshi_layout::{
     },
     tree::LayoutNode,
 };
-use koshi_pane::registry::PaneRegistry;
+use koshi_pane::{pane::state::PaneRecord, registry::PaneRegistry};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -367,6 +368,17 @@ impl FloatingPane {
     }
 }
 
+/// Whether a pane of `layout_tree` waits for a person
+/// ([`PaneRecord::attention`] is `Some`) in `panes`. A pane `panes` does not
+/// hold waits for nobody.
+fn has_waiting_pane(panes: &PaneRegistry, layout_tree: &LayoutNode) -> bool {
+    layout_tree.has_pane_matching(&|pane_id| {
+        panes
+            .get_pane_record_by_id(pane_id)
+            .is_some_and(|pane_record| pane_record.attention.is_some())
+    })
+}
+
 /// The size a floating pane's tree is solved over: `solved_size` less the
 /// [`FLOATING_TITLEBAR_STRIP_ROW_COUNT`] rows of its titlebar strip. `40x12`
 /// → `40x11`; `4x0` → `4x0`.
@@ -654,6 +666,12 @@ pub struct SessionViewChanges {
     pub is_floating_set_changed: bool,
     /// The pane sizing changed ([`Session::update_pane_sizing`]).
     pub is_pane_sizing_changed: bool,
+    /// A pane started or stopped waiting for a person
+    /// ([`Session::set_pane_attention`]), the record of a waiting pane was
+    /// removed ([`Session::remove_pane_record`]), or a tab started or stopped
+    /// holding a waiting pane ([`Session::update_tab_layout`]). A frame of
+    /// every client of the session shows the change.
+    pub is_attention_changed: bool,
 }
 
 impl SessionViewChanges {
@@ -675,6 +693,7 @@ impl SessionViewChanges {
             is_tab_bar_changed,
             is_floating_set_changed,
             is_pane_sizing_changed,
+            is_attention_changed,
         } = next_view_changes;
         self.layout_changed_tab_ids.extend(layout_changed_tab_ids);
         self.changed_client_ids.extend(changed_client_ids);
@@ -683,6 +702,7 @@ impl SessionViewChanges {
         self.is_tab_bar_changed |= is_tab_bar_changed;
         self.is_floating_set_changed |= is_floating_set_changed;
         self.is_pane_sizing_changed |= is_pane_sizing_changed;
+        self.is_attention_changed |= is_attention_changed;
     }
 }
 
@@ -744,8 +764,9 @@ pub struct Session {
 
     lifecycle: SessionLifecycle,
 
-    /// The changes to tabs, the tab bar, the floating set and the pane sizing
-    /// since the last [`Session::take_view_changes`]. The
+    /// The changes to tabs, the tab bar, the floating set, the pane sizing and
+    /// the panes that wait for a person since the last
+    /// [`Session::take_view_changes`]. The
     /// clients' changes live on [`Session::clients`]. The resume file does not
     /// carry it.
     #[serde(skip)]
@@ -902,6 +923,36 @@ impl Session {
         let mut view_changes = std::mem::take(&mut self.view_changes);
         view_changes.changed_client_ids = self.clients.take_changed_client_ids();
         view_changes
+    }
+
+    /// Set what the pane `pane_id` waits for to `attention`, and return what
+    /// it waited for before. A pane that starts or stops waiting records an
+    /// attention change ([`SessionViewChanges::is_attention_changed`]); a new
+    /// reason on a pane that keeps waiting records none. A pane the session
+    /// does not hold changes nothing and returns `None`.
+    ///
+    /// Example: a bell on pane 3, which waited for nobody, records an attention
+    /// change; a notification on pane 3 after it records none.
+    pub fn set_pane_attention(
+        &mut self,
+        pane_id: PaneId,
+        attention: Option<Attention>,
+    ) -> Option<Attention> {
+        let pane_record = self.panes.get_pane_record_mut_by_id(pane_id)?;
+        let previous_attention = std::mem::replace(&mut pane_record.attention, attention);
+        self.view_changes.is_attention_changed |=
+            previous_attention.is_some() != pane_record.attention.is_some();
+        previous_attention
+    }
+
+    /// Remove the record of the pane `pane_id` from the pane registry and
+    /// return it. Removing the record of a pane that waits for a person records
+    /// an attention change ([`SessionViewChanges::is_attention_changed`]).
+    /// `None`, changing nothing, when the registry holds no `pane_id`.
+    pub fn remove_pane_record(&mut self, pane_id: PaneId) -> Option<PaneRecord> {
+        let pane_record = self.panes.remove_pane_record(pane_id)?;
+        self.view_changes.is_attention_changed |= pane_record.attention.is_some();
+        Some(pane_record)
     }
 
     /// Whether this attach must start in
@@ -1219,6 +1270,10 @@ impl Session {
     ///    ([`Session::can_client_draw_floating_panes`]) minimizes the
     ///    floating panes it shows.
     ///
+    /// A tab that starts or stops holding a pane that waits for a person
+    /// records an attention change ([`SessionViewChanges::is_attention_changed`]):
+    /// a waiting pane that moves from tab 1 to tab 2 records one at each tab.
+    ///
     /// Returns the events of steps 1 and 2. A tab id the session does not hold
     /// changes nothing and returns none.
     #[must_use]
@@ -1228,6 +1283,9 @@ impl Session {
             return Vec::new();
         };
         let is_layout_tree_changed = tab.layout_area.layout != layout_tree;
+        let has_waiting_pane_before = has_waiting_pane(&self.panes, &tab.layout_area.layout);
+        self.view_changes.is_attention_changed |=
+            has_waiting_pane_before != has_waiting_pane(&self.panes, &layout_tree);
         tab.layout_area.layout = layout_tree;
         let previous_layout_solve = tab.layout_area.update_layout_solve(pane_sizing);
         if is_layout_tree_changed || previous_layout_solve != tab.layout_area.layout_solve {

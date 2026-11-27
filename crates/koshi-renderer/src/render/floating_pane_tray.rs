@@ -15,8 +15,8 @@ use crate::theme::Theme;
 
 use super::floating::draw_floating_frame;
 use super::style::{
-    compute_focused_border_style, compute_hover_border_style, compute_placement_hover_border_style,
-    compute_unfocused_border_style,
+    compute_attention_border_style, compute_focused_border_style, compute_hover_border_style,
+    compute_placement_hover_border_style, compute_unfocused_border_style,
 };
 use super::{
     draw_pane_border, get_text_width, place_screen_rect, set_line_clipped, write_text_clipped,
@@ -53,8 +53,10 @@ const NEW_FLOATING_PANE_TILE_TEXT: &str = "+ new";
 ///
 /// A tile is lit while the viewer did not minimize its pane, and gray while
 /// the viewer minimized it ([`FloatingPane::is_minimized`]). The `+ new` tile
-/// is lit. A lit tile's text takes the placement hover style, and a gray
-/// tile's text and an empty slot's ring the unfocused border style. The
+/// is lit. The text of a tile whose floating pane holds a pane that waits for
+/// a person ([`is_floating_pane_waiting`]) takes the attention style, lit or
+/// gray. Every other lit tile's text takes the placement hover style, and a
+/// gray tile's text and an empty slot's ring the unfocused border style. The
 /// selected tile's ring takes the hover border style, and every other tile's
 /// ring its text style.
 ///
@@ -120,7 +122,11 @@ pub(super) fn draw_floating_pane_tray(
             continue;
         }
         let floating_pane = session_snapshot.floating_panes.get(slot_index);
-        let tile_text_style = if floating_pane.is_some_and(FloatingPane::is_minimized) {
+        let tile_text_style = if floating_pane
+            .is_some_and(|floating_pane| is_floating_pane_waiting(render_snapshot, floating_pane))
+        {
+            compute_attention_border_style(theme)
+        } else if floating_pane.is_some_and(FloatingPane::is_minimized) {
             compute_unfocused_border_style(theme)
         } else {
             compute_placement_hover_border_style(theme)
@@ -237,6 +243,37 @@ fn write_counted_tile_label(
         pane_count_text,
         text_style,
     );
+}
+
+/// Whether a pane of `floating_pane` waits for a person: the `is_waiting` that
+/// [`FloatingPane::Minimized`] carries while the viewer minimized it, and
+/// while the viewer shows it, whether the [`PaneSnapshot`](crate::snapshot::PaneSnapshot)
+/// of a pane of its slot in `render_snapshot` waits.
+fn is_floating_pane_waiting(
+    render_snapshot: &RenderSnapshot,
+    floating_pane: &FloatingPane,
+) -> bool {
+    match floating_pane {
+        FloatingPane::Minimized { is_waiting, .. } => *is_waiting,
+        FloatingPane::Shown {
+            floating_pane_id, ..
+        } => render_snapshot
+            .session_snapshot
+            .floating_pane_slots
+            .iter()
+            .find(|floating_pane_slot| floating_pane_slot.floating_pane_id == *floating_pane_id)
+            .is_some_and(|floating_pane_slot| {
+                floating_pane_slot
+                    .layout_area
+                    .pane_slots
+                    .iter()
+                    .any(|pane_slot| {
+                        render_snapshot
+                            .find_pane_snapshot(pane_slot.pane_id)
+                            .is_some_and(|pane_snapshot| pane_snapshot.is_waiting)
+                    })
+            }),
+    }
 }
 
 /// The title of `floating_pane` in `render_snapshot`: the title of the pane's

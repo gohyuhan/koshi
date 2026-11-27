@@ -1,6 +1,7 @@
 //! Tests for the discovery answers: row building across sessions, `inspect`
 //! lookups, and the endpoint sweep that removes what a session left behind.
 
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::client::ClientOrigin;
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -145,6 +146,7 @@ fn build_session_overview(
                 command_argv: None,
                 lifecycle: PaneLifecycle::Running,
                 focused_by_client_ids: Vec::new(),
+                attention: None,
             });
         }
     }
@@ -262,6 +264,7 @@ fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
         },
         session_id,
         session_name: "amber-fox".to_string(),
+        attention: None,
     }];
     for (pane_title, floating_pane_id) in floating_pane_placements {
         let pane_id = PaneId::new();
@@ -274,6 +277,7 @@ fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
             command_argv: None,
             lifecycle: PaneLifecycle::Running,
             focused_by_client_ids: Vec::new(),
+            attention: None,
         });
         expected_pane_rows.push(PaneRow {
             pane_id,
@@ -281,6 +285,7 @@ fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
             layout_area: PaneRowLayoutArea::FloatingPane { floating_pane_id },
             session_id,
             session_name: "amber-fox".to_string(),
+            attention: None,
         });
     }
 
@@ -309,6 +314,7 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
                 },
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
+                attention: None,
             },
             PaneRow {
                 pane_id: session_overviews[0].panes[1].pane_id,
@@ -319,6 +325,7 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
                 },
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
+                attention: None,
             },
             PaneRow {
                 pane_id: session_overviews[1].panes[0].pane_id,
@@ -329,6 +336,7 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
                 },
                 session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
+                attention: None,
             },
         ]
     );
@@ -449,6 +457,7 @@ fn a_pane_whose_child_set_no_title_yields_a_row_with_no_name() {
             },
             session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
+            attention: None,
         }]
     );
 }
@@ -1978,4 +1987,22 @@ fn a_session_that_refuses_its_overview_while_it_replaces_its_image_is_asked_thro
 
     session_thread.join().expect("the stand-in session exits");
     assert_eq!(fetched_session_overview, session_overview);
+}
+
+#[test]
+fn a_pane_row_carries_the_attention_of_its_pane() {
+    let mut session_overview = build_session_overview("quiet-lake", &[("editor", 2)]);
+    let pane_attention = PaneAttentionDiscovery {
+        reason_kind: AttentionReasonKind::Bell,
+        raised_at: SystemTime::UNIX_EPOCH,
+    };
+    session_overview.panes[1].attention = Some(pane_attention);
+
+    assert_eq!(
+        build_pane_rows(std::slice::from_ref(&session_overview))
+            .into_iter()
+            .map(|pane_row| pane_row.attention)
+            .collect::<Vec<_>>(),
+        [None, Some(pane_attention)]
+    );
 }

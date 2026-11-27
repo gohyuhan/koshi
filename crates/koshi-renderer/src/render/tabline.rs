@@ -603,10 +603,18 @@ fn build_session_line(session_name: &str, theme: &Theme, session_block_room: u16
     }
 }
 
+/// The mark that takes the leading space of the name block of a tab that
+/// holds a pane waiting for a person: `● build` in place of ` build `.
+const WAITING_TAB_MARK_TEXT: &str = "●";
+
 /// One tab's two text blocks at metadata index `tab_metadata_index`: ` #N `,
 /// where `N` is the tab's own `tab_index` field plus one, and its name with a
-/// space each side. A tab with `tab_index: 0` and `tab_name: "shell"` gives
-/// `(" #1 ", " shell ")`.
+/// space each side. A tab that holds a waiting pane
+/// ([`TabMetadata::has_waiting_pane`]) writes [`WAITING_TAB_MARK_TEXT`] and a
+/// space before its name and no space after it, so the block keeps its width.
+/// A tab with `tab_index: 0` and `tab_name: "shell"` gives
+/// `(" #1 ", " shell ")`, and `(" #1 ", "● shell")` while it holds a waiting
+/// pane.
 ///
 /// # Panics
 ///
@@ -616,14 +624,19 @@ fn get_tab_text_blocks(
     tab_metadata_index: usize,
 ) -> (String, String) {
     let tab_metadata = &tabs_metadata[tab_metadata_index];
-    (
-        format!(" #{} ", tab_metadata.tab_index + 1),
-        format!(" {} ", tab_metadata.tab_name),
-    )
+    let tab_name_text = if tab_metadata.has_waiting_pane {
+        format!("{WAITING_TAB_MARK_TEXT} {}", tab_metadata.tab_name)
+    } else {
+        format!(" {} ", tab_metadata.tab_name)
+    };
+    (format!(" #{} ", tab_metadata.tab_index + 1), tab_name_text)
 }
 
 /// One tab's two-block ribbon (`#N` block + name block) at metadata index
 /// `tab_metadata_index`, colored on its own stop of the theme's chrome ramp.
+/// The [`WAITING_TAB_MARK_TEXT`] of a tab that holds a waiting pane takes the
+/// attention style ([`compute_attention_border_style`]: the theme's attention
+/// color, in bold) over the name block's background.
 ///
 /// # Panics
 ///
@@ -636,14 +649,23 @@ fn build_tab_line(
     let tab_count = tabs_metadata.len();
     let is_active = tabs_metadata[tab_metadata_index].is_active;
     let (tab_index_text, tab_name_text) = get_tab_text_blocks(tabs_metadata, tab_metadata_index);
-    Line::from(vec![
-        Span::styled(
-            tab_index_text,
-            compute_tab_index_style(theme, is_active, tab_metadata_index, tab_count),
-        ),
-        Span::styled(
-            tab_name_text,
-            compute_tab_name_style(theme, is_active, tab_metadata_index, tab_count),
-        ),
-    ])
+    let tab_name_style = compute_tab_name_style(theme, is_active, tab_metadata_index, tab_count);
+    let mut tab_spans = vec![Span::styled(
+        tab_index_text,
+        compute_tab_index_style(theme, is_active, tab_metadata_index, tab_count),
+    )];
+    match tab_name_text.strip_prefix(WAITING_TAB_MARK_TEXT) {
+        Some(tab_name_after_mark_text) => {
+            tab_spans.push(Span::styled(
+                WAITING_TAB_MARK_TEXT,
+                tab_name_style.patch(compute_attention_border_style(theme)),
+            ));
+            tab_spans.push(Span::styled(
+                tab_name_after_mark_text.to_owned(),
+                tab_name_style,
+            ));
+        }
+        None => tab_spans.push(Span::styled(tab_name_text, tab_name_style)),
+    }
+    Line::from(tab_spans)
 }

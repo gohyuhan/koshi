@@ -63,6 +63,7 @@ pub(crate) fn build_tray_test_render_snapshot(
                 tab_name: "t".to_string(),
                 tab_index: 0,
                 is_active: true,
+                has_waiting_pane: false,
             }],
             floating_pane_slots: Vec::new(),
             floating_panes: floating_pane_titles
@@ -74,10 +75,12 @@ pub(crate) fn build_tray_test_render_snapshot(
                         pane_id,
                         pane_title: Some(floating_pane_title.to_string()),
                         pane_count: NonZeroUsize::MIN,
+                        is_waiting: false,
                     }
                 })
                 .collect(),
             peers: Vec::new(),
+            waiting_pane_count: 0,
         },
         pane_snapshots: vec![PaneSnapshot::from_empty_pane(tiled_pane_id)],
         client_snapshot: ClientSnapshot {

@@ -27,8 +27,8 @@ pub fn solve_core_regions(viewport_size: Size) -> SolvedRegions {
     solve_region_rects(viewport_size, &CORE_REGION_GEOMETRIES)
 }
 
-/// The statusline facts needed to paint it: keybinding hints and the open key
-/// sequence.
+/// The statusline facts needed to paint it: keybinding hints, the open key
+/// sequence and the count of panes that wait for a person.
 ///
 /// This value excludes colors. [`crate::statusline_hints::draw_statusline`]
 /// takes the theme as its own argument.
@@ -40,6 +40,9 @@ pub(crate) struct StatuslineInputs<'a> {
     /// The chords already pressed of an open key sequence. `None` when no
     /// sequence is open.
     pub(crate) pending_key_sequence: Option<&'a KeySequence>,
+    /// How many panes of the session wait for a person, the panes of its
+    /// floating panes included.
+    pub(crate) waiting_pane_count: usize,
 }
 
 /// The tabline facts needed to solve its geometry and paint it.
