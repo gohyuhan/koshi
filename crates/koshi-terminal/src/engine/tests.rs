@@ -3764,10 +3764,10 @@ fn build_timed_program_facts(
 
 /// The fact of `ESC ] 7501 ; state=<state> ST`: a report for the root record
 /// that names `state` and no other key.
-fn build_root_program_status_report(state: ProgramStatusState) -> ProgramFact {
+fn build_root_program_status_report(program_status_state: ProgramStatusState) -> ProgramFact {
     ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
         record_id: String::new(),
-        state,
+        program_status_state,
         blocked_kind: None,
         progress_percent: None,
         app_name: None,
@@ -3805,7 +3805,7 @@ fn build_program_fact_sequence_cases() -> Vec<(Vec<u8>, Vec<ProgramFact>)> {
     ];
     let terraform_report = ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
         record_id: String::new(),
-        state: ProgramStatusState::Blocked,
+        program_status_state: ProgramStatusState::Blocked,
         blocked_kind: Some(BlockedKind::Permission),
         progress_percent: None,
         app_name: Some("terraform".to_string()),
@@ -4224,14 +4224,22 @@ fn a_program_status_report_reads_every_byte_past_the_sixteenth_semicolon() {
 }
 
 #[test]
-fn a_program_status_sequence_ended_by_can_sub_or_another_escape_counts_two_terminator_bytes() {
-    for ending_bytes in [&b"\x18"[..], b"\x1a", b"\x1b[0m"] {
+fn a_program_status_sequence_ended_by_can_sub_or_another_escape_gives_nothing() {
+    for ending_bytes in [
+        &b"\x18"[..],
+        b"\x1a",
+        b"\x1b[0m",
+        b"\x1b\x1b\\",
+        b"\x1b\x01\\",
+        b"\x1b_x\x1b\\",
+        b"\x1b]0;t\x07",
+    ] {
         let mut report_bytes = b"\x1b]7501;state=idle".to_vec();
         report_bytes.extend_from_slice(ending_bytes);
         let mut engine = build_test_terminal_engine();
         assert_eq!(
             take_chunk_program_facts(&mut engine, &report_bytes),
-            vec![build_root_program_status_report(ProgramStatusState::Idle)],
+            Vec::new(),
             "{ending_bytes:?}"
         );
 
@@ -4240,18 +4248,170 @@ fn a_program_status_sequence_ended_by_can_sub_or_another_escape_counts_two_termi
         let mut engine = build_test_terminal_engine();
         assert_eq!(
             engine.process_pty_output(&query_bytes),
-            b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\x1b\\",
+            Vec::<u8>::new(),
             "{ending_bytes:?}"
         );
     }
+}
 
-    let mut sequence_bytes = b"\x1b]7501;state=idle:".to_vec();
-    sequence_bytes.resize(b"\x1b]7501;".len() + 4088, b'x');
-    sequence_bytes.push(0x18);
+#[test]
+fn a_bel_between_the_escape_and_backslash_of_a_program_status_report_rings_and_drops_the_report() {
     let mut engine = build_test_terminal_engine();
+
     assert_eq!(
-        take_chunk_program_facts(&mut engine, &sequence_bytes),
+        take_chunk_program_facts(&mut engine, b"\x1b]7501;state=idle\x1b\x07\\"),
+        vec![ProgramFact::Bell]
+    );
+}
+
+#[test]
+fn a_program_status_report_reads_its_control_bytes_as_the_program_wrote_them() {
+    let mut engine = build_test_terminal_engine();
+
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]7501;state=clear:id=a\tb\x07"),
         Vec::new()
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]7501;state=idle:msg=QXBw\nbHk/\x07"),
+        vec![build_root_program_status_report(ProgramStatusState::Idle)]
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]7501;state=working\x01\x07"),
+        Vec::new()
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]7501;\tstate=idle\r\n:app=cargo\x0c\x07"),
+        vec![ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
+            record_id: String::new(),
+            program_status_state: ProgramStatusState::Idle,
+            blocked_kind: None,
+            progress_percent: None,
+            app_name: Some("cargo".to_string()),
+            title: None,
+            message: None,
+        })]
+    );
+}
+
+#[test]
+fn a_control_byte_in_a_program_status_report_counts_toward_the_sequence_limit() {
+    let idle_report = vec![build_root_program_status_report(ProgramStatusState::Idle)];
+
+    for (report_byte_count, expected_program_facts) in [(4088, idle_report), (4089, Vec::new())] {
+        let mut sequence_bytes = b"\x1b]7501;state=idle:".to_vec();
+        sequence_bytes.resize(b"\x1b]7501;".len() + report_byte_count - 1, b'x');
+        sequence_bytes.push(0x01);
+        sequence_bytes.push(0x07);
+        assert_eq!(sequence_bytes.len(), 7 + report_byte_count + 1);
+        let mut engine = build_test_terminal_engine();
+        assert_eq!(
+            take_chunk_program_facts(&mut engine, &sequence_bytes),
+            expected_program_facts,
+            "{report_byte_count} report bytes"
+        );
+    }
+}
+
+#[test]
+fn an_eight_bit_program_status_report_counts_as_its_seven_bit_form() {
+    let idle_report = vec![build_root_program_status_report(ProgramStatusState::Idle)];
+
+    for (report_byte_count, expected_program_facts) in [(4087, idle_report), (4088, Vec::new())] {
+        let mut sequence_bytes = b"\x9d7501;state=idle:".to_vec();
+        sequence_bytes.resize(b"\x9d7501;".len() + report_byte_count, b'x');
+        sequence_bytes.push(0x9c);
+        assert_eq!(sequence_bytes.len(), 6 + report_byte_count + 1);
+        let mut engine = build_test_terminal_engine();
+        assert_eq!(
+            take_chunk_program_facts(&mut engine, &sequence_bytes),
+            expected_program_facts,
+            "{report_byte_count} report bytes"
+        );
+    }
+}
+
+#[test]
+fn a_byte_inside_the_program_status_introducer_gives_nothing() {
+    for sequence_bytes in [
+        &b"\x1b\x01]7501;state=idle\x07"[..],
+        b"\x1b\x7f]7501;state=idle\x07",
+        b"\x1b]75\x0101;state=idle\x07",
+        b"\x1b]7501\n;state=idle\x07",
+        b"\x1b]7501\x01;?\x07",
+    ] {
+        let mut engine = build_test_terminal_engine();
+        assert_eq!(
+            engine.process_pty_output_at(sequence_bytes, Instant::now()),
+            Some(TerminalAdvance {
+                device_query_replies: Vec::new(),
+                program_facts: Vec::new(),
+            }),
+            "{sequence_bytes:?}"
+        );
+    }
+}
+
+/// The order a restored pane runs in: the engine is built from the carried
+/// bytes, then reads copies, then reads the next chunk.
+#[test]
+fn a_program_status_report_cut_before_its_backslash_is_carried_whole() {
+    for should_read_clipboard_copies in [false, true] {
+        let mut engine = build_test_terminal_engine();
+        assert_eq!(
+            take_chunk_program_facts(&mut engine, b"\x1b]7501;state=working\x1b"),
+            Vec::new()
+        );
+        assert_eq!(
+            engine.get_undecoded_terminal_bytes(),
+            b"\x1b]7501;state=working\x1b"
+        );
+        let terminal_undecoded_bytes = engine.get_undecoded_terminal_bytes().to_vec();
+        let mut restored_engine = TerminalEngine::from_terminal_state(
+            engine.into_terminal_state(),
+            &terminal_undecoded_bytes,
+        );
+        if should_read_clipboard_copies {
+            restored_engine.start_reading_clipboard_copies(1024);
+        }
+
+        assert_eq!(
+            take_chunk_program_facts(&mut restored_engine, b"\\"),
+            vec![build_root_program_status_report(
+                ProgramStatusState::Working
+            )],
+            "reads copies: {should_read_clipboard_copies}"
+        );
+    }
+}
+
+#[test]
+fn program_status_facts_keep_their_place_around_an_image_in_one_read() {
+    let mut engine = build_graphics_terminal_engine();
+    let mut terminal_bytes = b"\x07\x1b]7501;state=working\x07".to_vec();
+    terminal_bytes.extend(build_visible_graphics_control(GraphicsProtocol::Kitty));
+    terminal_bytes.extend_from_slice(b"\x1b]7501;state=idle\x1b\\\x1b]133;A\x07");
+
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, &terminal_bytes),
+        vec![
+            ProgramFact::Bell,
+            build_root_program_status_report(ProgramStatusState::Working),
+            build_root_program_status_report(ProgramStatusState::Idle),
+            ProgramFact::ProgramStatus(ProgramStatusFact::PromptStarted),
+        ]
+    );
+    let graphics_events = engine.take_graphics_events();
+    assert_eq!(graphics_events.len(), 1);
+    let Ok(image_record) = &graphics_events[0] else {
+        panic!("the image must be read, got {graphics_events:?}");
+    };
+    assert_eq!(
+        (
+            image_record.image.pixel_width,
+            image_record.image.pixel_height
+        ),
+        (1, 1)
     );
 }
 

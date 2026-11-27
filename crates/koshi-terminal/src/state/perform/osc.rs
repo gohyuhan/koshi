@@ -21,15 +21,12 @@ pub(crate) enum OscTextCommand {
     Osc777Notification,
     /// `OSC 99`: the metadata and the payload of one notification part.
     Osc99Notification,
-    /// `OSC 7501`: a program status report, or the query `?`.
-    ProgramStatus,
 }
 
 impl OscTextCommand {
     /// The command that `command_number_bytes`, the bytes of an OSC before
     /// its first `;`, names, or `None` for every other command number:
-    /// `2` → `Title`, `99` → `Osc99Notification`, `7501` → `ProgramStatus`,
-    /// `52` and `02` → `None`.
+    /// `2` → `Title`, `99` → `Osc99Notification`, `52` and `02` → `None`.
     pub(crate) fn from_command_number(command_number_bytes: &[u8]) -> Option<Self> {
         match command_number_bytes {
             b"0" | b"1" | b"2" => Some(Self::Title),
@@ -37,7 +34,6 @@ impl OscTextCommand {
             b"9" => Some(Self::Osc9Notification),
             b"777" => Some(Self::Osc777Notification),
             b"99" => Some(Self::Osc99Notification),
-            b"7501" => Some(Self::ProgramStatus),
             _ => None,
         }
     }

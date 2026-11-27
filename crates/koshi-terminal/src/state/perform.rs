@@ -28,11 +28,11 @@
 //! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
 //!   carrying a text payload): the OSC 133 shell markers, read from the
 //!   parser's parameters, and the OSC 0/1/2 window title, OSC 7
-//!   working-directory report, OSC 9, OSC 777 and OSC 99 desktop
-//!   notifications, and OSC 7501 program status reports and query, read from
-//!   the whole text the engine's OSC reader queued. The notifications, the
-//!   program status reports and the OSC 133 `A`, `C` and `D` markers add
-//!   program facts, and the OSC 7501 query queues its reply.
+//!   working-directory report, and OSC 9, OSC 777 and OSC 99 desktop
+//!   notifications, read from the whole text the engine's OSC reader queued.
+//!   The notifications and the OSC 133 `A`, `C` and `D` markers add program
+//!   facts. OSC 7501 is ignored here: the engine applies each program status
+//!   sequence that its OSC reader finishes.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
 //!   ends a text run like any non-printing event); the payload and `put`
@@ -45,7 +45,7 @@
 //! / the scroll region ([`motion`]), alternate-screen entry/exit
 //! ([`alt_screen`]), hard/soft reset ([`reset`]), SGR ([`sgr`]), OSC parsing
 //! ([`osc`]), desktop notification parsing ([`notification`]), program
-//! status report parsing ([`program_status`]), and CSI
+//! status reports and the query reply ([`program_status`]), and CSI
 //! parameter accessors ([`params`]) — while the
 //! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
@@ -66,9 +66,6 @@ use self::osc::{parse_osc133, parse_osc7_working_directory, Osc133, OscTextComma
 use self::params::{
     get_cursor_coordinate, get_cursor_move_count, get_first_parameter_number,
     get_parameter_number_at,
-};
-use self::program_status::{
-    parse_program_status_report, PROGRAM_STATUS_QUERY_BYTES, PROGRAM_STATUS_QUERY_REPLY_BYTES,
 };
 use self::sgr::apply_sgr;
 
@@ -912,15 +909,14 @@ impl vte::Perform for TerminalState {
         }
     }
 
-    /// Handle an Operating System Command (OSC) sequence, which ended with BEL
-    /// when `is_bell_terminated`. A shell marker (OSC 133) is read from
-    /// `osc_parameters`; `OSC 133 ; A` adds a
+    /// Handle an Operating System Command (OSC) sequence. A shell marker
+    /// (OSC 133) is read from `osc_parameters`; `OSC 133 ; A` adds a
     /// [`ProgramStatusFact::PromptStarted`]. The window/icon title (OSC
-    /// 0/1/2), the working-directory report (OSC 7), the desktop
-    /// notifications (OSC 9, OSC 777, OSC 99) and the program status reports
-    /// and query (OSC 7501) take the oldest queued OSC text
-    /// (`apply_next_osc_text`). Any other OSC command is ignored.
-    fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], is_bell_terminated: bool) {
+    /// 0/1/2), the working-directory report (OSC 7) and the desktop
+    /// notifications (OSC 9, OSC 777, OSC 99) take the oldest queued OSC text
+    /// (`apply_next_osc_text`). Any other OSC command, `OSC 7501` among
+    /// them, is ignored.
+    fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], _is_bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
         if let Some(marker) = parse_osc133(osc_parameters) {
@@ -956,7 +952,7 @@ impl vte::Perform for TerminalState {
             OscTextCommand::from_command_number(command_number_bytes).is_some()
         });
         if is_osc_text_command {
-            self.apply_next_osc_text(is_bell_terminated);
+            self.apply_next_osc_text();
         }
     }
 
@@ -984,9 +980,8 @@ impl vte::Perform for TerminalState {
 }
 
 impl TerminalState {
-    /// Take the oldest queued [`OscText`](self::osc::OscText) and apply it. The OSC that the
-    /// text comes from ended with BEL when `is_bell_terminated`. An empty queue and a text with
-    /// `argument_bytes: None` change nothing.
+    /// Take the oldest queued [`OscText`](self::osc::OscText) and apply it. An empty queue and a
+    /// text with `argument_bytes: None` change nothing.
     ///
     /// - `Title`: the text, decoded lossily (a non-UTF-8 byte becomes U+FFFD)
     ///   and passed through `sanitize_reported_text`, becomes the title.
@@ -995,14 +990,9 @@ impl TerminalState {
     ///   directory. A text that does not parse leaves the last one in place.
     /// - `Osc9Notification`, `Osc777Notification` and `Osc99Notification`:
     ///   the notification fact the text completes, if any, is added.
-    /// - `ProgramStatus`: the text `?` queues the query reply on the device
-    ///   reply queue, ended with BEL when `is_bell_terminated` and with
-    ///   `ESC \` otherwise. Any other text that
-    ///   [`parse_program_status_report`] accepts adds its
-    ///   [`ProgramFact::ProgramStatus`] fact, and writes no reply.
     ///
     /// `Title` with `a;b;c` sets the title `a;b;c`.
-    fn apply_next_osc_text(&mut self, is_bell_terminated: bool) {
+    fn apply_next_osc_text(&mut self) {
         let Some(osc_text) = self.osc_texts.pop_front() else {
             return;
         };
@@ -1036,22 +1026,6 @@ impl TerminalState {
             OscTextCommand::Osc777Notification => parse_osc777_notification(&argument_bytes),
             OscTextCommand::Osc99Notification => {
                 apply_osc99_sequence(&mut self.open_osc99_notification, &argument_bytes)
-            }
-            OscTextCommand::ProgramStatus if argument_bytes == PROGRAM_STATUS_QUERY_BYTES => {
-                let query_terminator_bytes: &[u8] = if is_bell_terminated {
-                    b"\x07"
-                } else {
-                    b"\x1b\\"
-                };
-                self.device_query_replies
-                    .extend_from_slice(PROGRAM_STATUS_QUERY_REPLY_BYTES);
-                self.device_query_replies
-                    .extend_from_slice(query_terminator_bytes);
-                None
-            }
-            OscTextCommand::ProgramStatus => {
-                parse_program_status_report(&argument_bytes, is_bell_terminated)
-                    .map(ProgramFact::ProgramStatus)
             }
         };
         if let Some(program_fact) = program_fact {

@@ -425,7 +425,7 @@ fn program_status_facts_raise_nothing_and_give_no_event() {
             vec![
                 ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
                     record_id: String::new(),
-                    state: ProgramStatusState::Blocked,
+                    program_status_state: ProgramStatusState::Blocked,
                     blocked_kind: Some(BlockedKind::Permission),
                     progress_percent: None,
                     app_name: Some("terraform".to_string()),

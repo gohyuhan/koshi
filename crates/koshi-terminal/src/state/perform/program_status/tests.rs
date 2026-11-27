@@ -12,10 +12,10 @@ fn parse_string_terminated_report(report_text: &str) -> Option<ProgramStatusFact
 }
 
 /// A `Reported` fact for the root record with `state` and no other key.
-fn build_root_report(state: ProgramStatusState) -> ProgramStatusFact {
+fn build_root_report(program_status_state: ProgramStatusState) -> ProgramStatusFact {
     ProgramStatusFact::Reported {
         record_id: String::new(),
-        state,
+        program_status_state,
         blocked_kind: None,
         progress_percent: None,
         app_name: None,
@@ -25,10 +25,13 @@ fn build_root_report(state: ProgramStatusState) -> ProgramStatusFact {
 }
 
 /// A `Reported` fact for the root record with `state` and `message`.
-fn build_root_report_with_message(state: ProgramStatusState, message: &str) -> ProgramStatusFact {
+fn build_root_report_with_message(
+    program_status_state: ProgramStatusState,
+    message: &str,
+) -> ProgramStatusFact {
     ProgramStatusFact::Reported {
         record_id: String::new(),
-        state,
+        program_status_state,
         blocked_kind: None,
         progress_percent: None,
         app_name: None,
@@ -43,7 +46,7 @@ fn the_protocol_example_gives_blocked_permission_terraform_apply() {
         parse_string_terminated_report("state=blocked:kind=permission:app=terraform:msg=QXBwbHk/"),
         Some(ProgramStatusFact::Reported {
             record_id: String::new(),
-            state: ProgramStatusState::Blocked,
+            program_status_state: ProgramStatusState::Blocked,
             blocked_kind: Some(BlockedKind::Permission),
             progress_percent: None,
             app_name: Some("terraform".to_string()),
@@ -62,7 +65,7 @@ fn a_report_gives_every_key_it_names() {
         ),
         Some(ProgramStatusFact::Reported {
             record_id: "tf/plan".to_string(),
-            state: ProgramStatusState::Blocked,
+            program_status_state: ProgramStatusState::Blocked,
             blocked_kind: Some(BlockedKind::Question),
             progress_percent: Some(42),
             app_name: Some("terraform".to_string()),
@@ -74,7 +77,7 @@ fn a_report_gives_every_key_it_names() {
 
 #[test]
 fn each_state_name_gives_its_state() {
-    for (state_text, expected_state) in [
+    for (program_status_state_text, expected_program_status_state) in [
         ("idle", ProgramStatusState::Idle),
         ("working", ProgramStatusState::Working),
         ("done", ProgramStatusState::Done),
@@ -82,9 +85,9 @@ fn each_state_name_gives_its_state() {
         ("error", ProgramStatusState::Error),
     ] {
         assert_eq!(
-            parse_string_terminated_report(&format!("state={state_text}")),
-            Some(build_root_report(expected_state)),
-            "{state_text}"
+            parse_string_terminated_report(&format!("state={program_status_state_text}")),
+            Some(build_root_report(expected_program_status_state)),
+            "{program_status_state_text}"
         );
     }
 }
@@ -101,7 +104,7 @@ fn a_bad_pair_is_skipped_and_the_rest_of_the_report_applies() {
         ),
         Some(ProgramStatusFact::Reported {
             record_id: String::new(),
-            state: ProgramStatusState::Working,
+            program_status_state: ProgramStatusState::Working,
             blocked_kind: None,
             progress_percent: None,
             app_name: Some("ok".to_string()),
@@ -121,7 +124,7 @@ fn spaces_and_tabs_around_keys_and_values_are_removed() {
         parse_string_terminated_report(" state = working :\tapp=cargo\t: id = deploy "),
         Some(ProgramStatusFact::Reported {
             record_id: "deploy".to_string(),
-            state: ProgramStatusState::Working,
+            program_status_state: ProgramStatusState::Working,
             blocked_kind: None,
             progress_percent: None,
             app_name: Some("cargo".to_string()),
@@ -137,7 +140,7 @@ fn the_last_value_of_a_repeated_key_wins() {
         parse_string_terminated_report("state=idle:app=a:state=done:app=b"),
         Some(ProgramStatusFact::Reported {
             record_id: String::new(),
-            state: ProgramStatusState::Done,
+            program_status_state: ProgramStatusState::Done,
             blocked_kind: None,
             progress_percent: None,
             app_name: Some("b".to_string()),
@@ -222,7 +225,7 @@ fn an_app_over_32_bytes_discards_the_report_even_when_another_app_follows_it() {
         parse_string_terminated_report(&format!("state=idle:app={app_name_at_limit}")),
         Some(ProgramStatusFact::Reported {
             record_id: String::new(),
-            state: ProgramStatusState::Idle,
+            program_status_state: ProgramStatusState::Idle,
             blocked_kind: None,
             progress_percent: None,
             app_name: Some(app_name_at_limit.clone()),
@@ -368,7 +371,7 @@ fn a_title_at_its_encoded_limit_applies_and_one_group_over_discards() {
         parse_string_terminated_report(&format!("state=idle:title={title_at_limit}")),
         Some(ProgramStatusFact::Reported {
             record_id: String::new(),
-            state: ProgramStatusState::Idle,
+            program_status_state: ProgramStatusState::Idle,
             blocked_kind: None,
             progress_percent: None,
             app_name: None,
@@ -491,7 +494,7 @@ fn kind_reads_with_blocked_only_and_an_unknown_kind_reads_as_none() {
             parse_string_terminated_report(&format!("state=blocked:kind={kind_text}")),
             Some(ProgramStatusFact::Reported {
                 record_id: String::new(),
-                state: ProgramStatusState::Blocked,
+                program_status_state: ProgramStatusState::Blocked,
                 blocked_kind: expected_blocked_kind,
                 progress_percent: None,
                 app_name: None,
@@ -501,13 +504,13 @@ fn kind_reads_with_blocked_only_and_an_unknown_kind_reads_as_none() {
             "{kind_text}"
         );
     }
-    for state_text in ["idle", "working", "done", "error"] {
+    for program_status_state_text in ["idle", "working", "done", "error"] {
         let Some(ProgramStatusFact::Reported { blocked_kind, .. }) =
-            parse_string_terminated_report(&format!("state={state_text}:kind=auth"))
+            parse_string_terminated_report(&format!("state={program_status_state_text}:kind=auth"))
         else {
-            panic!("state={state_text}:kind=auth gives a report");
+            panic!("state={program_status_state_text}:kind=auth gives a report");
         };
-        assert_eq!(blocked_kind, None, "{state_text}");
+        assert_eq!(blocked_kind, None, "{program_status_state_text}");
     }
 }
 
@@ -527,36 +530,38 @@ fn progress_reads_a_whole_number_from_0_to_100_with_working_and_blocked_only() {
         ("1_0", None),
         ("", None),
     ] {
-        for state in [ProgramStatusState::Working, ProgramStatusState::Blocked] {
-            let state_text = match state {
+        for program_status_state in [ProgramStatusState::Working, ProgramStatusState::Blocked] {
+            let program_status_state_text = match program_status_state {
                 ProgramStatusState::Working => "working",
                 _ => "blocked",
             };
             assert_eq!(
                 parse_string_terminated_report(&format!(
-                    "state={state_text}:progress={progress_text}"
+                    "state={program_status_state_text}:progress={progress_text}"
                 )),
                 Some(ProgramStatusFact::Reported {
                     record_id: String::new(),
-                    state,
+                    program_status_state,
                     blocked_kind: None,
                     progress_percent: expected_progress_percent,
                     app_name: None,
                     title: None,
                     message: None,
                 }),
-                "{state_text} {progress_text}"
+                "{program_status_state_text} {progress_text}"
             );
         }
     }
-    for state_text in ["idle", "done", "error"] {
+    for program_status_state_text in ["idle", "done", "error"] {
         let Some(ProgramStatusFact::Reported {
             progress_percent, ..
-        }) = parse_string_terminated_report(&format!("state={state_text}:progress=40"))
+        }) = parse_string_terminated_report(&format!(
+            "state={program_status_state_text}:progress=40"
+        ))
         else {
-            panic!("state={state_text}:progress=40 gives a report");
+            panic!("state={program_status_state_text}:progress=40 gives a report");
         };
-        assert_eq!(progress_percent, None, "{state_text}");
+        assert_eq!(progress_percent, None, "{program_status_state_text}");
     }
 }
 

@@ -3,13 +3,17 @@
 //! terminal reads them.
 //!
 //! A report is `OSC 7501 ; key=value(:key=value)* ST`, and ST is `ESC \` or
-//! BEL. [`parse_program_status_report`] checks one report against every limit
-//! of the protocol, and gives one [`ProgramStatusFact`] or nothing.
+//! BEL. The engine's OSC reader hands over every byte after `ESC ] 7501 ;` as
+//! the program wrote it, control bytes too, and only for a sequence that ended
+//! with `ESC \` or BEL. [`TerminalState::apply_program_status_sequence`]
+//! answers the query `?`, and passes every other text to
+//! [`parse_program_status_report`], which checks the report against every limit
+//! of the protocol and gives one [`ProgramStatusFact`] or nothing.
 //!
 //! - A pair with no `=`, an empty key, an unknown key, or a value byte
 //!   outside `A-Z a-z 0-9 _ . , + / = -` is skipped, and the rest of the
-//!   report applies. Spaces and tabs around a key and a value are removed. The
-//!   last value of a repeated key wins.
+//!   report applies. The bytes space, tab, LF, FF and CR around a key and a
+//!   value are removed. The last value of a repeated key wins.
 //! - The whole report gives nothing when its state is missing or unknown, or
 //!   when one pair breaks a limit, also a pair that a following pair of the
 //!   same key replaces.
@@ -23,21 +27,20 @@ use base64::Engine as _;
 use koshi_core::program_status::{BlockedKind, ProgramStatusState};
 use koshi_core::text::sanitize_reported_text;
 
-use crate::state::ProgramStatusFact;
+use crate::engine::osc_reader::PROGRAM_STATUS_INTRODUCER_BYTES;
+use crate::state::{ProgramFact, ProgramStatusFact, TerminalState};
 
 /// The text of the query `OSC 7501 ; ? ST`.
-pub(super) const PROGRAM_STATUS_QUERY_BYTES: &[u8] = b"?";
+const PROGRAM_STATUS_QUERY_BYTES: &[u8] = b"?";
 
 /// The reply to the query, without its terminator. The reply ends with the
 /// terminator that the query used: BEL or `ESC \`.
-pub(super) const PROGRAM_STATUS_QUERY_REPLY_BYTES: &[u8] =
+const PROGRAM_STATUS_QUERY_REPLY_BYTES: &[u8] =
     b"\x1b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth";
 
-/// The number of bytes before the text of a report: the 7 bytes of
-/// `ESC ] 7501 ;`.
-const REPORT_INTRODUCER_BYTE_COUNT: usize = b"\x1b]7501;".len();
-
-/// The most bytes one report holds, from `ESC ]` through its terminator.
+/// The most bytes one report holds, from `ESC ]` through its terminator. An
+/// 8-bit sequence counts as its 7-bit form: `0x9D` as the 2 bytes `ESC ]`,
+/// and `0x9C` as the 2 bytes `ESC \`.
 const MAX_REPORT_BYTE_COUNT: usize = 4096;
 
 /// The most bytes one key holds, a known key or an unknown one.
@@ -78,7 +81,7 @@ const RECORD_ID_PART_SEPARATOR_BYTE: u8 = b'/';
 #[derive(Default)]
 struct ReportPairs<'report> {
     /// The `state` value, such as `working`.
-    state_bytes: Option<&'report [u8]>,
+    program_status_state_bytes: Option<&'report [u8]>,
     /// The `id` value, such as `deploy/us-east`.
     record_id_bytes: Option<&'report [u8]>,
     /// The `kind` value, such as `permission`.
@@ -97,12 +100,12 @@ struct ReportPairs<'report> {
 
 /// The fact that `report_bytes`, the text of one `OSC 7501` after its first
 /// `;`, gives, or `None` when the report breaks a limit. The report ended with
-/// BEL when `is_bell_terminated`, and with a two-byte terminator otherwise.
+/// BEL when `is_bell_terminated`, and with `ESC \` otherwise.
 ///
 /// The limits that give `None`:
 ///
 /// - the sequence holds more than 4096 bytes, from `ESC ]` through its
-///   terminator;
+///   terminator, counted in its 7-bit form;
 /// - the state is missing, or is not `idle`, `working`, `done`, `blocked`,
 ///   `error` or `clear`;
 /// - a key holds more than 16 bytes;
@@ -115,13 +118,13 @@ struct ReportPairs<'report> {
 ///   U+001F, U+007F, U+0080 to U+009F).
 ///
 /// `state=clear:id=deploy` gives `Cleared { record_id: "deploy" }`, and
-/// `state=clear:id=a//b` gives `None`.
-pub(super) fn parse_program_status_report(
+/// `state=clear:id=a//b` and `state=clear:id=a<TAB>b` give `None`.
+fn parse_program_status_report(
     report_bytes: &[u8],
     is_bell_terminated: bool,
 ) -> Option<ProgramStatusFact> {
     let terminator_byte_count = if is_bell_terminated { 1 } else { 2 };
-    if REPORT_INTRODUCER_BYTE_COUNT + report_bytes.len() + terminator_byte_count
+    if PROGRAM_STATUS_INTRODUCER_BYTES.len() + report_bytes.len() + terminator_byte_count
         > MAX_REPORT_BYTE_COUNT
     {
         return None;
@@ -154,7 +157,7 @@ fn read_report_pairs(report_bytes: &[u8]) -> Option<ReportPairs<'_>> {
             continue;
         }
         match key_bytes {
-            b"state" => report_pairs.state_bytes = Some(value_bytes),
+            b"state" => report_pairs.program_status_state_bytes = Some(value_bytes),
             b"id" => report_pairs.record_id_bytes = Some(value_bytes),
             b"kind" => report_pairs.blocked_kind_bytes = Some(value_bytes),
             b"progress" => report_pairs.progress_bytes = Some(value_bytes),
@@ -202,7 +205,7 @@ fn should_discard_report(key_bytes: &[u8], value_bytes: &[u8]) -> bool {
 fn build_program_status_fact(report_pairs: ReportPairs<'_>) -> Option<ProgramStatusFact> {
     let record_id =
         String::from_utf8_lossy(report_pairs.record_id_bytes.unwrap_or_default()).into_owned();
-    let state = match report_pairs.state_bytes? {
+    let program_status_state = match report_pairs.program_status_state_bytes? {
         b"idle" => ProgramStatusState::Idle,
         b"working" => ProgramStatusState::Working,
         b"done" => ProgramStatusState::Done,
@@ -211,13 +214,13 @@ fn build_program_status_fact(report_pairs: ReportPairs<'_>) -> Option<ProgramSta
         b"clear" => return Some(ProgramStatusFact::Cleared { record_id }),
         _ => return None,
     };
-    let blocked_kind = match (state, report_pairs.blocked_kind_bytes) {
+    let blocked_kind = match (program_status_state, report_pairs.blocked_kind_bytes) {
         (ProgramStatusState::Blocked, Some(b"permission")) => Some(BlockedKind::Permission),
         (ProgramStatusState::Blocked, Some(b"question")) => Some(BlockedKind::Question),
         (ProgramStatusState::Blocked, Some(b"auth")) => Some(BlockedKind::Auth),
         _ => None,
     };
-    let progress_percent = match state {
+    let progress_percent = match program_status_state {
         ProgramStatusState::Working | ProgramStatusState::Blocked => {
             report_pairs.progress_bytes.and_then(parse_progress_percent)
         }
@@ -229,7 +232,7 @@ fn build_program_status_fact(report_pairs: ReportPairs<'_>) -> Option<ProgramSta
         .map(|app_name_bytes| String::from_utf8_lossy(app_name_bytes).into_owned());
     Some(ProgramStatusFact::Reported {
         record_id,
-        state,
+        program_status_state,
         blocked_kind,
         progress_percent,
         app_name,
@@ -305,6 +308,43 @@ fn decode_program_status_text(
         return None;
     }
     Some(sanitize_reported_text(&decoded_text))
+}
+
+impl TerminalState {
+    /// Apply the program status sequence `ESC ] 7501 ; <argument_bytes>`, which
+    /// ended with BEL when `is_bell_terminated` and with `ESC \` otherwise.
+    ///
+    /// - `argument_bytes` of `?` queues the query reply on the device reply
+    ///   queue, ended with the sequence's own terminator.
+    /// - Any other `argument_bytes` that [`parse_program_status_report`]
+    ///   accepts adds its [`ProgramFact::ProgramStatus`] fact, and writes no
+    ///   reply.
+    ///
+    /// `?` with `is_bell_terminated` queues
+    /// `ESC ] 7501 ; ?:states=idle,working,done,blocked,error:kinds=permission,question,auth BEL`.
+    pub(crate) fn apply_program_status_sequence(
+        &mut self,
+        argument_bytes: &[u8],
+        is_bell_terminated: bool,
+    ) {
+        if argument_bytes == PROGRAM_STATUS_QUERY_BYTES {
+            let query_terminator_bytes: &[u8] = if is_bell_terminated {
+                b"\x07"
+            } else {
+                b"\x1b\\"
+            };
+            self.device_query_replies
+                .extend_from_slice(PROGRAM_STATUS_QUERY_REPLY_BYTES);
+            self.device_query_replies
+                .extend_from_slice(query_terminator_bytes);
+            return;
+        }
+        if let Some(program_status_fact) =
+            parse_program_status_report(argument_bytes, is_bell_terminated)
+        {
+            self.push_program_fact(ProgramFact::ProgramStatus(program_status_fact));
+        }
+    }
 }
 
 #[cfg(test)]

@@ -136,12 +136,12 @@ pub enum ProgramStatusFact {
         /// record.
         record_id: String,
         /// The state the report names.
-        state: ProgramStatusState,
-        /// What the blocked program needs. `None` unless `state` is
-        /// `Blocked`, and `None` when the report names no kind or an
+        program_status_state: ProgramStatusState,
+        /// What the blocked program needs. `None` unless
+        /// `program_status_state` is `Blocked`, and `None` when the report names no kind or an
         /// unknown one.
         blocked_kind: Option<BlockedKind>,
-        /// 0 to 100. `None` unless `state` is `Working` or `Blocked`, and
+        /// 0 to 100. `None` unless `program_status_state` is `Working` or `Blocked`, and
         /// `None` when the report names no whole number from 0 to 100.
         progress_percent: Option<u8>,
         /// The `app` name, such as `cargo`: 1 to 32 bytes of
