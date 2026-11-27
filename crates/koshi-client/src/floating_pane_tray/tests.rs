@@ -268,7 +268,7 @@ fn a_lock_mouse_select_focus_link_or_session_change_closes_the_tray() {
             client.set_mouse_selection_enabled(true)
         }),
         ("a loss of the outer terminal's focus", |client| {
-            client.handle_outer_terminal_focus_lost()
+            client.handle_outer_terminal_focus_change(false)
         }),
         ("a lost link", |client| {
             client.set_link_status(build_redialing_link_status())

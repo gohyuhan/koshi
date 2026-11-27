@@ -10,19 +10,19 @@
 //! terminal are you" / "what's your status" / "is this mode on") back into
 //! the pane's PTY, and marks the view changed of every subscriber whose
 //! client shows the pane, and of every client of a floating pane's session
-//! when the pane's display title changes. Shell-integration events are
-//! published in marker order, and the `OSC 52` clipboard copies the engine
-//! read go to the clients that focus the pane. Bytes for a pane with no engine
-//! are dropped without touching any state.
+//! when the pane's display title changes. The program facts the engine read
+//! (shell markers, bells and desktop notifications) become command lifecycle
+//! and pane attention events in byte order
+//! (`Server::apply_program_facts`), and the `OSC 52` clipboard copies the
+//! engine read go to the clients that focus the pane. Bytes for a pane with no
+//! engine are dropped without touching any state.
 
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
-use koshi_core::event::{Event, PaneCommandFinished, PaneCommandStarted};
 use koshi_core::ids::PaneId;
 use koshi_observability::repeated_warning::LOG_WINDOW_DURATION;
-use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::engine::{TerminalAdvance, TerminalEngine};
 use koshi_terminal::graphics::GraphicsError;
-use koshi_terminal::state::ShellIntegrationFact;
 
 use crate::runtime::snapshot::is_pane_title_input_changed;
 use crate::server::Server;
@@ -90,7 +90,9 @@ impl Server {
     /// A chunk that leaves the pane on a different screen (primary or
     /// alternate) than it started on drops every client's highlight in it.
     ///
-    /// Shell-integration facts become command lifecycle events in marker order.
+    /// The chunk's program facts become events in byte order
+    /// (`Server::apply_program_facts`), stamped with `read_at`, the wall time
+    /// the chunk was read.
     ///
     /// Each `OSC 52` copy the engine read
     /// ([`TerminalEngine::take_clipboard_copies`]) goes, in order, to every
@@ -103,7 +105,7 @@ impl Server {
     /// (`mark_views_listing_floating_pane`), also a client that minimized the
     /// pane. Example: `cd /tmp` in a floating shell that one client minimized
     /// gives that client a frame with the new title `/tmp`.
-    pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8]) {
+    pub fn handle_pty_output(&mut self, pane_id: PaneId, output_bytes: &[u8], read_at: SystemTime) {
         let terminal_cell_size = self.session_by_id.values().find_map(|session| {
             if let Some(tab) = session.find_tab_by_pane_id(pane_id) {
                 return session.get_tab_cell_size(tab.get_tab_id());
@@ -122,24 +124,25 @@ impl Server {
         let terminal_advance_state_before =
             TerminalAdvanceStateBefore::capture_terminal_advance_state(terminal_engine);
         let current_time = Instant::now();
-        let (reply_bytes, shell_integration_facts, is_terminal_advanced) = terminal_engine
-            .process_pty_output_with_shell_integration_at(output_bytes, current_time);
+        let terminal_advance = terminal_engine.process_pty_output_at(output_bytes, current_time);
         self.refresh_pane_render_deadlines(pane_id, current_time);
-        if !is_terminal_advanced {
+        let Some(terminal_advance) = terminal_advance else {
             return;
-        }
+        };
         self.finish_terminal_advance(
             pane_id,
             terminal_advance_state_before,
-            reply_bytes,
-            shell_integration_facts,
+            terminal_advance,
+            read_at,
+            current_time,
         );
     }
 
     /// End `pane_id`'s synchronized-output hold when it is due at
     /// `current_time`, and handle the output it released as
-    /// [`handle_pty_output`](Self::handle_pty_output) handles a chunk. A pane
-    /// with no engine, or with no hold due, changes nothing.
+    /// [`handle_pty_output`](Self::handle_pty_output) handles a chunk. The
+    /// released program facts are stamped with the wall time of the release. A
+    /// pane with no engine, or with no hold due, changes nothing.
     pub(in crate::runtime) fn expire_synchronized_output(
         &mut self,
         pane_id: PaneId,
@@ -150,34 +153,41 @@ impl Server {
         };
         let terminal_advance_state_before =
             TerminalAdvanceStateBefore::capture_terminal_advance_state(terminal_engine);
-        let Some((reply_bytes, shell_integration_facts)) =
-            terminal_engine.expire_synchronized_output(current_time)
+        let Some(terminal_advance) = terminal_engine.expire_synchronized_output(current_time)
         else {
             return;
         };
         self.finish_terminal_advance(
             pane_id,
             terminal_advance_state_before,
-            reply_bytes,
-            shell_integration_facts,
+            terminal_advance,
+            SystemTime::now(),
+            current_time,
         );
     }
 
     /// Handle what one terminal advance of `pane_id` produced, against
-    /// `terminal_advance_state_before`: log its graphics errors, write
-    /// `reply_bytes` back into the pane, clear the pane's selections when the
-    /// active screen changed, re-anchor held views when the scrollback gained
-    /// or lost lines, publish `shell_integration_facts` as events, send its
-    /// clipboard copies, mark the views changed of every client of the
-    /// session when an input of a floating pane's title changed, and mark the
-    /// views showing the pane changed.
+    /// `terminal_advance_state_before`: log its graphics errors, write its
+    /// device-query replies back into the pane, clear the pane's selections
+    /// when the active screen changed, re-anchor held views when the
+    /// scrollback gained or lost lines, apply its program facts at `read_at`
+    /// and `current_time` and publish their events
+    /// (`Server::apply_program_facts`), send its clipboard copies, mark the
+    /// views changed of every client of the session when an input of a
+    /// floating pane's title changed, and mark the views showing the pane
+    /// changed.
     fn finish_terminal_advance(
         &mut self,
         pane_id: PaneId,
         terminal_advance_state_before: TerminalAdvanceStateBefore,
-        reply_bytes: Vec<u8>,
-        shell_integration_facts: Vec<ShellIntegrationFact>,
+        terminal_advance: TerminalAdvance,
+        read_at: SystemTime,
+        current_time: Instant,
     ) {
+        let TerminalAdvance {
+            device_query_replies: reply_bytes,
+            program_facts,
+        } = terminal_advance;
         let Some(terminal_engine) = self.terminal_engine_by_pane_id.get_mut(&pane_id) else {
             return;
         };
@@ -245,19 +255,10 @@ impl Server {
             self.drop_evicted_selections(pane_id);
             self.anchor_held_views(pane_id, pushed_line_count, retained_line_count_after);
         }
-        if !shell_integration_facts.is_empty() {
-            let shell_integration_events: Vec<Event> = shell_integration_facts
-                .into_iter()
-                .map(|shell_integration_fact| match shell_integration_fact {
-                    ShellIntegrationFact::CommandStarted => {
-                        Event::PaneCommandStarted(PaneCommandStarted { pane_id })
-                    }
-                    ShellIntegrationFact::CommandFinished => {
-                        Event::PaneCommandFinished(PaneCommandFinished { pane_id })
-                    }
-                })
-                .collect();
-            self.publish_events(&shell_integration_events);
+        if !program_facts.is_empty() {
+            let program_fact_events =
+                self.apply_program_facts(pane_id, program_facts, read_at, current_time);
+            self.publish_events(&program_fact_events);
         }
         if !clipboard_copies.is_empty() {
             self.copy_pane_clipboard_to_clients(pane_id, &clipboard_copies);

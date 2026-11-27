@@ -3,7 +3,7 @@
 //! surface, command dispatch, the event inbox, the event fan-out bus, each
 //! attached client's delivery queue, outer-input routing, mouse handling,
 //! highlight upkeep, clipboard writes, PTY (pseudo-terminal, a child process's
-//! terminal connection) forwarding and output handling, config reload
+//! terminal connection) forwarding and output handling, pane attention, config reload
 //! transactions, render scheduling, the saved views a detached client can take
 //! back, the join and leave notices, the panes other clients' input reached
 //! that a subscriber's frames must show, per-client scrollback scrolling, staged
@@ -12,6 +12,7 @@
 //! The [`Server`](crate::server::Server) type these modules extend lives in
 //! [`crate::server`].
 
+pub(crate) mod attention;
 pub mod bootstrap;
 pub mod bus;
 pub mod clipboard;

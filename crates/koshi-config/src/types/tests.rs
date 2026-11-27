@@ -85,6 +85,14 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert_eq!(server_config.remote_listen_address, None);
     assert_eq!(server_config.shared_sessions_directory, None);
     assert!(!server_config.should_auto_close_session);
+    assert_eq!(
+        server_config.attention,
+        AttentionConfig {
+            should_raise_for_bell: true,
+            should_raise_for_notify: true,
+            should_raise_for_command_finished: true,
+        }
+    );
     assert!(client_config.supports_image_protocols);
     assert!(!client_config.should_reduce_motion);
     assert!(client_config.should_stay_in_pane_placement_mode_after_placement);
@@ -150,6 +158,46 @@ fn default_server_and_client_configs_match_expected_settings() {
     assert_eq!(server_config.logging.log_format, LogFormat::Pretty);
     assert_eq!(server_config.logging.max_log_file_size_in_mb, 4);
     assert!(!client_config.logging.is_enabled);
+}
+
+#[test]
+fn should_raise_for_reads_the_key_of_each_reason_kind() {
+    let attention_reason_kinds = [
+        AttentionReasonKind::Bell,
+        AttentionReasonKind::Notify,
+        AttentionReasonKind::CommandFinished,
+    ];
+    for (attention_config, expected_answers) in [
+        (
+            AttentionConfig {
+                should_raise_for_bell: false,
+                ..AttentionConfig::default()
+            },
+            [false, true, true],
+        ),
+        (
+            AttentionConfig {
+                should_raise_for_notify: false,
+                ..AttentionConfig::default()
+            },
+            [true, false, true],
+        ),
+        (
+            AttentionConfig {
+                should_raise_for_command_finished: false,
+                ..AttentionConfig::default()
+            },
+            [true, true, false],
+        ),
+    ] {
+        assert_eq!(
+            attention_reason_kinds
+                .map(|attention_reason_kind| attention_config
+                    .should_raise_for(attention_reason_kind)),
+            expected_answers,
+            "{attention_config:?}"
+        );
+    }
 }
 
 #[test]

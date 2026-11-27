@@ -1,4 +1,4 @@
-//! OSC parsing for shell reports and working-directory updates.
+//! OSC parsing for shell markers and working-directory updates.
 
 use std::path::PathBuf;
 
@@ -15,15 +15,16 @@ pub(super) enum Osc133 {
     Input,
     /// The shell started executing the command.
     CommandStart,
-    /// The shell finished the command.
-    CommandFinished,
+    /// The shell finished the command, with the exit code it reported, or
+    /// `None` when it reported none.
+    CommandFinished(Option<i32>),
 }
 
 /// Parse an OSC 133 payload, split on `;` by `vte`, into its marker.
 ///
 /// Accepts `133;A`, `133;B`, `133;C`, `133;D`, and `133;D;<code>` where
-/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`). The code is checked
-/// and not kept: `133;D;137` and `133;D` give the same finish.
+/// `<code>` parses as an `i32` (`0`, `137`, `-1`, `+3`): `133;D;137` gives
+/// `CommandFinished(Some(137))`, and `133;D` gives `CommandFinished(None)`.
 ///
 /// Parameters after the marker are options the shell adds (`cl=m`, `aid=1`)
 /// and are skipped: `133;A;cl=m;aid=1` is the prompt mark and `133;D;0;aid=1`
@@ -45,11 +46,11 @@ pub(super) fn parse_osc133(osc_parameters: &[&[u8]]) -> Option<Osc133> {
         (b"D", [exit_code_bytes, ..]) if !exit_code_bytes.is_empty() => {
             let exit_code_text = std::str::from_utf8(exit_code_bytes).ok()?;
             match exit_code_text.parse::<i32>() {
-                Ok(_) => Some(Osc133::CommandFinished),
+                Ok(exit_code) => Some(Osc133::CommandFinished(Some(exit_code))),
                 Err(_) => None,
             }
         }
-        (b"D", _) => Some(Osc133::CommandFinished),
+        (b"D", _) => Some(Osc133::CommandFinished(None)),
         _ => None,
     }
 }

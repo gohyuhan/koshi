@@ -134,6 +134,26 @@ fn a_client_carries_where_it_connected_from_across_a_serde_round_trip() {
 }
 
 #[test]
+fn a_client_carried_across_a_swap_comes_back_with_its_terminal_focus_unreported() {
+    let mut client = build_test_client(TabId::new());
+    assert_eq!(client.get_terminal_focus(), TerminalFocus::Unreported);
+    client.set_terminal_focus(TerminalFocus::Focused);
+    assert_eq!(client.get_terminal_focus(), TerminalFocus::Focused);
+
+    let serialized_client_json = serde_json::to_string(&client).expect("the client encodes");
+    let serialized_client_value: serde_json::Value =
+        serde_json::from_str(&serialized_client_json).expect("the encoded JSON client is JSON");
+    let decoded_client: Client =
+        serde_json::from_str(&serialized_client_json).expect("the client decodes");
+
+    assert_eq!(serialized_client_value.get("terminal_focus"), None);
+    assert_eq!(
+        decoded_client.get_terminal_focus(),
+        TerminalFocus::Unreported
+    );
+}
+
+#[test]
 fn a_new_client_starts_unlocked_with_no_focus() {
     let tab_id = TabId::new();
     let client = build_test_client(tab_id);

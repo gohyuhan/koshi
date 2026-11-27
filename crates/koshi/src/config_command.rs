@@ -166,6 +166,25 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "Largest copy a pane may write, in bytes. A bigger OSC 52 copy makes no copy.",
     ),
     build_config_field_help(
+        "koshi.attention.bell",
+        "koshi.kdl",
+        "#true",
+        "Mark a pane that rings the bell while nobody watches it.",
+    ),
+    build_config_field_help(
+        "koshi.attention.notify",
+        "koshi.kdl",
+        "#true",
+        "Mark a pane that posts a desktop notification (OSC 9, OSC 777 or OSC 99) while \
+         nobody watches it.",
+    ),
+    build_config_field_help(
+        "koshi.attention.command-finished",
+        "koshi.kdl",
+        "#true",
+        "Mark a pane whose command finishes after 5 seconds or more while nobody watches it.",
+    ),
+    build_config_field_help(
         "koshi.remote-reconnect",
         "koshi.kdl",
         "#true",

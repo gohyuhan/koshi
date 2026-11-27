@@ -203,7 +203,7 @@ fn build_pane_grid_server(grid_side_pane_count: u16) -> (Server, ClientId, Vec<P
             1,
             DEFAULT_WORKLOAD_SEED + pane_index as u64,
         );
-        server.handle_pty_output(*pane_id, &repaint_bytes);
+        server.handle_pty_output(*pane_id, &repaint_bytes, SystemTime::UNIX_EPOCH);
     }
     (server, client_id, pane_ids)
 }
@@ -330,6 +330,7 @@ fn measure_one_row_changes(
         server.handle_pty_output(
             pane_id,
             format!("\x1b[{CHANGED_ROW_NUMBER};1H{written_character}").as_bytes(),
+            SystemTime::UNIX_EPOCH,
         );
         run_cost.add_update(carry_painted_update(
             server,

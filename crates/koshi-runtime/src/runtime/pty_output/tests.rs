@@ -240,7 +240,7 @@ fn a_cell_pixel_size_query_answers_with_the_tab_cell_size_or_the_floating_cell_s
 
     // XTWINOPS 16: report the cell size in pixels.
     for pane_id in [tiled_pane_id, htop_pane_id, stray_pane_id] {
-        runtime.handle_pty_output(pane_id, b"\x1b[16t");
+        runtime.handle_pty_output(pane_id, b"\x1b[16t", SystemTime::UNIX_EPOCH);
     }
 
     assert_eq!(
@@ -269,7 +269,7 @@ fn bytes_update_only_the_owning_panes_grid() {
     let pane_id = insert_test_terminal_engine(&mut runtime);
     let other_pane_id = insert_test_terminal_engine(&mut runtime);
 
-    runtime.handle_pty_output(pane_id, b"hi");
+    runtime.handle_pty_output(pane_id, b"hi", SystemTime::UNIX_EPOCH);
 
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'h');
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 1), 'i');
@@ -297,8 +297,8 @@ fn an_escape_sequence_split_across_two_chunks_decodes_once() {
 
     // SGR 31 (red foreground) split mid-sequence across two output chunks:
     // the pane's parser carries the partial sequence between handler calls.
-    runtime.handle_pty_output(pane_id, b"\x1b[3");
-    runtime.handle_pty_output(pane_id, b"1mx");
+    runtime.handle_pty_output(pane_id, b"\x1b[3", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(pane_id, b"1mx", SystemTime::UNIX_EPOCH);
 
     let terminal_engines = runtime.list_terminal_engines();
     let grid_cell = terminal_engines[&pane_id]
@@ -420,7 +420,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
         web_client_id,
     } = floating_pane_viewers;
 
-    runtime.handle_pty_output(db_pane_id, b"hi");
+    runtime.handle_pty_output(db_pane_id, b"hi", SystemTime::UNIX_EPOCH);
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, first_frame_time),
         Some(DEFAULT_FRAME_INTERVAL_DURATION)
@@ -432,7 +432,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
 
     let second_frame_time = first_frame_time + DEFAULT_FRAME_INTERVAL_DURATION;
     runtime.push_frames(second_frame_time);
-    runtime.handle_pty_output(htop_pane_id, b"hi");
+    runtime.handle_pty_output(htop_pane_id, b"hi", SystemTime::UNIX_EPOCH);
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, second_frame_time),
         None
@@ -443,7 +443,7 @@ fn output_marks_the_view_of_each_client_that_shows_its_pane_and_of_no_other() {
     );
 
     runtime.push_frames(second_frame_time + DEFAULT_FRAME_INTERVAL_DURATION);
-    runtime.handle_pty_output(PaneId::new(), b"hi");
+    runtime.handle_pty_output(PaneId::new(), b"hi", SystemTime::UNIX_EPOCH);
     assert_eq!(
         mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, second_frame_time),
         None
@@ -516,7 +516,7 @@ fn a_change_of_a_floating_panes_title_marks_the_view_of_the_client_that_minimize
 
     for (pane_id, output_bytes, is_db_view_changed) in output_steps {
         step_time += DEFAULT_FRAME_INTERVAL_DURATION;
-        runtime.handle_pty_output(pane_id, output_bytes);
+        runtime.handle_pty_output(pane_id, output_bytes, SystemTime::UNIX_EPOCH);
 
         assert_eq!(
             mark_changed_views_then_compute_frame_wait(&mut runtime, db_client_id, step_time),
@@ -543,7 +543,7 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
     let (mut runtime, fake_pty_backend, pane_id, client_id, delivery_receiver) =
         build_viewed_pane_server(render_time);
     spawn_test_pane(&fake_pty_backend, pane_id);
-    runtime.handle_pty_output(pane_id, b"old");
+    runtime.handle_pty_output(pane_id, b"old", SystemTime::UNIX_EPOCH);
     let old_frame_time = render_time + DEFAULT_FRAME_INTERVAL_DURATION;
     runtime.push_frames(old_frame_time);
     assert_eq!(
@@ -555,8 +555,12 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
         )))
     );
 
-    runtime.handle_pty_output(pane_id, b"\x1b[?2026h");
-    runtime.handle_pty_output(pane_id, b"\x1b[2J\x1b[Hnew\x1b[5n\x1b]133;C\x07");
+    runtime.handle_pty_output(pane_id, b"\x1b[?2026h", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(
+        pane_id,
+        b"\x1b[2J\x1b[Hnew\x1b[5n\x1b]133;C\x07",
+        SystemTime::UNIX_EPOCH,
+    );
 
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'o');
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 1), 'l');
@@ -574,7 +578,7 @@ fn synchronized_body_keeps_the_committed_state_and_side_effects_hidden() {
         None
     );
 
-    runtime.handle_pty_output(pane_id, b"\x1b[?2026l");
+    runtime.handle_pty_output(pane_id, b"\x1b[?2026l", SystemTime::UNIX_EPOCH);
 
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 0), 'n');
     assert_eq!(get_pane_cell_character(&runtime, pane_id, 0, 1), 'e');
@@ -606,9 +610,8 @@ fn synchronized_deadline_uses_the_runtime_wakeup_and_common_delivery_path() {
         .terminal_engine_by_pane_id
         .get_mut(&pane_id)
         .expect("the pane has an engine");
-    let _ = engine.process_pty_output_with_shell_integration_at(b"\x1b[?2026h", current_time);
-    let _ = engine
-        .process_pty_output_with_shell_integration_at(b"X\x1b[5n\x1b]133;C\x07", current_time);
+    let _ = engine.process_pty_output_at(b"\x1b[?2026h", current_time);
+    let _ = engine.process_pty_output_at(b"X\x1b[5n\x1b]133;C\x07", current_time);
     runtime.refresh_pane_render_deadlines(pane_id, current_time);
 
     assert_eq!(
@@ -687,7 +690,11 @@ fn shell_markers_publish_command_events_in_order() {
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
     runtime.handle_attach_answer_received(client_id);
 
-    runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;D;137\x07");
+    runtime.handle_pty_output(
+        pane_id,
+        b"\x1b]133;C\x07\x1b]133;D;137\x07",
+        SystemTime::UNIX_EPOCH,
+    );
 
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
@@ -707,7 +714,11 @@ fn duplicate_shell_starts_publish_one_command_pair() {
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
     runtime.handle_attach_answer_received(client_id);
 
-    runtime.handle_pty_output(pane_id, b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07");
+    runtime.handle_pty_output(
+        pane_id,
+        b"\x1b]133;C\x07\x1b]133;C\x07\x1b]133;D;0\x07",
+        SystemTime::UNIX_EPOCH,
+    );
 
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
@@ -727,7 +738,11 @@ fn an_unmatched_finish_and_plain_output_publish_no_command_events() {
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
     runtime.handle_attach_answer_received(client_id);
 
-    runtime.handle_pty_output(pane_id, b"\x1b]133;D;1\x07plain output");
+    runtime.handle_pty_output(
+        pane_id,
+        b"\x1b]133;D;1\x07plain output",
+        SystemTime::UNIX_EPOCH,
+    );
 
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(list_recorded_command_events(&runtime), Vec::new());
@@ -742,10 +757,10 @@ fn command_lifecycle_state_is_independent_per_pane() {
     let (delivery_receiver, _) = runtime.subscribe(client_id, 60, None);
     runtime.handle_attach_answer_received(client_id);
 
-    runtime.handle_pty_output(first_pane_id, b"\x1b]133;C\x07");
-    runtime.handle_pty_output(second_pane_id, b"\x1b]133;C\x07");
-    runtime.handle_pty_output(first_pane_id, b"\x1b]133;D;0\x07");
-    runtime.handle_pty_output(second_pane_id, b"\x1b]133;D\x07");
+    runtime.handle_pty_output(first_pane_id, b"\x1b]133;C\x07", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(second_pane_id, b"\x1b]133;C\x07", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(first_pane_id, b"\x1b]133;D;0\x07", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(second_pane_id, b"\x1b]133;D\x07", SystemTime::UNIX_EPOCH);
 
     assert_eq!(delivery_receiver.try_iter().collect::<Vec<_>>(), Vec::new());
     assert_eq!(
@@ -766,7 +781,7 @@ fn a_device_querys_reply_is_written_back_to_the_pty() {
     spawn_test_pane(&fake_pty_backend, pane_id);
 
     // DSR 5 (operating status) embedded in ordinary output.
-    runtime.handle_pty_output(pane_id, b"hi\x1b[5n");
+    runtime.handle_pty_output(pane_id, b"hi\x1b[5n", SystemTime::UNIX_EPOCH);
 
     assert_eq!(
         fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
@@ -780,7 +795,7 @@ fn replies_from_one_chunk_are_written_as_one_batch_in_query_order() {
     let pane_id = insert_test_terminal_engine(&mut runtime);
     spawn_test_pane(&fake_pty_backend, pane_id);
 
-    runtime.handle_pty_output(pane_id, b"\x1b[5n\x1b[6n");
+    runtime.handle_pty_output(pane_id, b"\x1b[5n\x1b[6n", SystemTime::UNIX_EPOCH);
 
     assert_eq!(
         fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
@@ -794,7 +809,7 @@ fn output_without_a_query_writes_nothing_back() {
     let pane_id = insert_test_terminal_engine(&mut runtime);
     spawn_test_pane(&fake_pty_backend, pane_id);
 
-    runtime.handle_pty_output(pane_id, b"hi\x1b[31m");
+    runtime.handle_pty_output(pane_id, b"hi\x1b[31m", SystemTime::UNIX_EPOCH);
 
     assert_eq!(
         fake_pty_backend.list_pane_write_bytes(pane_id).unwrap(),
@@ -810,7 +825,7 @@ fn a_failed_reply_write_is_dropped_and_output_still_lands() {
     let (mut runtime, fake_pty_backend, pane_id, client_id, _delivery_receiver) =
         build_viewed_pane_server(first_frame_time);
 
-    runtime.handle_pty_output(pane_id, b"x\x1b[5n");
+    runtime.handle_pty_output(pane_id, b"x\x1b[5n", SystemTime::UNIX_EPOCH);
 
     // The chunk still reached the grid and marked the view changed; the
     // failed write left no record.
@@ -832,7 +847,7 @@ fn bytes_for_a_pane_with_no_engine_are_ignored() {
         build_viewed_pane_server(first_frame_time);
     let closed_pane_id = PaneId::new();
 
-    runtime.handle_pty_output(closed_pane_id, b"\x1b[31mboom");
+    runtime.handle_pty_output(closed_pane_id, b"\x1b[31mboom", SystemTime::UNIX_EPOCH);
 
     // No engine changed, no engine was created, and no view was marked.
     assert_eq!(get_pane_cell_character(&runtime, live_pane_id, 0, 0), ' ');
@@ -849,7 +864,7 @@ fn lines_scrolled_off_the_top_enter_the_panes_scrollback() {
     let pane_id = insert_test_terminal_engine(&mut runtime);
 
     // Five lines on a three-row grid: the first two scroll off the top.
-    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne");
+    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne", SystemTime::UNIX_EPOCH);
 
     let scrollback_state = runtime.list_terminal_engines()[&pane_id]
         .get_terminal_state()
@@ -862,10 +877,10 @@ fn lines_scrolled_off_the_top_enter_the_panes_scrollback() {
 fn erasing_the_scrollback_empties_it_and_keeps_the_push_count() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne");
+    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne", SystemTime::UNIX_EPOCH);
 
     // CSI 3 J drops every retained line.
-    runtime.handle_pty_output(pane_id, b"\x1b[3J");
+    runtime.handle_pty_output(pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
 
     let scrollback_state = runtime.list_terminal_engines()[&pane_id]
         .get_terminal_state()
@@ -878,9 +893,9 @@ fn erasing_the_scrollback_empties_it_and_keeps_the_push_count() {
 fn entering_the_alternate_screen_keeps_the_primary_scrollback() {
     let (mut runtime, _fake_pty_backend) = build_test_server();
     let pane_id = insert_test_terminal_engine(&mut runtime);
-    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne");
+    runtime.handle_pty_output(pane_id, b"a\r\nb\r\nc\r\nd\r\ne", SystemTime::UNIX_EPOCH);
 
-    runtime.handle_pty_output(pane_id, b"\x1b[?1049h");
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
 
     let terminal_state = runtime.list_terminal_engines()[&pane_id].get_terminal_state();
     assert!(!terminal_state.is_primary_screen_active());

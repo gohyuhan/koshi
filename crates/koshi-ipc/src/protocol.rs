@@ -618,6 +618,15 @@ pub enum IpcRequestKind {
         /// Whether the client keeps its keys in a local input mode.
         is_viewer_local_input_mode_on: bool,
     },
+    /// Say whether the terminal the client runs in has keyboard focus, as that
+    /// terminal last reported it: `CSI I` gives `true`, `CSI O` gives
+    /// `false`. The client sends it after each attach once its terminal
+    /// reported focus, and after each change. Nothing answers it. On a
+    /// connection with no attached client, it closes the connection.
+    TerminalFocus {
+        /// Whether the client's terminal has keyboard focus.
+        is_terminal_focused: bool,
+    },
     /// Confirm one tiled pane placement that the client previews. The session
     /// solves the destination tab as the placement leaves it, for this client,
     /// and runs the placement only when that layout equals
@@ -943,6 +952,7 @@ impl IpcRequestKind {
             IpcRequestKind::Layout { .. } => "Layout",
             IpcRequestKind::SetPanePlacementPreview { .. } => "SetPanePlacementPreview",
             IpcRequestKind::SetViewerLocalInputMode { .. } => "SetViewerLocalInputMode",
+            IpcRequestKind::TerminalFocus { .. } => "TerminalFocus",
             IpcRequestKind::ConfirmPanePlacement { .. } => "ConfirmPanePlacement",
             IpcRequestKind::RecentEvents => "RecentEvents",
             IpcRequestKind::Restart => "Restart",
@@ -1215,6 +1225,7 @@ impl WireVariants for IpcRequestKind {
         "Layout",
         "SetPanePlacementPreview",
         "SetViewerLocalInputMode",
+        "TerminalFocus",
         "ConfirmPanePlacement",
         "RecentEvents",
         "Restart",

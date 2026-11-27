@@ -14,7 +14,8 @@
 //!   [`mouse`] — mouse events and the reporting level a pane's program asked
 //!   for.
 //! - [`notification`] — the entries koshi posts to tell a person something,
-//!   and the bounded queue each client and session keeps them in.
+//!   and the bounded queue each client and session keeps them in;
+//!   [`attention`] — what a pane's program asked a person to look at.
 //! - [`process`] — spawn, kill, and exit types; [`naming`] — generated names
 //!   for sessions, tabs, and clients; [`client`] — where a client connected
 //!   from; [`clipboard`] — the targets of a clipboard copy that a program in
@@ -36,6 +37,7 @@
 //! to read — with the cadence rule their numbers follow.
 
 pub mod action;
+pub mod attention;
 pub mod client;
 pub mod clipboard;
 pub mod command;

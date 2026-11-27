@@ -54,9 +54,6 @@ where
 /// A recoverable terminal-image processing error.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 pub enum GraphicsError {
-    /// A sequence ended without a complete image transfer.
-    #[error("{protocol:?} image transfer is truncated")]
-    Truncated { protocol: crate::GraphicsProtocol },
     /// A protocol opening or header is not valid.
     #[error("{protocol:?} image header is invalid")]
     InvalidHeader { protocol: crate::GraphicsProtocol },

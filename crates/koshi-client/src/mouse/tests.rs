@@ -6317,6 +6317,31 @@ fn keyboard_placement_drops_a_held_handle_drag() {
 }
 
 #[test]
+fn a_focus_in_keeps_placement_mode_and_the_client_remembers_each_focus_report() {
+    let pane_id = PaneId::new();
+    let active_tab_id = TabId::new();
+    let mut client = build_test_client();
+    client.set_frame_view(
+        active_tab_id,
+        Some(pane_id),
+        Some(pane_id),
+        vec![active_tab_id],
+    );
+    assert_eq!(client.find_reported_terminal_focus(), None);
+    assert!(client.begin_placement_mode());
+
+    client.handle_outer_terminal_focus_change(true);
+
+    assert_eq!(client.find_reported_terminal_focus(), Some(true));
+    assert!(client.is_placement_mode_active());
+
+    client.handle_outer_terminal_focus_change(false);
+
+    assert_eq!(client.find_reported_terminal_focus(), Some(false));
+    assert!(!client.is_placement_mode_active());
+}
+
+#[test]
 fn losing_the_outer_terminals_focus_closes_the_chip_tooltip_until_the_next_mouse_event() {
     let pane_id = PaneId::new();
     let mouse_frame = build_one_pane_mouse_frame(build_plain_mouse_pane(pane_id));
@@ -6327,7 +6352,7 @@ fn losing_the_outer_terminals_focus_closes_the_chip_tooltip_until_the_next_mouse
         start_column: 54,
     });
 
-    client.handle_outer_terminal_focus_lost();
+    client.handle_outer_terminal_focus_change(false);
 
     assert_eq!(client.pointer_hover.client_chip_hover, None);
     assert!(client.is_client_chip_hover_suppressed);
@@ -6455,7 +6480,7 @@ fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() 
         advance_time_by_seconds(current_time, 1),
     );
 
-    client.handle_outer_terminal_focus_lost();
+    client.handle_outer_terminal_focus_change(false);
     assert_eq!(client.left_button_gesture, None);
     assert_eq!(find_floating_pane_move_draft(&client, &mouse_frame), None);
     assert_eq!(
@@ -6477,7 +6502,7 @@ fn losing_the_outer_terminals_focus_drops_a_handle_drag_and_keeps_a_sent_move() 
         floating_slot_pane_id,
         Point { column: 15, row: 5 },
     );
-    client.handle_outer_terminal_focus_lost();
+    client.handle_outer_terminal_focus_change(false);
     assert_eq!(
         find_floating_pane_move_draft(&client, &mouse_frame),
         Some(FloatingPaneMoveDraft {

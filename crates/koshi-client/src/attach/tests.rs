@@ -3253,6 +3253,7 @@ fn build_test_uplink(request_sender: mpsc::Sender<IpcRequest>) -> Uplink {
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         sent_placement_preview_target: None,
         sent_is_viewer_local_input_mode_on: false,
+        sent_is_terminal_focused: None,
     }
 }
 
@@ -3268,6 +3269,7 @@ fn build_test_control_socket() -> TestControlSocket {
             next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
             sent_placement_preview_target: None,
             sent_is_viewer_local_input_mode_on: false,
+            sent_is_terminal_focused: None,
         },
     }
 }
@@ -3305,6 +3307,73 @@ fn a_new_connection_starts_from_what_its_attach_named() {
             request_id: FIRST_POST_ATTACH_REQUEST_ID,
             request_kind: IpcRequestKind::SetViewerLocalInputMode {
                 is_viewer_local_input_mode_on: true,
+            },
+        }]
+    );
+}
+
+/// The terminal focus reports `false`, `false`, `true`, `true`, `false` on a
+/// link that reported none send three requests: `false`, `true`, then
+/// `false`.
+#[test]
+fn the_terminal_focus_goes_up_only_when_it_changes() {
+    let (request_sender, request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(request_sender);
+
+    for is_terminal_focused in [false, false, true, true, false] {
+        uplink.send_terminal_focus(is_terminal_focused);
+    }
+
+    assert_eq!(
+        request_receiver.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID,
+                request_kind: IpcRequestKind::TerminalFocus {
+                    is_terminal_focused: false,
+                },
+            },
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + 1,
+                request_kind: IpcRequestKind::TerminalFocus {
+                    is_terminal_focused: true,
+                },
+            },
+            IpcRequest {
+                request_id: FIRST_POST_ATTACH_REQUEST_ID + 2,
+                request_kind: IpcRequestKind::TerminalFocus {
+                    is_terminal_focused: false,
+                },
+            },
+        ]
+    );
+}
+
+/// The old link reported `true`. The new connection has reported no focus,
+/// so the same `true` goes up again as its first request.
+#[test]
+fn a_new_connection_reports_the_terminal_focus_again() {
+    let (old_request_sender, _old_request_receiver) = mpsc::channel();
+    let mut uplink = build_test_uplink(old_request_sender);
+    uplink.send_terminal_focus(true);
+    let (request_sender, request_receiver) = mpsc::channel();
+
+    uplink.start_connection(
+        UplinkWriter {
+            request_sender,
+            writer_end_receiver: mpsc::channel().1,
+        },
+        None,
+        false,
+    );
+    uplink.send_terminal_focus(true);
+
+    assert_eq!(
+        request_receiver.try_iter().collect::<Vec<IpcRequest>>(),
+        vec![IpcRequest {
+            request_id: FIRST_POST_ATTACH_REQUEST_ID,
+            request_kind: IpcRequestKind::TerminalFocus {
+                is_terminal_focused: true,
             },
         }]
     );
@@ -10215,7 +10284,10 @@ fn losing_the_outer_terminals_focus_ends_a_local_mode() {
         let mut uplink = build_test_uplink(request_sender);
         let (incoming_sender, incoming_receiver) = build_incoming_channel();
         for runtime_event in [
-            RuntimeEvent::OuterTerminalFocusLost { client_id },
+            RuntimeEvent::OuterTerminalFocusChanged {
+                client_id,
+                is_terminal_focused: false,
+            },
             RuntimeEvent::Quit,
         ] {
             incoming_sender
@@ -10252,7 +10324,10 @@ fn losing_the_outer_terminals_focus_while_redialing_ends_a_local_mode() {
         enter_local_mode(&mut viewer.client);
         let client_id = viewer.client.get_client_id();
         viewer.queue_incoming_event(build_input_incoming(
-            RuntimeEvent::OuterTerminalFocusLost { client_id },
+            RuntimeEvent::OuterTerminalFocusChanged {
+                client_id,
+                is_terminal_focused: false,
+            },
             Instant::now(),
         ));
         viewer.queue_incoming_event(viewer.build_key_press_event(build_quit_chord()));
@@ -11683,6 +11758,7 @@ fn quitting_waits_for_a_stalled_writer_no_longer_than_the_quit_write_wait() {
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         sent_placement_preview_target: None,
         sent_is_viewer_local_input_mode_on: false,
+        sent_is_terminal_focused: None,
     };
     let quit_started_at = Instant::now();
 

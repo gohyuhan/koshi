@@ -151,8 +151,13 @@ impl Server {
             self.park_pane_pty(*pane_id, *pty_size);
         }
         self.session_by_id.insert(session_id, session);
+        let notice_written_at = SystemTime::now();
         for (pane_id, _) in carried_pane_sizes {
-            self.handle_pty_output(*pane_id, LAYOUT_NOT_RESTORED_NOTICE_BYTES);
+            self.handle_pty_output(
+                *pane_id,
+                LAYOUT_NOT_RESTORED_NOTICE_BYTES,
+                notice_written_at,
+            );
         }
         self.post_session_notification(
             session_id,

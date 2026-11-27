@@ -1530,83 +1530,6 @@ fn discarded_string_bulk_scan_stays_silent_past_the_graphics_limit() {
 }
 
 #[test]
-fn unterminated_non_graphics_strings_are_silent_at_finish() {
-    let mut parser = GraphicsParser::default();
-
-    assert!(parser
-        .decode_completed_graphics_events(b"\x1b_ordinary application command")
-        .is_empty());
-    assert!(parser.finish_graphics_stream().is_empty());
-
-    assert!(parser
-        .decode_completed_graphics_events(b"\x1b]0")
-        .is_empty());
-    assert!(parser.finish_graphics_stream().is_empty());
-
-    assert!(parser
-        .decode_completed_graphics_events(b"\x1b]1337;SetMark=mark")
-        .is_empty());
-    assert!(parser.finish_graphics_stream().is_empty());
-
-    assert!(parser
-        .decode_completed_graphics_events(b"\x1bPtx")
-        .is_empty());
-    assert!(parser.finish_graphics_stream().is_empty());
-}
-
-#[test]
-fn finishing_a_silent_string_leaves_the_next_image_readable() {
-    for silent_string_input in [b"\x1b_ordinary".as_slice(), b"\x1bPtx", b"\x1b]0"] {
-        let mut parser = GraphicsParser::default();
-        assert!(parser
-            .decode_completed_graphics_events(silent_string_input)
-            .is_empty());
-        assert!(parser.finish_graphics_stream().is_empty());
-        assert_eq!(
-            get_only_graphics_event(&mut parser, &build_kitty_raw_rgba())
-                .expect("the image after the silent string decodes")
-                .image
-                .rgba_bytes,
-            [255, 0, 0, 255]
-        );
-    }
-}
-
-#[test]
-fn finishing_an_incomplete_utf8_character_discards_its_carry() {
-    let mut parser = GraphicsParser::default();
-
-    assert!(parser.decode_completed_graphics_events(b"\xe2").is_empty());
-    assert_eq!(
-        parser
-            .get_graphics_transport_state()
-            .map(|graphics_transport_state| graphics_transport_state.carry_bytes),
-        Some(b"\xe2".to_vec())
-    );
-    assert!(parser.finish_graphics_stream().is_empty());
-    assert!(parser.get_graphics_transport_state().is_none());
-
-    assert_eq!(
-        get_only_graphics_event(&mut parser, &build_kitty_raw_rgba())
-            .expect("the image after the incomplete character decodes")
-            .image
-            .rgba_bytes,
-        [255, 0, 0, 255]
-    );
-}
-
-#[test]
-fn empty_passthrough_wrappers_are_silent_at_finish() {
-    for passthrough_prefix in [b"\x1bPtmux;".as_slice(), b"\x1bP\x1b"] {
-        let mut parser = GraphicsParser::default();
-        assert!(parser
-            .decode_completed_graphics_events(passthrough_prefix)
-            .is_empty());
-        assert!(parser.finish_graphics_stream().is_empty());
-    }
-}
-
-#[test]
 fn ordinary_dcs_strings_do_not_create_completed_graphics_events_or_capture_inner_bytes() {
     let mut dcs_input_bytes = b"\x1bPtx".to_vec();
     dcs_input_bytes.extend_from_slice(&build_kitty_raw_rgba());
@@ -1711,21 +1634,6 @@ fn c1_dcs_terminators_end_empty_and_wrapped_strings() {
             .image
             .rgba_bytes,
         [255, 0, 0, 255]
-    );
-}
-
-#[test]
-fn an_unterminated_transfer_is_reported_as_truncated() {
-    let mut parser = GraphicsParser::default();
-
-    assert!(parser
-        .decode_completed_graphics_events(b"\x1b_Gf=32,s=1,v=1;")
-        .is_empty());
-    assert_eq!(
-        parser.finish_graphics_stream(),
-        [Err(GraphicsError::Truncated {
-            protocol: GraphicsProtocol::Kitty,
-        })]
     );
 }
 

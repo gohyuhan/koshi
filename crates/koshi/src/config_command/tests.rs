@@ -8,10 +8,10 @@ use koshi_config::error::ConfigError;
 use koshi_config::key::Leader;
 use koshi_config::keybinding::parse_keybindings;
 use koshi_config::layer::{
-    PartialColorPalette, PartialCopyConfig, PartialKeybindingsConfig, PartialKoshiConfig,
-    PartialLayoutDefaults, PartialLoggingConfig, PartialMouseConfig, PartialNotificationConfig,
-    PartialPaneClipboardWriteConfig, PartialPaneConfig, PartialScrollbackConfig,
-    PartialTerminalConfig, PartialThemeConfig, PartialUpdateConfig,
+    PartialAttentionConfig, PartialColorPalette, PartialCopyConfig, PartialKeybindingsConfig,
+    PartialKoshiConfig, PartialLayoutDefaults, PartialLoggingConfig, PartialMouseConfig,
+    PartialNotificationConfig, PartialPaneClipboardWriteConfig, PartialPaneConfig,
+    PartialScrollbackConfig, PartialTerminalConfig, PartialThemeConfig, PartialUpdateConfig,
 };
 use koshi_config::parser::parse_kdl;
 use koshi_config::profile::parse_profile;
@@ -241,6 +241,11 @@ pane-clipboard-writes {
     allow #true
     max-copy-bytes 1024
 }
+attention {
+    bell #false
+    notify #true
+    command-finished #false
+}
 terminal {
     term "xterm-kitty"
     colorterm "24bit"
@@ -326,6 +331,11 @@ update {
                 pane_clipboard_writes: Some(PartialPaneClipboardWriteConfig {
                     should_allow_writes: Some(true),
                     maximum_copy_byte_count: Some(1024),
+                }),
+                attention: Some(PartialAttentionConfig {
+                    should_raise_for_bell: Some(false),
+                    should_raise_for_notify: Some(true),
+                    should_raise_for_command_finished: Some(false),
                 }),
             },
             theme_name: Some("midnight".to_string()),

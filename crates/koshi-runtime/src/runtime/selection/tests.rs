@@ -248,7 +248,7 @@ fn a_drag_highlights_from_the_press_to_the_pointer() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 6, 0); // the `w`
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 10, 0); // the `d`
@@ -288,7 +288,7 @@ fn a_press_with_no_drag_leaves_no_highlight() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     // A plain click: press and release, the pointer never moving. Nothing is
     // highlighted, and in particular no empty highlight is left to hold the view.
@@ -321,7 +321,7 @@ fn a_press_drops_the_highlight_that_was_up() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
@@ -370,8 +370,8 @@ fn a_drag_in_one_pane_leaves_the_other_panes_highlight_alone() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     let split_pane_id = split_pane_rightward(&mut server, client_id);
-    server.handle_pty_output(initial_pane_id, b"first pane");
-    server.handle_pty_output(split_pane_id, b"second pane");
+    server.handle_pty_output(initial_pane_id, b"first pane", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(split_pane_id, b"second pane", SystemTime::UNIX_EPOCH);
 
     // Highlight in the second pane (the split focused it).
     let start_point = get_pane_screen_cell(&server, client_id, split_pane_id, 0, 0);
@@ -443,8 +443,8 @@ fn a_focus_click_on_another_pane_clears_no_highlight() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     let split_pane_id = split_pane_rightward(&mut server, client_id);
-    server.handle_pty_output(initial_pane_id, b"first pane");
-    server.handle_pty_output(split_pane_id, b"second pane");
+    server.handle_pty_output(initial_pane_id, b"first pane", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(split_pane_id, b"second pane", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, split_pane_id, 0, 0);
     let end_point = get_pane_screen_cell(&server, client_id, split_pane_id, 5, 0);
@@ -485,9 +485,9 @@ fn mouse_select_mode_selects_over_a_mouse_aware_program() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
     // The program turns on mouse tracking: bare gestures are now its own.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h");
+    server.handle_pty_output(pane_id, b"\x1b[?1000h\x1b[?1006h", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
@@ -562,8 +562,8 @@ fn mouse_select_mode_still_focuses_an_unfocused_pane_first() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     let split_pane_id = split_pane_rightward(&mut server, client_id); // the split focuses `split_pane_id`
-    server.handle_pty_output(initial_pane_id, b"first pane");
-    server.handle_pty_output(split_pane_id, b"second pane");
+    server.handle_pty_output(initial_pane_id, b"first pane", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(split_pane_id, b"second pane", SystemTime::UNIX_EPOCH);
     enable_mouse_selection(&mut server, client_id);
 
     let start_point = get_pane_screen_cell(&server, client_id, initial_pane_id, 0, 0);
@@ -619,7 +619,7 @@ fn a_double_click_drag_snaps_to_whole_words() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     // Two presses inside the threshold, then a drag: word selection.
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 2, 0); // inside `hello`
@@ -668,7 +668,7 @@ fn a_triple_click_drag_snaps_to_whole_lines() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
     dispatch_mouse_input_at_time(
@@ -721,7 +721,7 @@ fn a_fourth_quick_click_starts_the_run_over() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
     for _ in 0..4 {
@@ -754,7 +754,7 @@ fn two_slow_clicks_are_two_single_clicks() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     // A second apart is well past the 400ms threshold. This is not a double
     // click, and the drag selects characters, not the whole word.
@@ -792,7 +792,7 @@ fn alt_held_at_the_press_makes_a_block() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"one\r\ntwo\r\nthree");
+    server.handle_pty_output(pane_id, b"one\r\ntwo\r\nthree", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 1, 0);
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 2, 2);
@@ -832,7 +832,7 @@ fn alt_wins_over_a_double_click() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     // Alt held at the second press makes a block, even inside the double-click
     // threshold.
@@ -870,7 +870,7 @@ fn a_release_ends_the_drag_but_leaves_the_highlight() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
@@ -916,7 +916,7 @@ fn a_highlight_holds_the_view_at_the_live_bottom() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
@@ -950,7 +950,11 @@ fn a_drag_past_the_bottom_edge_scrolls_and_keeps_extending() {
     let mut clock = Clock::new();
     // Fill well past the 24-row screen. The extra lines go to history.
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     // Scroll up 10 lines, then drag past the bottom edge.
@@ -1021,7 +1025,11 @@ fn a_pointer_back_inside_the_pane_stops_the_scrolling() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
     server.scroll_up(client_id, pane_id, 10);
 
@@ -1085,7 +1093,7 @@ fn a_wakeup_is_asked_for_only_while_a_drag_is_held_past_an_edge() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
     let current_time = clock.advance_one_second();
 
     assert_eq!(
@@ -1139,7 +1147,7 @@ fn switching_to_the_alternate_screen_drops_the_highlight() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -1175,7 +1183,7 @@ fn switching_to_the_alternate_screen_drops_the_highlight() {
     // The program enters the alternate screen (what `vim` does on start). A row
     // number counts lines pushed into scrollback. The alternate screen has no
     // scrollback, and the highlight names nothing there.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h");
+    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
 
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
@@ -1196,7 +1204,7 @@ fn a_drag_beyond_the_last_column_clamps_to_the_edge() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -1241,7 +1249,7 @@ fn a_drag_up_leaves_the_anchor_after_the_cursor() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"one\r\ntwo\r\nthree");
+    server.handle_pty_output(pane_id, b"one\r\ntwo\r\nthree", SystemTime::UNIX_EPOCH);
 
     // Press on the third row and drag up to the first. The anchor stays where
     // the press was and is the later end.
@@ -1282,7 +1290,7 @@ fn switching_tabs_ends_the_drag_and_keeps_the_highlight() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
@@ -1331,7 +1339,7 @@ fn output_under_a_highlight_leaves_it_on_the_same_text_and_the_same_screen_row()
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"target line\r\n");
+    server.handle_pty_output(pane_id, b"target line\r\n", SystemTime::UNIX_EPOCH);
 
     // Highlight `target` on the first row.
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
@@ -1354,7 +1362,11 @@ fn output_under_a_highlight_leaves_it_on_the_same_text_and_the_same_screen_row()
 
     // Enough output to push the highlighted line off the top of the screen.
     for line_number in 0..30 {
-        server.handle_pty_output(pane_id, format!("noise{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("noise{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     assert_eq!(
@@ -1382,11 +1394,15 @@ fn a_word_on_the_alternate_screen_never_reaches_into_the_primarys_history() {
     // A single very long line on the primary screen wraps many times. Every
     // row it pushes into history ends in a soft wrap: the text continues onto
     // the row below.
-    server.handle_pty_output(pane_id, "x".repeat(78 * 40).as_bytes());
+    server.handle_pty_output(
+        pane_id,
+        "x".repeat(78 * 40).as_bytes(),
+        SystemTime::UNIX_EPOCH,
+    );
     // Enter the alternate screen, which keeps the primary screen's history, and
     // write `ab foo bar` on it. The word `foo` starts at column 3.
-    server.handle_pty_output(pane_id, b"\x1b[?47h");
-    server.handle_pty_output(pane_id, b"ab foo bar");
+    server.handle_pty_output(pane_id, b"\x1b[?47h", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"ab foo bar", SystemTime::UNIX_EPOCH);
 
     let primary_history_line_count = server
         .terminal_engine_by_pane_id
@@ -1439,7 +1455,7 @@ fn a_plain_double_click_selects_the_word_under_the_pointer() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 8, 0); // inside `world`
     dispatch_mouse_input_at_time(
@@ -1491,7 +1507,7 @@ fn a_plain_triple_click_selects_the_line_under_the_pointer() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 4, 0);
     for _ in 0..3 {
@@ -1536,7 +1552,7 @@ fn a_double_click_then_a_drag_extends_from_the_same_word() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let word_press_point = get_pane_screen_cell(&server, client_id, pane_id, 2, 0); // inside `hello`
     dispatch_mouse_input_at_time(
@@ -1602,7 +1618,7 @@ fn a_double_click_on_empty_space_leaves_no_view_held_over_nothing() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hi");
+    server.handle_pty_output(pane_id, b"hi", SystemTime::UNIX_EPOCH);
 
     // Column 40 is blank space well past the text.
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 40, 0);
@@ -1669,7 +1685,11 @@ fn a_drag_past_the_top_edge_scrolls_into_history_and_keeps_extending() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     assert_eq!(
@@ -1749,7 +1769,7 @@ fn two_clients_selecting_in_one_pane_never_see_each_others_highlight() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let first_client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     // A second client attached to the same session, viewing the same tab.
     let session_id = server
@@ -1862,7 +1882,11 @@ fn a_drag_past_a_corner_scrolls_and_clamps_the_column() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 10, 5);
@@ -1903,7 +1927,7 @@ fn erasing_all_history_under_a_highlight_drops_it_and_frees_the_view() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 6, 0); // the `w`
     let end_point = get_pane_screen_cell(&server, client_id, pane_id, 10, 0); // the `d`
@@ -1945,7 +1969,11 @@ fn erasing_all_history_under_a_highlight_drops_it_and_frees_the_view() {
     // Sixty lines of output push `hello world` into history; the held view's
     // offset rises with it.
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
@@ -1954,7 +1982,7 @@ fn erasing_all_history_under_a_highlight_drops_it_and_frees_the_view() {
     );
 
     // The child erases its scrollback. Every line under the highlight is gone.
-    server.handle_pty_output(pane_id, b"\x1b[3J");
+    server.handle_pty_output(pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
         None,
@@ -1975,7 +2003,11 @@ fn a_highlight_still_partly_on_screen_survives_a_history_erase() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     // Scrolled up three lines, the top three view rows are history rows. A drag
@@ -2004,7 +2036,7 @@ fn a_highlight_still_partly_on_screen_survives_a_history_erase() {
     let selection_before_history_erase =
         get_selection(&mut server, client_id, pane_id).expect("a highlight");
 
-    server.handle_pty_output(pane_id, b"\x1b[3J");
+    server.handle_pty_output(pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
         Some(selection_before_history_erase),
@@ -2020,7 +2052,7 @@ fn a_press_on_the_right_half_of_a_wide_glyph_names_the_glyph_itself() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, "世界x".as_bytes());
+    server.handle_pty_output(pane_id, "世界x".as_bytes(), SystemTime::UNIX_EPOCH);
 
     // 世 covers columns 0-1, 界 columns 2-3, x column 4. Press on 世's blank
     // half, drag onto 界's blank half.
@@ -2066,7 +2098,7 @@ fn a_held_drag_stops_firing_once_there_is_nowhere_left_to_scroll() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2129,7 +2161,11 @@ fn a_held_drag_stops_firing_at_the_oldest_retained_line() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
     server.scroll_up(client_id, pane_id, usize::MAX);
 
@@ -2180,8 +2216,8 @@ fn a_highlight_on_the_alternate_screen_survives_the_app_scrolling() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"\x1b[?1049h"); // enter the alternate screen
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH); // enter the alternate screen
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2207,7 +2243,7 @@ fn a_highlight_on_the_alternate_screen_survives_the_app_scrolling() {
         get_selection(&mut server, client_id, pane_id).expect("highlighted");
 
     // The app scrolls on its own: cursor to the last row, a line feed there.
-    server.handle_pty_output(pane_id, b"\x1b[999;1H\n");
+    server.handle_pty_output(pane_id, b"\x1b[999;1H\n", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
         Some(highlighted_selection),
@@ -2224,7 +2260,7 @@ fn a_screen_highlight_survives_the_app_moving_rows_around() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2250,7 +2286,7 @@ fn a_screen_highlight_survives_the_app_moving_rows_around() {
         get_selection(&mut server, client_id, pane_id).expect("highlighted");
 
     // DL with the cursor on row 3: rows below slide up, nothing is pushed.
-    server.handle_pty_output(pane_id, b"\x1b[3;1H\x1b[M");
+    server.handle_pty_output(pane_id, b"\x1b[3;1H\x1b[M", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
         Some(highlighted_selection),
@@ -2266,7 +2302,11 @@ fn a_history_highlight_survives_a_primary_row_shift() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     // Scrolled up three lines, the top three view rows are history rows.
@@ -2294,7 +2334,7 @@ fn a_history_highlight_survives_a_primary_row_shift() {
     let highlighted_selection =
         get_selection(&mut server, client_id, pane_id).expect("highlighted");
 
-    server.handle_pty_output(pane_id, b"\x1b[10;1H\x1b[M");
+    server.handle_pty_output(pane_id, b"\x1b[10;1H\x1b[M", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
         Some(highlighted_selection),
@@ -2310,8 +2350,8 @@ fn a_highlight_on_the_alternate_screen_survives_a_redraw_in_place() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"\x1b[?1049h");
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2336,7 +2376,7 @@ fn a_highlight_on_the_alternate_screen_survives_a_redraw_in_place() {
     let highlighted_selection =
         get_selection(&mut server, client_id, pane_id).expect("highlighted");
 
-    server.handle_pty_output(pane_id, b"\x1b[2;1Hredrawn text");
+    server.handle_pty_output(pane_id, b"\x1b[2;1Hredrawn text", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_selection(&mut server, client_id, pane_id),
         Some(highlighted_selection),
@@ -2352,7 +2392,7 @@ fn a_plain_click_copies_nothing() {
         build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let screen_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2382,7 +2422,7 @@ fn releasing_the_gesture_is_the_copy() {
         build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2447,7 +2487,7 @@ fn copy_release_obeys_disabled_trailing_whitespace_trimming() {
         },
     );
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"a");
+    server.handle_pty_output(pane_id, b"a", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2485,7 +2525,7 @@ fn ctrl_c_clears_the_highlight_like_any_key_reaching_the_pane() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2547,7 +2587,7 @@ fn typing_into_the_pane_clears_the_typists_highlight_there() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2605,7 +2645,7 @@ fn typing_during_a_drag_cancels_the_highlight_and_the_gesture() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2669,7 +2709,7 @@ fn typing_after_a_press_cancels_the_empty_gesture() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2707,7 +2747,7 @@ fn typing_leaves_another_panes_highlight_alone() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2750,7 +2790,7 @@ fn a_click_forwarded_to_a_mouse_aware_program_clears_the_highlight() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -2790,7 +2830,7 @@ fn a_click_forwarded_to_a_mouse_aware_program_clears_the_highlight() {
     );
 
     // The program turns mouse reporting on. The next press goes to the program.
-    server.handle_pty_output(pane_id, b"\x1b[?1000h");
+    server.handle_pty_output(pane_id, b"\x1b[?1000h", SystemTime::UNIX_EPOCH);
     dispatch_mouse_input_at_time(
         &mut server,
         &mut viewer,
@@ -2820,7 +2860,11 @@ fn a_press_on_a_scrolled_view_highlights_the_history_line_the_user_saw() {
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
     for line_number in 0..60 {
-        server.handle_pty_output(pane_id, format!("line{line_number:02}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("line{line_number:02}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
     server.scroll_up(client_id, pane_id, 10);
 
@@ -2831,7 +2875,11 @@ fn a_press_on_a_scrolled_view_highlights_the_history_line_the_user_saw() {
 
     // Eight more lines land while the pointer is on its way down.
     for line_number in 0..8 {
-        server.handle_pty_output(pane_id, format!("late{line_number}\r\n").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("late{line_number}\r\n").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     // The press and the drag are answered against the stale frame.
@@ -2888,7 +2936,7 @@ fn copying_a_highlight_reaching_past_the_last_line_reads_the_lines_that_are_ther
     let (mut server, viewer, pane_id, outer_terminal_receiver) =
         build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let set_command_id = CommandId::new();
     let set_command_result = dispatch_mouse_command(
@@ -2963,7 +3011,7 @@ fn a_copy_writes_the_highlighted_text_to_the_outer_terminal_as_osc52() {
     let (mut server, viewer, pane_id, outer_terminal_receiver) =
         build_selection_runtime_with_outer_terminal();
     let client_id = viewer.get_client_id();
-    server.handle_pty_output(pane_id, b"hello");
+    server.handle_pty_output(pane_id, b"hello", SystemTime::UNIX_EPOCH);
 
     let highlight_selection = Selection {
         selection_kind: SelectionKind::Character,
@@ -3029,7 +3077,7 @@ fn a_drag_ends_when_its_pane_swaps_to_the_alternate_screen() {
     let (mut server, mut viewer, pane_id) = build_selection_runtime();
     let client_id = viewer.get_client_id();
     let mut clock = Clock::new();
-    server.handle_pty_output(pane_id, b"hello world");
+    server.handle_pty_output(pane_id, b"hello world", SystemTime::UNIX_EPOCH);
 
     let start_point = get_pane_screen_cell(&server, client_id, pane_id, 0, 0);
     dispatch_mouse_input_at_time(
@@ -3064,7 +3112,7 @@ fn a_drag_ends_when_its_pane_swaps_to_the_alternate_screen() {
 
     // The program enters the alternate screen mid-drag (what `vim` does on
     // start). The session drops the highlight.
-    server.handle_pty_output(pane_id, b"\x1b[?1049h");
+    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
 
     let drag_point_after_swap = get_pane_screen_cell(&server, client_id, pane_id, 8, 0);
     let mouse_frame =

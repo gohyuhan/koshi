@@ -162,6 +162,14 @@ pub fn record_event(event: &Event, occurred_at: SystemTime) -> RecentEvent {
             pane_id: Some(pane_command_finished.pane_id),
             ..recent_event_without_entity_ids
         },
+        Event::PaneAttentionRaised(pane_attention_raised) => RecentEvent {
+            pane_id: Some(pane_attention_raised.pane_id),
+            ..recent_event_without_entity_ids
+        },
+        Event::PaneAttentionCleared(pane_attention_cleared) => RecentEvent {
+            pane_id: Some(pane_attention_cleared.pane_id),
+            ..recent_event_without_entity_ids
+        },
         Event::SelectionChanged(selection_changed) => RecentEvent {
             client_id: Some(selection_changed.client_id),
             pane_id: Some(selection_changed.pane_id),

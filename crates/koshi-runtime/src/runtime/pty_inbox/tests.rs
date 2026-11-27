@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::sync::mpsc::TryRecvError;
 use std::sync::{mpsc, Arc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use koshi_core::process::SpawnSpec;
 use koshi_pty::backend::state::PtyBackend;
@@ -27,6 +27,33 @@ const INBOX_EVENT_DEADLINE_DURATION: Duration = Duration::from_secs(5);
 
 /// The size of one chunk a terminal reader hands over at most.
 const READ_CHUNK_BYTE_COUNT: usize = 8 * 1024;
+
+/// A turn with each chunk's read time left out: the chunks' bytes, oldest
+/// first, the exit, and whether the queue holds more.
+#[derive(Debug, PartialEq, Eq)]
+struct TurnWithoutReadTimes {
+    output_chunks: Vec<Vec<u8>>,
+    exit_status: Option<ExitStatus>,
+    has_more_output: bool,
+}
+
+/// `output_turn` with each chunk's read time left out.
+fn build_turn_without_read_times(output_turn: PaneOutputTurn) -> TurnWithoutReadTimes {
+    TurnWithoutReadTimes {
+        output_chunks: output_turn
+            .output_chunks
+            .into_iter()
+            .map(|output_chunk| output_chunk.output_bytes)
+            .collect(),
+        exit_status: output_turn.exit_status,
+        has_more_output: output_turn.has_more_output,
+    }
+}
+
+/// The bytes of each chunk `output_turn` took, oldest first.
+fn list_chunk_output_bytes(output_turn: PaneOutputTurn) -> Vec<Vec<u8>> {
+    build_turn_without_read_times(output_turn).output_chunks
+}
 
 /// Receive one inbox event within the deadline, and return the queue of the
 /// wake it must be.
@@ -236,13 +263,33 @@ fn two_chunks_into_an_empty_queue_send_one_wake_and_one_turn_takes_both() {
     assert_eq!(pane_output_queue.pane_id, pane_id);
     assert_eq!(event_receiver.try_recv().err(), Some(TryRecvError::Empty));
     assert_eq!(
-        pane_output_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(pane_output_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: vec![b"first".to_vec(), b"second".to_vec()],
             exit_status: None,
             has_more_output: false,
         }
     );
+}
+
+#[test]
+fn each_chunk_carries_the_wall_time_it_was_queued_at_in_queue_order() {
+    let (event_sender, event_receiver) = mpsc::channel::<RuntimeEvent>();
+    let inbox_sink = InboxSink::from_event_sender(event_sender);
+    let pane_id = PaneId::new();
+    let time_before_first_push = SystemTime::now();
+
+    assert!(inbox_sink.accept_output_bytes(pane_id, b"first".to_vec()));
+    assert!(inbox_sink.accept_output_bytes(pane_id, b"second".to_vec()));
+    let time_after_second_push = SystemTime::now();
+
+    let output_turn = receive_readable_queue(&event_receiver).take_output_turn();
+    let [first_chunk, second_chunk] = output_turn.output_chunks.as_slice() else {
+        panic!("the turn takes both chunks, got {output_turn:?}");
+    };
+    assert!(time_before_first_push <= first_chunk.read_at);
+    assert!(first_chunk.read_at <= second_chunk.read_at);
+    assert!(second_chunk.read_at <= time_after_second_push);
 }
 
 #[test]
@@ -259,7 +306,7 @@ fn a_push_after_a_turn_empties_the_queue_sends_a_new_wake() {
     let woken_queue = receive_readable_queue(&event_receiver);
     assert!(Arc::ptr_eq(&woken_queue, &pane_output_queue));
     assert_eq!(
-        woken_queue.take_output_turn().output_chunks,
+        list_chunk_output_bytes(woken_queue.take_output_turn()),
         vec![b"second".to_vec()]
     );
 }
@@ -292,11 +339,11 @@ fn each_pane_gets_its_own_queue_and_its_own_wake() {
         (left_pane_id, right_pane_id)
     );
     assert_eq!(
-        left_queue.take_output_turn().output_chunks,
+        list_chunk_output_bytes(left_queue.take_output_turn()),
         vec![b"L".to_vec()]
     );
     assert_eq!(
-        right_queue.take_output_turn().output_chunks,
+        list_chunk_output_bytes(right_queue.take_output_turn()),
         vec![b"R".to_vec()]
     );
 }
@@ -318,8 +365,8 @@ fn an_exit_is_taken_only_by_the_turn_that_takes_the_last_chunk() {
     let second_turn = pane_output_queue.take_output_turn();
 
     assert_eq!(
-        first_turn,
-        PaneOutputTurn {
+        build_turn_without_read_times(first_turn),
+        TurnWithoutReadTimes {
             output_chunks: (0..8u8)
                 .map(|chunk_index| vec![chunk_index; READ_CHUNK_BYTE_COUNT])
                 .collect(),
@@ -328,8 +375,8 @@ fn an_exit_is_taken_only_by_the_turn_that_takes_the_last_chunk() {
         }
     );
     assert_eq!(
-        second_turn,
-        PaneOutputTurn {
+        build_turn_without_read_times(second_turn),
+        TurnWithoutReadTimes {
             output_chunks: (8..10u8)
                 .map(|chunk_index| vec![chunk_index; READ_CHUNK_BYTE_COUNT])
                 .collect(),
@@ -351,8 +398,8 @@ fn a_turn_takes_a_first_chunk_larger_than_the_turn_limit_whole() {
     let pane_output_queue = receive_readable_queue(&event_receiver);
 
     assert_eq!(
-        pane_output_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(pane_output_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: vec![large_chunk],
             exit_status: None,
             has_more_output: true,
@@ -370,8 +417,8 @@ fn a_child_exit_alone_sends_one_wake_and_one_turn_takes_it() {
 
     let pane_output_queue = receive_readable_queue(&event_receiver);
     assert_eq!(
-        pane_output_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(pane_output_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: Vec::new(),
             exit_status: Some(ExitStatus::Signaled(9)),
             has_more_output: false,
@@ -397,8 +444,8 @@ fn a_waiting_reader_stops_at_the_queue_limit_until_a_turn_takes_bytes() {
         PANE_OUTPUT_QUEUE_BYTE_LIMIT
     );
     assert_eq!(
-        pane_output_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(pane_output_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: vec![
                 vec![b'x'; READ_CHUNK_BYTE_COUNT];
                 PANE_OUTPUT_TURN_BYTE_LIMIT / READ_CHUNK_BYTE_COUNT
@@ -451,15 +498,15 @@ fn a_push_after_the_queue_closed_starts_a_new_queue_and_the_closed_one_stays_emp
     let new_queue = receive_readable_queue(&event_receiver);
     assert!(!Arc::ptr_eq(&new_queue, &closed_queue));
     assert_eq!(
-        closed_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(closed_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: Vec::new(),
             exit_status: None,
             has_more_output: false,
         }
     );
     assert_eq!(
-        new_queue.take_output_turn().output_chunks,
+        list_chunk_output_bytes(new_queue.take_output_turn()),
         vec![b"second".to_vec()]
     );
 }
@@ -727,8 +774,8 @@ fn a_wake_for_a_pane_that_is_not_live_closes_its_queue() {
 
     assert!(!server.has_queued_pane_output());
     assert_eq!(
-        late_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(late_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: Vec::new(),
             exit_status: None,
             has_more_output: false,
@@ -876,8 +923,8 @@ fn a_push_while_the_queue_still_holds_output_after_a_turn_sends_no_wake() {
     }
     let pane_output_queue = receive_readable_queue(&event_receiver);
     assert_eq!(
-        pane_output_queue.take_output_turn(),
-        PaneOutputTurn {
+        build_turn_without_read_times(pane_output_queue.take_output_turn()),
+        TurnWithoutReadTimes {
             output_chunks: vec![
                 vec![b'x'; READ_CHUNK_BYTE_COUNT];
                 PANE_OUTPUT_TURN_BYTE_LIMIT / READ_CHUNK_BYTE_COUNT

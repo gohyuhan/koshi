@@ -810,9 +810,9 @@ fn all_output_protocols_match_source_image_coverage_after_text_overwrite() {
         });
         let mut output_bytes = b"A\x1b[1;1H".to_vec();
         output_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
-        server.handle_pty_output(pane_id, &output_bytes);
+        server.handle_pty_output(pane_id, &output_bytes, SystemTime::UNIX_EPOCH);
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        server.handle_pty_output(pane_id, b"\x1b[1;1HB");
+        server.handle_pty_output(pane_id, b"\x1b[1;1HB", SystemTime::UNIX_EPOCH);
         let changed_render_snapshot = build_render_snapshot(&server, client_id);
         let mut overwritten_image_pixels = build_opaque_image_pixels();
         if image_protocol != GraphicsProtocol::Kitty {
@@ -846,9 +846,9 @@ fn a_text_repaint_under_an_image_rewrites_only_cell_bound_pixels() {
         });
         let mut image_input_bytes = b"\x1b[1;1H".to_vec();
         image_input_bytes.extend_from_slice(&build_opaque_image_input(image_protocol));
-        server.handle_pty_output(pane_id, &image_input_bytes);
+        server.handle_pty_output(pane_id, &image_input_bytes, SystemTime::UNIX_EPOCH);
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        server.handle_pty_output(pane_id, b"\x1b[1;1HB");
+        server.handle_pty_output(pane_id, b"\x1b[1;1HB", SystemTime::UNIX_EPOCH);
         let repainted_render_snapshot = build_render_snapshot(&server, client_id);
         let client = build_launch_client(client_id);
 
@@ -977,7 +977,7 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
         client_id,
         cell_size: PixelCellSize::from_pixel_dimensions(1, 1).unwrap(),
     });
-    server.handle_pty_output(pane_id, b"\x1b[?1049h");
+    server.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
     let kitty_upload_text = String::from_utf8(build_opaque_image_input(GraphicsProtocol::Kitty))
         .unwrap()
         .replace("c=4,r=4,C=1", "c=4,C=1,y=3,h=1,r=1");
@@ -1031,7 +1031,11 @@ fn assert_pi_scrollbar_output(has_scrollbar: bool) {
             }
         }
         terminal_input_text.push_str("\x1b[?2026l");
-        server.handle_pty_output(pane_id, &terminal_input_text.into_bytes());
+        server.handle_pty_output(
+            pane_id,
+            &terminal_input_text.into_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
         render_snapshots.push(build_render_snapshot(&server, client_id));
         expected_frame_pixel_rows.push((
             image_row_index - 1,
@@ -1093,13 +1097,17 @@ fn two_images_survive_partial_full_and_reverse_scrolling_for_every_protocol_pair
             client_id,
             cell_size: PixelCellSize::from_pixel_dimensions(1, 1).unwrap(),
         });
-        server.handle_pty_output(pane_id, &build_two_image_input(image_protocol));
+        server.handle_pty_output(
+            pane_id,
+            &build_two_image_input(image_protocol),
+            SystemTime::UNIX_EPOCH,
+        );
         let mut render_snapshots = vec![build_render_snapshot(&server, client_id)];
 
-        server.handle_pty_output(pane_id, b"\x1b[3S");
+        server.handle_pty_output(pane_id, b"\x1b[3S", SystemTime::UNIX_EPOCH);
         render_snapshots.push(build_render_snapshot(&server, client_id));
 
-        server.handle_pty_output(pane_id, b"\x1b[5S");
+        server.handle_pty_output(pane_id, b"\x1b[5S", SystemTime::UNIX_EPOCH);
         render_snapshots.push(build_render_snapshot(&server, client_id));
 
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
@@ -1174,7 +1182,11 @@ fn a_native_paint_snapshots_only_the_cells_under_its_images() {
         client_id,
         cell_size,
     });
-    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Iterm2));
+    server.handle_pty_output(
+        pane_id,
+        &build_opaque_image_input(GraphicsProtocol::Iterm2),
+        SystemTime::UNIX_EPOCH,
+    );
     let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
@@ -1263,7 +1275,11 @@ fn pane_placement_preview_clears_native_images_from_the_softened_pane() {
         client_id,
         cell_size,
     });
-    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+    server.handle_pty_output(
+        pane_id,
+        &build_opaque_image_input(GraphicsProtocol::Kitty),
+        SystemTime::UNIX_EPOCH,
+    );
     let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
@@ -1505,7 +1521,11 @@ fn assert_partial_native_frame_write_recovers(
         client_id,
         cell_size,
     });
-    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+    server.handle_pty_output(
+        pane_id,
+        &build_opaque_image_input(GraphicsProtocol::Kitty),
+        SystemTime::UNIX_EPOCH,
+    );
     let render_snapshot = build_render_snapshot(&server, client_id);
     let client = build_launch_client(client_id);
     let committed_regions = build_committed_regions(TEST_VIEWPORT_SIZE);
@@ -1652,7 +1672,11 @@ fn a_text_frame_writes_at_once_and_its_image_follows_inside_one_synchronized_upd
             client_id,
             cell_size,
         });
-        server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+        server.handle_pty_output(
+            pane_id,
+            &build_opaque_image_input(GraphicsProtocol::Kitty),
+            SystemTime::UNIX_EPOCH,
+        );
         let mut render_snapshot = build_render_snapshot(&server, client_id);
         render_snapshot.session_snapshot.session_name = "quiet-lake".to_string();
         let client = build_launch_client(client_id);
@@ -1809,9 +1833,13 @@ fn assert_opaque_protocol_matrix(should_include_text: bool) {
             client_id,
             cell_size,
         });
-        server.handle_pty_output(pane_id, &build_opaque_image_input(image_protocol));
+        server.handle_pty_output(
+            pane_id,
+            &build_opaque_image_input(image_protocol),
+            SystemTime::UNIX_EPOCH,
+        );
         let initial_render_snapshot = build_render_snapshot(&server, client_id);
-        server.handle_pty_output(pane_id, b"\x1b[3S");
+        server.handle_pty_output(pane_id, b"\x1b[3S", SystemTime::UNIX_EPOCH);
         let cropped_render_snapshot = build_render_snapshot(&server, client_id);
         let _ = server.handle_runtime_event(RuntimeEvent::ClientMouse {
             client_id,
@@ -2186,7 +2214,7 @@ fn the_painted_hint_bar_follows_the_clients_mouse_select_state() {
 fn pty_output_is_painted_to_the_screen() {
     let (mut server, client_id, pane_id) = build_test_server_with_pane();
 
-    server.handle_pty_output(pane_id, b"hello");
+    server.handle_pty_output(pane_id, b"hello", SystemTime::UNIX_EPOCH);
 
     let client = build_launch_client(client_id);
     let mut paint_driver = build_test_paint_driver(80, 24);
@@ -2220,7 +2248,7 @@ fn painting_emits_a_changed_cursor_style_and_records_it() {
 
     // The pane asks for a steady bar via DECSCUSR (`CSI 6 SP q`); the first
     // painting sees it differ from the starting `None` and records the new style.
-    server.handle_pty_output(pane_id, b"\x1b[6 q");
+    server.handle_pty_output(pane_id, b"\x1b[6 q", SystemTime::UNIX_EPOCH);
     let client = build_launch_client(client_id);
     let mut last_cursor_style = None;
     let render_snapshot = build_render_snapshot(&server, client_id);
@@ -3189,7 +3217,6 @@ fn terminal_cleanup_cancels_a_partial_kitty_apc_before_deleting_images() {
     });
     assert!(terminal_engine.process_pty_output(&writer).is_empty());
     assert!(terminal_engine.take_graphics_events().is_empty());
-    assert!(terminal_engine.finish_graphics_stream().is_empty());
 }
 
 #[test]
@@ -3287,10 +3314,10 @@ fn the_input_thread_sends_the_events_of_one_read_as_one_input() {
             vec![
                 Event::Key(KeyCode::Char('a').into()),
                 Event::Key(KeyCode::Char('é').into()),
-                Event::FocusIn,
+                Event::KeyboardEnhancementFlags(31),
                 Event::Paste(String::from("p")),
             ],
-            vec![Event::FocusIn],
+            vec![Event::KeyboardEnhancementFlags(31)],
             vec![Event::Key(KeyCode::Char('b').into())],
         ]),
         Arc::default(),
@@ -3330,7 +3357,9 @@ fn the_input_thread_sends_the_events_of_one_read_as_one_input() {
         ..
     }] = second_key_read_input.runtime_events.as_slice()
     else {
-        panic!("the read of focus alone sends nothing, got {second_key_read_input:?}");
+        panic!(
+            "the read of a keyboard flags reply alone sends nothing, got {second_key_read_input:?}"
+        );
     };
     assert_eq!(*b_key_input, decode_key_event(KeyCode::Char('b').into()));
     let [RuntimeEvent::Quit] = quit_input.runtime_events.as_slice() else {
@@ -3344,7 +3373,7 @@ fn the_input_thread_sends_each_read_with_a_stamp_greater_than_the_one_before() {
     let mut input_reader = InputReader::from_event_source(
         ScriptedInputSource::from_reads([
             vec![Event::Key(KeyCode::Char('a').into())],
-            vec![Event::FocusIn],
+            vec![Event::KeyboardEnhancementFlags(31)],
             vec![Event::Paste(String::from("p"))],
             vec![Event::FocusOut],
         ]),
@@ -3382,8 +3411,9 @@ fn the_input_thread_sends_each_read_with_a_stamp_greater_than_the_one_before() {
     };
     assert_eq!(*paste_client_id, client_id);
     assert_eq!(pasted_text, "p");
-    let [RuntimeEvent::OuterTerminalFocusLost {
+    let [RuntimeEvent::OuterTerminalFocusChanged {
         client_id: focus_client_id,
+        is_terminal_focused: false,
     }] = focus_lost_input.runtime_events.as_slice()
     else {
         panic!("the fourth read is the focus loss, got {focus_lost_input:?}");
@@ -3751,16 +3781,27 @@ fn terminal_runtime_discards_capability_reply_events() {
 }
 
 #[test]
-fn terminal_focus_loss_becomes_a_viewer_cancellation_event() {
+fn terminal_focus_reports_become_focus_change_events() {
     let client_id = ClientId::new();
 
-    assert!(matches!(
-        build_terminal_runtime_event(client_id, Event::FocusOut),
-        Some(RuntimeEvent::OuterTerminalFocusLost {
-            client_id: focus_lost_client_id,
-        }) if focus_lost_client_id == client_id
-    ));
-    assert!(build_terminal_runtime_event(client_id, Event::FocusIn).is_none());
+    let focus_out_event = build_terminal_runtime_event(client_id, Event::FocusOut);
+    let Some(RuntimeEvent::OuterTerminalFocusChanged {
+        client_id: focus_out_client_id,
+        is_terminal_focused: false,
+    }) = focus_out_event
+    else {
+        panic!("CSI O is a focus loss, got {focus_out_event:?}");
+    };
+    assert_eq!(focus_out_client_id, client_id);
+    let focus_in_event = build_terminal_runtime_event(client_id, Event::FocusIn);
+    let Some(RuntimeEvent::OuterTerminalFocusChanged {
+        client_id: focus_in_client_id,
+        is_terminal_focused: true,
+    }) = focus_in_event
+    else {
+        panic!("CSI I is a focus gain, got {focus_in_event:?}");
+    };
+    assert_eq!(focus_in_client_id, client_id);
 }
 
 #[test]
@@ -3769,6 +3810,7 @@ fn unsupported_paint_writes_no_terminal_image_output() {
     server.handle_pty_output(
         pane_id,
         b"\x1b_Ga=T,f=32,s=1,v=1,c=1,r=1,C=1;/wAA/w==\x1b\\",
+        SystemTime::UNIX_EPOCH,
     );
     let client = build_launch_client(client_id);
     let render_snapshot = build_render_snapshot(&server, client_id);
@@ -5113,6 +5155,7 @@ fn seeded_frames_that_draw_their_changed_rows_write_the_bytes_of_frames_that_dra
                     server.handle_pty_output(
                         first_pane_id,
                         &build_seeded_print_bytes(&mut seeded_sequence, 40),
+                        SystemTime::UNIX_EPOCH,
                     );
                 }
                 SeededPaintStep::Print => {
@@ -5129,6 +5172,7 @@ fn seeded_frames_that_draw_their_changed_rows_write_the_bytes_of_frames_that_dra
                     server.handle_pty_output(
                         printed_pane_id,
                         &build_seeded_print_bytes(&mut seeded_sequence, line_count),
+                        SystemTime::UNIX_EPOCH,
                     );
                     print_frame_count_after_frame_zero += 1;
                 }
@@ -5288,7 +5332,7 @@ fn a_text_print_beside_a_native_image_draws_only_its_row_in_every_protocol() {
             for (stage_index, (stage_output_bytes, expected_drawn_rows)) in
                 stages.into_iter().enumerate()
             {
-                server.handle_pty_output(pane_id, stage_output_bytes);
+                server.handle_pty_output(pane_id, stage_output_bytes, SystemTime::UNIX_EPOCH);
                 let render_snapshot = build_render_snapshot(&server, client_id);
                 let stage_check_name = format!("{check_name}, stage {stage_index}");
                 let settle_deadline = Instant::now() + Duration::from_secs(5);
@@ -5839,7 +5883,11 @@ fn a_host_resize_writes_every_iterm_and_sixel_image_again_in_the_frame_that_eras
             client_id,
             cell_size: build_one_pixel_cell_size(),
         });
-        server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+        server.handle_pty_output(
+            pane_id,
+            &build_opaque_image_input(GraphicsProtocol::Kitty),
+            SystemTime::UNIX_EPOCH,
+        );
         let mut client = build_launch_client(client_id);
         let mut outer_terminal = EmulatedOuterTerminal::from_graphics_support(graphics_support);
         let render_snapshot = outer_terminal.receive_frame(&server, &mut client, client_id);
@@ -5991,10 +6039,10 @@ fn apply_image_session_change(
             }),
         ),
         ImageSessionChange::EnterAlternateScreen => {
-            server.handle_pty_output(image_pane_id, b"\x1b[?1049h");
+            server.handle_pty_output(image_pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
         }
         ImageSessionChange::LeaveAlternateScreen => {
-            server.handle_pty_output(image_pane_id, b"\x1b[?1049l");
+            server.handle_pty_output(image_pane_id, b"\x1b[?1049l", SystemTime::UNIX_EPOCH);
         }
     }
 }
@@ -6102,8 +6150,8 @@ fn every_layout_change_leaves_the_outer_terminal_showing_exactly_the_frame_image
                     client_id,
                     cell_size: build_one_pixel_cell_size(),
                 });
-                server.handle_pty_output(image_pane_id, content_bytes);
-                server.handle_pty_output(image_pane_id, b"\r\nprompt$ ");
+                server.handle_pty_output(image_pane_id, content_bytes, SystemTime::UNIX_EPOCH);
+                server.handle_pty_output(image_pane_id, b"\r\nprompt$ ", SystemTime::UNIX_EPOCH);
                 let mut client = build_launch_client(client_id);
                 let mut outer_terminal =
                     EmulatedOuterTerminal::from_graphics_support(graphics_support);
@@ -6190,6 +6238,7 @@ fn a_peer_cursor_that_moves_under_an_image_leaves_the_outer_terminal_showing_the
         server.handle_pty_output(
             image_pane_id,
             &build_opaque_image_input(GraphicsProtocol::Kitty),
+            SystemTime::UNIX_EPOCH,
         );
         let mut client = build_launch_client(client_id);
         let mut outer_terminal = EmulatedOuterTerminal::from_graphics_support(graphics_support);
@@ -6253,7 +6302,11 @@ fn a_host_resize_of_one_client_redraws_its_images_and_writes_no_image_to_another
         None,
         None,
     );
-    server.handle_pty_output(pane_id, &build_opaque_image_input(GraphicsProtocol::Kitty));
+    server.handle_pty_output(
+        pane_id,
+        &build_opaque_image_input(GraphicsProtocol::Kitty),
+        SystemTime::UNIX_EPOCH,
+    );
     let mut sixel_client = build_launch_client(sixel_client_id);
     let mut kitty_client = build_launch_client(kitty_client_id);
     let mut sixel_outer_terminal =

@@ -187,7 +187,7 @@ fn get_retained_line_count(runtime: &Server, pane_id: PaneId) -> usize {
 #[test]
 fn scroll_up_moves_into_history_and_clamps_at_the_oldest_line() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n\n\n"); // five lines into scrollback
+    runtime.handle_pty_output(pane_id, b"\n\n\n\n\n", SystemTime::UNIX_EPOCH); // five lines into scrollback
     assert_eq!(get_retained_line_count(&runtime, pane_id), 5);
 
     runtime.scroll_up(client_id, pane_id, 3);
@@ -202,7 +202,7 @@ fn scroll_up_moves_into_history_and_clamps_at_the_oldest_line() {
 #[test]
 fn scroll_down_returns_toward_live_and_follows_again_at_the_bottom() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 5);
 
     runtime.scroll_down(client_id, pane_id, 2);
@@ -219,7 +219,7 @@ fn scrolling_to_the_bottom_in_visual_mode_keeps_the_view_held() {
     // Scrolling does not end visual mode: back at the newest line with a
     // highlight up, the view is still held, and the next output raises it.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     set_highlight(&mut runtime, client_id, pane_id);
     runtime.scroll_up(client_id, pane_id, 2);
 
@@ -227,7 +227,7 @@ fn scrolling_to_the_bottom_in_visual_mode_keeps_the_view_held() {
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert!(is_view_held(&runtime, client_id, pane_id)); // the highlight still holds it
 
-    runtime.handle_pty_output(pane_id, b"\n\n"); // output arrives under the highlight
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // output arrives under the highlight
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2); // the view rose with its text
     assert!(is_view_held(&runtime, client_id, pane_id));
 }
@@ -235,7 +235,7 @@ fn scrolling_to_the_bottom_in_visual_mode_keeps_the_view_held() {
 #[test]
 fn scroll_up_by_the_maximum_and_scroll_to_bottom_jump_to_the_ends() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n\n"); // four lines
+    runtime.handle_pty_output(pane_id, b"\n\n\n\n", SystemTime::UNIX_EPOCH); // four lines
 
     runtime.scroll_up(client_id, pane_id, usize::MAX);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 4);
@@ -249,11 +249,11 @@ fn scroll_up_by_the_maximum_and_scroll_to_bottom_jump_to_the_ends() {
 #[test]
 fn new_output_anchors_a_scrolled_back_view_to_the_same_history() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n"); // three lines
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH); // three lines
     runtime.scroll_up(client_id, pane_id, 2);
 
-    runtime.handle_pty_output(pane_id, b"\n\n"); // two more pushed
-                                                 // The offset rose by the two pushed lines, and the same history stays in view.
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // two more pushed
+                                                                         // The offset rose by the two pushed lines, and the same history stays in view.
     assert_eq!(get_retained_line_count(&runtime, pane_id), 5);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 4);
 }
@@ -261,11 +261,11 @@ fn new_output_anchors_a_scrolled_back_view_to_the_same_history() {
 #[test]
 fn new_output_leaves_a_live_following_view_following() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0); // never scrolled
     assert!(!is_view_held(&runtime, client_id, pane_id));
 
-    runtime.handle_pty_output(pane_id, b"\n\n"); // more output
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // more output
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0); // still following live
     assert!(!is_view_held(&runtime, client_id, pane_id));
 }
@@ -275,10 +275,10 @@ fn new_output_holds_a_highlighted_view_at_the_bottom_on_the_same_lines() {
     // A highlight at the newest line rises with its text as output pushes: two
     // pushed lines take the offset from 0 to 2.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     set_highlight(&mut runtime, client_id, pane_id);
 
-    runtime.handle_pty_output(pane_id, b"\n\n"); // two lines pushed under it
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // two lines pushed under it
     assert_eq!(get_retained_line_count(&runtime, pane_id), 5);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2); // rose by the two pushed lines
     assert!(is_view_held(&runtime, client_id, pane_id));
@@ -290,14 +290,14 @@ fn leaving_visual_mode_at_the_bottom_returns_the_view_to_live_output() {
     // the view leaves offset 0 and nothing holding it, so the view follows live
     // output again.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     set_highlight(&mut runtime, client_id, pane_id);
     assert!(is_view_held(&runtime, client_id, pane_id));
 
     clear_highlight(&mut runtime, client_id, pane_id); // a click elsewhere, or any non-copy key
     assert!(!is_view_held(&runtime, client_id, pane_id));
 
-    runtime.handle_pty_output(pane_id, b"\n\n"); // output arrives
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // output arrives
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0); // followed it down
     assert!(!is_view_held(&runtime, client_id, pane_id));
 }
@@ -307,9 +307,9 @@ fn leaving_visual_mode_leaves_a_view_that_output_pushed_up_held() {
     // Output pushes the view 2 lines up while the highlight is up. Dropping the
     // highlight leaves offset 2, which holds the view on its own.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     set_highlight(&mut runtime, client_id, pane_id);
-    runtime.handle_pty_output(pane_id, b"\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2);
 
     clear_highlight(&mut runtime, client_id, pane_id);
@@ -325,10 +325,10 @@ fn output_keeps_arriving_while_a_view_is_held() {
     // A held view holds the view, not the pane: the child's output still reaches
     // the engine and still fills the scrollback underneath.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 3);
 
-    runtime.handle_pty_output(pane_id, b"\n\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n\n", SystemTime::UNIX_EPOCH);
     assert_eq!(get_retained_line_count(&runtime, pane_id), 7); // history kept growing under the held view
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 7);
     assert!(is_view_held(&runtime, client_id, pane_id));
@@ -337,13 +337,13 @@ fn output_keeps_arriving_while_a_view_is_held() {
 #[test]
 fn erasing_the_scrollback_returns_a_scrolled_view_to_live_output() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 3);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 3);
 
     // ED 3 erases the scrollback: the offset reclamps to 0, and with no highlight
     // there is nothing else holding the view, so it follows live again.
-    runtime.handle_pty_output(pane_id, b"\x1b[3J");
+    runtime.handle_pty_output(pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
     assert_eq!(get_retained_line_count(&runtime, pane_id), 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert!(!is_view_held(&runtime, client_id, pane_id));
@@ -355,7 +355,7 @@ fn erasing_the_scrollback_leaves_a_live_screen_highlight_held() {
     // the live screen still names retained lines, so it is kept and keeps holding
     // the view, while the offset reclamps to 0.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     // Three lines pushed, so the live screen's top row is line 3.
     let selection = Selection {
         selection_kind: SelectionKind::Character,
@@ -373,7 +373,7 @@ fn erasing_the_scrollback_leaves_a_live_screen_highlight_held() {
         .unwrap()
         .set_selection(pane_id, selection);
 
-    runtime.handle_pty_output(pane_id, b"\x1b[3J");
+    runtime.handle_pty_output(pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
     assert_eq!(get_retained_line_count(&runtime, pane_id), 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert!(is_view_held(&runtime, client_id, pane_id));
@@ -386,16 +386,16 @@ fn evicting_a_highlights_lines_leaves_the_view_scrolled_up() {
     // offset stays: the view is held by the offset alone and stays
     // until the client scrolls down.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     set_highlight(&mut runtime, client_id, pane_id); // row 0, in history
 
     // First storm: the held view's offset rises with the output.
-    runtime.handle_pty_output(pane_id, &b"\n".repeat(5_000));
+    runtime.handle_pty_output(pane_id, &b"\n".repeat(5_000), SystemTime::UNIX_EPOCH);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 5_000);
     assert!(is_view_held(&runtime, client_id, pane_id));
 
     // Second storm pushes past the 10 000-line cap: row 0 is evicted.
-    runtime.handle_pty_output(pane_id, &b"\n".repeat(6_000));
+    runtime.handle_pty_output(pane_id, &b"\n".repeat(6_000), SystemTime::UNIX_EPOCH);
     assert_eq!(
         runtime
             .get_client_mut(client_id)
@@ -425,10 +425,10 @@ fn erasing_the_scrollback_drops_a_highlight_that_lived_only_there() {
     // ED 3 removes every line the helper's row-0 highlight names, so the
     // highlight is dropped and nothing holds the view.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     set_highlight(&mut runtime, client_id, pane_id);
 
-    runtime.handle_pty_output(pane_id, b"\x1b[3J");
+    runtime.handle_pty_output(pane_id, b"\x1b[3J", SystemTime::UNIX_EPOCH);
     assert_eq!(get_retained_line_count(&runtime, pane_id), 0);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 0);
     assert!(!is_view_held(&runtime, client_id, pane_id));
@@ -437,7 +437,7 @@ fn erasing_the_scrollback_drops_a_highlight_that_lived_only_there() {
 #[test]
 fn a_no_op_scroll_marks_no_view_change() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n"); // two retained lines
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // two retained lines
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
@@ -460,7 +460,7 @@ fn a_no_op_scroll_marks_no_view_change() {
 fn a_scroll_marks_the_view_of_the_scrolling_client_and_of_no_other() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
     let other_client_id = attach_second_client(&mut runtime, client_id, None);
-    runtime.handle_pty_output(pane_id, b"\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
     let _other_delivery_receiver =
@@ -482,7 +482,7 @@ fn a_scroll_marks_the_view_of_the_scrolling_client_and_of_no_other() {
 #[test]
 fn scrolling_a_pane_with_no_terminal_moves_nothing() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
 
@@ -504,7 +504,7 @@ fn scrolling_a_pane_with_no_terminal_moves_nothing() {
 #[test]
 fn scrolling_down_as_an_unknown_client_moves_nothing() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 2);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
@@ -522,7 +522,7 @@ fn scrolling_down_as_an_unknown_client_moves_nothing() {
 #[test]
 fn scrolling_by_zero_lines_leaves_a_scrolled_view_where_it_is() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 2);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
@@ -556,7 +556,7 @@ fn scroll_up_by_the_maximum_with_no_history_stays_at_the_newest_line() {
 #[test]
 fn scrolling_to_the_bottom_twice_gives_one_frame() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 2);
     let now = Instant::now();
     let _delivery_receiver = subscribe_and_push_first_frame(&mut runtime, client_id, now);
@@ -585,8 +585,8 @@ fn scrolling_to_the_bottom_twice_gives_one_frame() {
 fn scrolling_one_pane_leaves_the_clients_other_pane_at_the_newest_line() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
     let other_pane_id = add_pane_beside(&mut runtime, pane_id);
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
-    runtime.handle_pty_output(other_pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(other_pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
 
     runtime.scroll_up(client_id, pane_id, 2);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2);
@@ -595,7 +595,7 @@ fn scrolling_one_pane_leaves_the_clients_other_pane_at_the_newest_line() {
     assert!(!is_view_held(&runtime, client_id, other_pane_id));
 
     // Output in the other pane re-anchors only the views held in that pane.
-    runtime.handle_pty_output(other_pane_id, b"\n\n");
+    runtime.handle_pty_output(other_pane_id, b"\n\n", SystemTime::UNIX_EPOCH);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2);
     assert_eq!(get_scroll_offset(&runtime, client_id, other_pane_id), 0);
 }
@@ -604,8 +604,8 @@ fn scrolling_one_pane_leaves_the_clients_other_pane_at_the_newest_line() {
 fn scrolling_reaches_a_client_in_a_second_session() {
     let (mut runtime, first_pane_id, first_client_id) = build_runtime_with_pane();
     let (second_pane_id, second_client_id) = attach_test_session_with_pane(&mut runtime);
-    runtime.handle_pty_output(first_pane_id, b"\n\n\n");
-    runtime.handle_pty_output(second_pane_id, b"\n\n\n\n");
+    runtime.handle_pty_output(first_pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(second_pane_id, b"\n\n\n\n", SystemTime::UNIX_EPOCH);
 
     runtime.scroll_up(second_client_id, second_pane_id, 3);
     assert_eq!(
@@ -620,7 +620,7 @@ fn scrolling_reaches_a_client_in_a_second_session() {
     assert!(!is_view_held(&runtime, first_client_id, first_pane_id));
 
     // Output in the second session's pane re-anchors that session's client alone.
-    runtime.handle_pty_output(second_pane_id, b"\n\n");
+    runtime.handle_pty_output(second_pane_id, b"\n\n", SystemTime::UNIX_EPOCH);
     assert_eq!(
         get_scroll_offset(&runtime, second_client_id, second_pane_id),
         5
@@ -634,7 +634,7 @@ fn scrolling_reaches_a_client_in_a_second_session() {
 #[test]
 fn anchor_clamps_a_held_view_to_the_surviving_lines() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 2);
 
     // A heavy-truncation frame: five lines pushed, only two survive. The anchor
@@ -647,7 +647,7 @@ fn anchor_clamps_a_held_view_to_the_surviving_lines() {
 #[test]
 fn anchoring_with_no_pushed_lines_reclamps_a_held_view_to_the_shorter_history() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 3);
 
     // A frame that pushed nothing and left one line: the held view drops onto it.
@@ -659,7 +659,7 @@ fn anchoring_with_no_pushed_lines_reclamps_a_held_view_to_the_shorter_history() 
 #[test]
 fn anchoring_a_pane_in_no_session_changes_nothing() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 2);
 
     runtime.anchor_held_views(PaneId::new(), 4, 9); // a pane_id no session owns
@@ -670,13 +670,13 @@ fn anchoring_a_pane_in_no_session_changes_nothing() {
 #[test]
 fn an_erase_and_new_output_in_one_chunk_reanchors_exactly() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n"); // three retained lines
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH); // three retained lines
     runtime.scroll_up(client_id, pane_id, 2);
 
     // One chunk: ED 3 erases the history, then four lines push fresh history.
     // The monotonic push counter keeps the count exact across the erase, so the
     // held view rises by all four and clamps to the surviving lines.
-    runtime.handle_pty_output(pane_id, b"\x1b[3J\n\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\x1b[3J\n\n\n\n", SystemTime::UNIX_EPOCH);
     assert_eq!(get_retained_line_count(&runtime, pane_id), 4);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 4);
     assert!(is_view_held(&runtime, client_id, pane_id));
@@ -685,10 +685,10 @@ fn an_erase_and_new_output_in_one_chunk_reanchors_exactly() {
 #[test]
 fn output_that_touches_no_history_leaves_a_held_view_alone() {
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
     runtime.scroll_up(client_id, pane_id, 2);
 
-    runtime.handle_pty_output(pane_id, b"hi"); // prints on the live row, pushes nothing
+    runtime.handle_pty_output(pane_id, b"hi", SystemTime::UNIX_EPOCH); // prints on the live row, pushes nothing
     assert_eq!(get_retained_line_count(&runtime, pane_id), 3);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 2);
     assert!(is_view_held(&runtime, client_id, pane_id));
@@ -700,7 +700,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
     // bottom, one following. The view is per-client, so each is re-anchored alone
     // and none disturbs another.
     let (mut runtime, pane_id, first_client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
 
     let session_id = *runtime.list_sessions().keys().next().unwrap();
     let tab_id = runtime
@@ -730,7 +730,7 @@ fn output_re_anchors_each_client_on_a_shared_pane_on_its_own() {
     set_highlight(&mut runtime, second_client_id, pane_id);
     // `third_client_id` is left following live.
 
-    runtime.handle_pty_output(pane_id, b"\n\n"); // two lines pushed
+    runtime.handle_pty_output(pane_id, b"\n\n", SystemTime::UNIX_EPOCH); // two lines pushed
 
     assert_eq!(get_scroll_offset(&runtime, first_client_id, pane_id), 4); // rose by two, still held
     assert!(is_view_held(&runtime, first_client_id, pane_id));
@@ -763,8 +763,8 @@ fn scrolling_up_on_the_alternate_screen_moves_the_stored_offset_but_shows_live()
     // shows it there, though: the engine's effective offset is 0 on the alternate
     // screen.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n"); // three retained lines
-    runtime.handle_pty_output(pane_id, b"\x1b[?1049h"); // enter the alternate screen
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH); // three retained lines
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH); // enter the alternate screen
     assert_eq!(
         get_retained_line_count(&runtime, pane_id),
         3,
@@ -784,8 +784,8 @@ fn scroll_up_by_the_maximum_on_the_alternate_screen_clamps_to_the_retained_histo
     // On the alternate screen a `scroll_up` by the maximum still lands exactly
     // on the retained primary line count, and still shows nothing scrolled.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n\n"); // four retained lines
-    runtime.handle_pty_output(pane_id, b"\x1b[?1049h");
+    runtime.handle_pty_output(pane_id, b"\n\n\n\n", SystemTime::UNIX_EPOCH); // four retained lines
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH);
 
     runtime.scroll_up(client_id, pane_id, usize::MAX);
     assert_eq!(get_scroll_offset(&runtime, client_id, pane_id), 4); // clamped to the retained count
@@ -798,12 +798,12 @@ fn a_view_scrolled_while_on_the_alternate_screen_applies_once_it_exits() {
     // the alternate screen shows it: the primary view sits back by what was
     // scrolled while the full-screen program was up.
     let (mut runtime, pane_id, client_id) = build_runtime_with_pane();
-    runtime.handle_pty_output(pane_id, b"\n\n\n");
-    runtime.handle_pty_output(pane_id, b"\x1b[?1049h"); // enter
+    runtime.handle_pty_output(pane_id, b"\n\n\n", SystemTime::UNIX_EPOCH);
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049h", SystemTime::UNIX_EPOCH); // enter
     runtime.scroll_up(client_id, pane_id, 2);
     assert_eq!(compute_effective_offset(&runtime, pane_id, 2), 0); // hidden while on the alt screen
 
-    runtime.handle_pty_output(pane_id, b"\x1b[?1049l"); // leave the alternate screen
+    runtime.handle_pty_output(pane_id, b"\x1b[?1049l", SystemTime::UNIX_EPOCH); // leave the alternate screen
     assert_eq!(
         get_retained_line_count(&runtime, pane_id),
         3,

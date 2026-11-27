@@ -32,10 +32,10 @@ use koshi_core::log::{LogFormat, LogLevel};
 
 use crate::key::Leader;
 use crate::types::{
-    ClientConfig, ColorPalette, CopyConfig, KeybindingsConfig, LayoutDefaults, LoggingConfig,
-    ModeBindings, ModeName, MouseConfig, NotificationConfig, PaneClipboardWriteConfig, PaneConfig,
-    RgbColor, ScrollbackLimits, ScrollbackView, ServerConfig, TerminalConfig, ThemeConfig,
-    ToastPosition, UpdateConfig, WheelScroll,
+    AttentionConfig, ClientConfig, ColorPalette, CopyConfig, KeybindingsConfig, LayoutDefaults,
+    LoggingConfig, ModeBindings, ModeName, MouseConfig, NotificationConfig,
+    PaneClipboardWriteConfig, PaneConfig, RgbColor, ScrollbackLimits, ScrollbackView, ServerConfig,
+    TerminalConfig, ThemeConfig, ToastPosition, UpdateConfig, WheelScroll,
 };
 
 /// Folds `config_layers` onto `base_server_config` in order and returns the
@@ -216,6 +216,8 @@ pub struct PartialKoshiConfig {
     pub should_auto_close_session: Option<bool>,
     /// Pane clipboard write overrides.
     pub pane_clipboard_writes: Option<PartialPaneClipboardWriteConfig>,
+    /// Attention signal overrides.
+    pub attention: Option<PartialAttentionConfig>,
 }
 
 impl PartialKoshiConfig {
@@ -257,6 +259,9 @@ impl PartialKoshiConfig {
         if let Some(pane_clipboard_writes) = self.pane_clipboard_writes {
             pane_clipboard_writes
                 .apply_to_pane_clipboard_write_config(&mut server_config.pane_clipboard_writes);
+        }
+        if let Some(attention) = self.attention {
+            attention.apply_to_attention_config(&mut server_config.attention);
         }
     }
 
@@ -563,6 +568,34 @@ impl PartialPaneClipboardWriteConfig {
         merge_override_field(
             &mut pane_clipboard_write_config.maximum_copy_byte_count,
             self.maximum_copy_byte_count,
+        );
+    }
+}
+
+/// Attention signal overrides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PartialAttentionConfig {
+    /// Whether a standalone BEL raises attention.
+    pub should_raise_for_bell: Option<bool>,
+    /// Whether a desktop notification raises attention.
+    pub should_raise_for_notify: Option<bool>,
+    /// Whether a finished command raises attention.
+    pub should_raise_for_command_finished: Option<bool>,
+}
+
+impl PartialAttentionConfig {
+    fn apply_to_attention_config(self, attention_config: &mut AttentionConfig) {
+        merge_override_field(
+            &mut attention_config.should_raise_for_bell,
+            self.should_raise_for_bell,
+        );
+        merge_override_field(
+            &mut attention_config.should_raise_for_notify,
+            self.should_raise_for_notify,
+        );
+        merge_override_field(
+            &mut attention_config.should_raise_for_command_finished,
+            self.should_raise_for_command_finished,
         );
     }
 }

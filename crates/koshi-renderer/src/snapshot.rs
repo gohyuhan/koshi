@@ -37,7 +37,8 @@ use koshi_core::action::ActionReference;
 use koshi_core::client::ClientOrigin;
 use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::event::{
-    HeldCommandRejection, PanePlacementCommitted, RejectReason, SubscriberLagged,
+    HeldCommandRejection, PaneAttentionCleared, PaneAttentionRaised, PanePlacementCommitted,
+    RejectReason, SubscriberLagged,
 };
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
@@ -327,6 +328,7 @@ impl CommittedRegions {
 }
 
 /// One item on a subscriber's queue: a pane placement the session committed,
+/// a pane that began or stopped waiting for a person,
 /// the end of the session, the frame composed for the subscriber's client, a
 /// fresh frame that resyncs a subscriber whose queue overflowed, one post the
 /// session's notification queue took, the answers to one round of mouse
@@ -341,6 +343,10 @@ impl CommittedRegions {
 pub enum Delivery {
     /// A pane placement the session committed.
     PanePlacementCommitted(PanePlacementCommitted),
+    /// A pane began to wait for a person, or the reason it waits changed.
+    PaneAttentionRaised(PaneAttentionRaised),
+    /// A pane stopped waiting for a person.
+    PaneAttentionCleared(PaneAttentionCleared),
     /// The session is over. The client's writing thread writes it as the
     /// stream's last frame, then stops.
     Quit,

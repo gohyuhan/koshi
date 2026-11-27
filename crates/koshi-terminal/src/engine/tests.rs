@@ -18,7 +18,7 @@ use koshi_test_support::output_workloads::{
 
 use crate::graphics::{DecodedGraphics, DecodedImage, GraphicsProtocol, ImageAction, ImageDisplay};
 use crate::grid::state::{Cell, RowEnd};
-use crate::state::{ImagePlacementError, Screen, ShellIntegrationFact, TerminalState};
+use crate::state::{ImagePlacementError, ProgramFact, Screen, TerminalState};
 use crate::style::{Color, Style};
 
 use super::*;
@@ -146,35 +146,36 @@ fn split_osc133_is_completed_by_the_next_chunk() {
 }
 
 #[test]
-fn process_pty_output_with_shell_integration_returns_command_facts_in_order() {
+fn process_pty_output_at_returns_command_facts_with_their_exit_code_in_order() {
     let mut engine = build_test_terminal_engine();
 
-    let (terminal_replies, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D;137\x07");
-
-    assert_eq!(terminal_replies, b"");
     assert_eq!(
-        shell_integration_facts,
-        vec![
-            ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished,
-        ]
+        engine.process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D;137\x07", Instant::now()),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: vec![
+                ProgramFact::CommandStarted,
+                ProgramFact::CommandFinished {
+                    exit_code: Some(137)
+                },
+            ],
+        })
     );
 }
 
 #[test]
-fn bare_shell_integration_finish_returns_the_finish() {
+fn bare_shell_integration_finish_returns_a_finish_with_no_exit_code() {
     let mut engine = build_test_terminal_engine();
 
-    let (_, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D\x07");
-
     assert_eq!(
-        shell_integration_facts,
-        vec![
-            ShellIntegrationFact::CommandStarted,
-            ShellIntegrationFact::CommandFinished,
-        ]
+        engine.process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D\x07", Instant::now()),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: vec![
+                ProgramFact::CommandStarted,
+                ProgramFact::CommandFinished { exit_code: None },
+            ],
+        })
     );
 }
 
@@ -182,73 +183,93 @@ fn bare_shell_integration_finish_returns_the_finish() {
 fn unmatched_shell_integration_finish_returns_no_fact() {
     let mut engine = build_test_terminal_engine();
 
-    let (_, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(b"\x1b]133;D;1\x07");
-
-    assert_eq!(shell_integration_facts, Vec::<ShellIntegrationFact>::new());
-}
-
-#[test]
-fn process_pty_output_with_shell_integration_returns_replies_and_facts_from_one_chunk() {
-    let mut engine = build_test_terminal_engine();
-
-    let (terminal_replies, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(b"\x1b[5n\x1b]133;C\x07");
-
-    assert_eq!(terminal_replies, b"\x1b[0n");
     assert_eq!(
-        shell_integration_facts,
-        vec![ShellIntegrationFact::CommandStarted]
+        engine.process_pty_output_at(b"\x1b]133;D;1\x07", Instant::now()),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: Vec::new(),
+        })
     );
 }
 
 #[test]
-fn process_pty_output_drains_shell_facts_without_returning_them() {
+fn process_pty_output_at_returns_replies_and_facts_from_one_chunk() {
+    let mut engine = build_test_terminal_engine();
+
+    assert_eq!(
+        engine.process_pty_output_at(b"\x1b[5n\x1b]133;C\x07", Instant::now()),
+        Some(TerminalAdvance {
+            device_query_replies: b"\x1b[0n".to_vec(),
+            program_facts: vec![ProgramFact::CommandStarted],
+        })
+    );
+}
+
+#[test]
+fn process_pty_output_drops_the_program_facts_it_reads() {
     let mut engine = build_test_terminal_engine();
 
     assert_eq!(engine.process_pty_output(b"\x1b]133;C\x07"), b"");
 
-    let (terminal_replies, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(b"");
+    assert_eq!(
+        engine.process_pty_output_at(b"x", Instant::now()),
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: Vec::new(),
+        })
+    );
+}
 
-    assert_eq!(terminal_replies, b"");
-    assert_eq!(shell_integration_facts, Vec::<ShellIntegrationFact>::new());
+#[test]
+fn an_empty_chunk_reaches_no_parser_and_returns_none() {
+    let mut engine = build_test_terminal_engine();
+
+    assert_eq!(engine.process_pty_output_at(b"", Instant::now()), None);
 }
 
 #[test]
 fn split_shell_integration_command_fact_waits_for_the_terminator() {
     let mut engine = build_test_terminal_engine();
 
-    let (_, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(b"\x1b]133;C\x07\x1b]133;D;");
     assert_eq!(
-        shell_integration_facts,
-        vec![ShellIntegrationFact::CommandStarted]
+        engine
+            .process_pty_output_at(b"\x1b]133;C\x07\x1b]133;D;", Instant::now())
+            .map(|terminal_advance| terminal_advance.program_facts),
+        Some(vec![ProgramFact::CommandStarted])
     );
-
-    let (_, shell_integration_facts) = engine.process_pty_output_with_shell_integration(b"137\x07");
     assert_eq!(
-        shell_integration_facts,
-        vec![ShellIntegrationFact::CommandFinished]
+        engine
+            .process_pty_output_at(b"137\x07", Instant::now())
+            .map(|terminal_advance| terminal_advance.program_facts),
+        Some(vec![ProgramFact::CommandFinished {
+            exit_code: Some(137)
+        }])
     );
 }
 
 #[test]
-fn pending_shell_facts_survive_a_state_round_trip() {
+fn a_state_read_back_holds_no_program_fact_and_no_device_reply() {
     let mut terminal_state = TerminalState::from_pty_size(PtySize {
         column_count: 8,
         row_count: 3,
     });
-    process_terminal_bytes(&mut terminal_state, b"\x1b]133;C\x07");
+    process_terminal_bytes(&mut terminal_state, b"\x1b]133;C\x07\x1b[5n");
 
     let serialized_terminal_state =
-        serde_json::to_string(&terminal_state).expect("state serializes");
+        serde_json::to_value(&terminal_state).expect("state serializes");
     let mut restored_terminal_state: TerminalState =
-        serde_json::from_str(&serialized_terminal_state).expect("state deserializes");
+        serde_json::from_value(serialized_terminal_state.clone()).expect("state deserializes");
 
+    assert_eq!(serialized_terminal_state.get("program_facts"), None);
     assert_eq!(
-        restored_terminal_state.take_shell_integration_facts(),
-        vec![ShellIntegrationFact::CommandStarted]
+        serialized_terminal_state.get("shell_integration_facts"),
+        None
+    );
+    assert_eq!(serialized_terminal_state.get("device_query_replies"), None);
+    assert_eq!(restored_terminal_state.take_program_facts(), Vec::new());
+    assert_eq!(
+        restored_terminal_state.take_device_query_replies(),
+        Vec::<u8>::new()
     );
 }
 
@@ -657,12 +678,11 @@ fn c1_osc_shell_marker_is_not_printed() {
     terminal_input_bytes.extend_from_slice(b"133;C");
     terminal_input_bytes.push(0x07);
 
-    let (_, shell_integration_facts) =
-        engine.process_pty_output_with_shell_integration(&terminal_input_bytes);
+    let terminal_advance = engine.process_pty_output_at(&terminal_input_bytes, Instant::now());
 
     assert_eq!(
-        shell_integration_facts,
-        vec![ShellIntegrationFact::CommandStarted]
+        terminal_advance.map(|terminal_advance| terminal_advance.program_facts),
+        Some(vec![ProgramFact::CommandStarted])
     );
     assert_eq!(
         engine.get_terminal_state().get_active_grid(),
@@ -773,10 +793,7 @@ fn synchronized_graphics_commit_only_after_the_complete_end_sequence() {
         for (synchronized_byte_index, synchronized_input_byte) in
             synchronized_input_bytes.iter().enumerate()
         {
-            let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-                &[*synchronized_input_byte],
-                test_timestamp,
-            );
+            let _ = engine.process_pty_output_at(&[*synchronized_input_byte], test_timestamp);
             if synchronized_byte_index + 1 < synchronized_input_bytes.len() {
                 assert_eq!(
                     engine.get_terminal_state(),
@@ -827,25 +844,12 @@ fn synchronized_control_lookalikes_inside_strings_do_not_release() {
 
     for control_lookalike_sequence in control_lookalike_sequences {
         let mut engine = build_test_terminal_engine();
-        let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-            BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-            test_timestamp,
-        );
+        let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
         let mut synchronized_input_bytes = control_lookalike_sequence.to_vec();
         synchronized_input_bytes.push(b'X');
-        let (terminal_replies, shell_integration_facts, has_advanced_terminal_state) = engine
-            .process_pty_output_with_shell_integration_at(
-                &synchronized_input_bytes,
-                test_timestamp,
-            );
-
         assert_eq!(
-            (
-                terminal_replies,
-                shell_integration_facts,
-                has_advanced_terminal_state
-            ),
-            (vec![], vec![], false)
+            engine.process_pty_output_at(&synchronized_input_bytes, test_timestamp),
+            None
         );
         assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
         assert_eq!(
@@ -853,11 +857,9 @@ fn synchronized_control_lookalikes_inside_strings_do_not_release() {
             Some(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
         );
 
-        let (_, _, has_advanced_terminal_state) = engine
-            .process_pty_output_with_shell_integration_at(
-                END_SYNCHRONIZED_OUTPUT_BYTES,
-                test_timestamp,
-            );
+        let has_advanced_terminal_state = engine
+            .process_pty_output_at(END_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp)
+            .is_some();
         assert!(has_advanced_terminal_state);
         assert!(engine
             .get_synchronized_output_transport(test_timestamp)
@@ -877,27 +879,27 @@ fn c1_synchronized_controls_hold_and_release_at_every_byte_split() {
             let _ = engine.process_pty_output(b"old");
             let committed_terminal_state = engine.get_terminal_state().clone();
 
-            let _ = engine.process_pty_output_with_shell_integration_at(
+            let _ = engine.process_pty_output_at(
                 &C1_SYNCHRONIZED_OUTPUT_BEGIN_BYTES[..begin_byte_count],
                 test_timestamp,
             );
-            let _ = engine.process_pty_output_with_shell_integration_at(
+            let _ = engine.process_pty_output_at(
                 &C1_SYNCHRONIZED_OUTPUT_BEGIN_BYTES[begin_byte_count..],
                 test_timestamp,
             );
-            let _ = engine
-                .process_pty_output_with_shell_integration_at(b"\x1b[2J\x1b[HN", test_timestamp);
+            let _ = engine.process_pty_output_at(b"\x1b[2J\x1b[HN", test_timestamp);
             assert_eq!(
                 engine.get_terminal_state(),
                 &committed_terminal_state,
                 "begin_byte_count={begin_byte_count}, end_byte_count={end_byte_count}"
             );
 
-            let (_, _, has_advanced_before_end) = engine
-                .process_pty_output_with_shell_integration_at(
+            let has_advanced_before_end = engine
+                .process_pty_output_at(
                     &C1_SYNCHRONIZED_OUTPUT_END_BYTES[..end_byte_count],
                     test_timestamp,
-                );
+                )
+                .is_some();
             if end_byte_count < C1_SYNCHRONIZED_OUTPUT_END_BYTES.len() {
                 assert_eq!(
                     engine.get_terminal_state(),
@@ -905,11 +907,12 @@ fn c1_synchronized_controls_hold_and_release_at_every_byte_split() {
                     "begin_byte_count={begin_byte_count}, end_byte_count={end_byte_count}"
                 );
             }
-            let (_, _, has_advanced_after_end) = engine
-                .process_pty_output_with_shell_integration_at(
+            let has_advanced_after_end = engine
+                .process_pty_output_at(
                     &C1_SYNCHRONIZED_OUTPUT_END_BYTES[end_byte_count..],
                     test_timestamp,
-                );
+                )
+                .is_some();
 
             assert!(
                 has_advanced_before_end || has_advanced_after_end,
@@ -977,8 +980,9 @@ fn c1_synchronized_control_state_survives_process_swaps() {
         restored_engine.get_terminal_state(),
         &committed_terminal_state
     );
-    let (_, _, has_advanced_terminal_state) =
-        restored_engine.process_pty_output_with_shell_integration_at(b"26l", test_timestamp);
+    let has_advanced_terminal_state = restored_engine
+        .process_pty_output_at(b"26l", test_timestamp)
+        .is_some();
 
     assert!(has_advanced_terminal_state);
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'N');
@@ -998,8 +1002,9 @@ fn c1_csi_bytes_inside_utf8_and_strings_are_not_synchronized_controls() {
     terminal_input_bytes.extend_from_slice(b"\x1bXdata\x9b?2026h\x9b?2026l\x1b\\");
     terminal_input_bytes.extend_from_slice(b"\x1b^data\x9b?2026h\x9b?2026l\x1b\\X");
 
-    let (_, _, has_advanced_terminal_state) =
-        engine.process_pty_output_with_shell_integration_at(&terminal_input_bytes, test_timestamp);
+    let has_advanced_terminal_state = engine
+        .process_pty_output_at(&terminal_input_bytes, test_timestamp)
+        .is_some();
 
     assert!(has_advanced_terminal_state);
     assert_eq!(
@@ -1016,17 +1021,15 @@ fn c1_csi_bytes_inside_utf8_and_strings_are_not_synchronized_controls() {
 fn end_then_begin_in_one_chunk_commits_one_group_and_keeps_the_next() {
     let test_timestamp = Instant::now();
     let mut engine = build_test_terminal_engine();
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
     let mut synchronized_input_bytes = b"A".to_vec();
     synchronized_input_bytes.extend_from_slice(END_SYNCHRONIZED_OUTPUT_BYTES);
     synchronized_input_bytes.extend_from_slice(BEGIN_SYNCHRONIZED_OUTPUT_BYTES);
     synchronized_input_bytes.push(b'B');
 
-    let (_, _, has_advanced_terminal_state) = engine
-        .process_pty_output_with_shell_integration_at(&synchronized_input_bytes, test_timestamp);
+    let has_advanced_terminal_state = engine
+        .process_pty_output_at(&synchronized_input_bytes, test_timestamp)
+        .is_some();
 
     assert!(has_advanced_terminal_state);
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'A');
@@ -1036,10 +1039,9 @@ fn end_then_begin_in_one_chunk_commits_one_group_and_keeps_the_next() {
         Some(SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
     );
 
-    let (_, _, has_advanced_terminal_state) = engine.process_pty_output_with_shell_integration_at(
-        END_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
+    let has_advanced_terminal_state = engine
+        .process_pty_output_at(END_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp)
+        .is_some();
     assert!(has_advanced_terminal_state);
     assert_eq!(get_terminal_cell_character(&engine, 0, 1), 'B');
 }
@@ -1048,18 +1050,13 @@ fn end_then_begin_in_one_chunk_commits_one_group_and_keeps_the_next() {
 fn overdue_synchronized_bytes_are_released_before_new_input() {
     let test_timestamp = Instant::now();
     let mut engine = build_test_terminal_engine();
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
-    let (_, _, has_advanced_terminal_state) =
-        engine.process_pty_output_with_shell_integration_at(b"A", test_timestamp);
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
+    let has_advanced_terminal_state = engine.process_pty_output_at(b"A", test_timestamp).is_some();
     assert!(!has_advanced_terminal_state);
 
-    let (_, _, has_advanced_terminal_state) = engine.process_pty_output_with_shell_integration_at(
-        b"B",
-        test_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION,
-    );
+    let has_advanced_terminal_state = engine
+        .process_pty_output_at(b"B", test_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
+        .is_some();
 
     assert!(has_advanced_terminal_state);
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'A');
@@ -1073,15 +1070,14 @@ fn overdue_synchronized_bytes_are_released_before_new_input() {
 fn synchronized_output_releases_when_the_byte_bound_is_reached() {
     let test_timestamp = Instant::now();
     let mut engine = build_test_terminal_engine();
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
 
-    let (_, _, has_advanced_terminal_state) = engine.process_pty_output_with_shell_integration_at(
-        &vec![b'x'; MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT],
-        test_timestamp,
-    );
+    let has_advanced_terminal_state = engine
+        .process_pty_output_at(
+            &vec![b'x'; MAX_SYNCHRONIZED_OUTPUT_BYTE_COUNT],
+            test_timestamp,
+        )
+        .is_some();
 
     assert!(has_advanced_terminal_state);
     assert!(engine
@@ -1095,14 +1091,12 @@ fn synchronized_output_deadline_releases_replies_shell_facts_and_graphics() {
     let test_timestamp = Instant::now();
     let mut engine = build_test_terminal_engine();
     engine.set_cell_size(PixelCellSize::from_pixel_dimensions(1, 6).expect("nonzero cell size"));
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
     let mut synchronized_input_bytes = b"Z\x1b[5n\x1b]133;C\x07".to_vec();
     synchronized_input_bytes.extend(build_visible_graphics_control(GraphicsProtocol::Kitty));
-    let (_, _, has_advanced_terminal_state) = engine
-        .process_pty_output_with_shell_integration_at(&synchronized_input_bytes, test_timestamp);
+    let has_advanced_terminal_state = engine
+        .process_pty_output_at(&synchronized_input_bytes, test_timestamp)
+        .is_some();
     assert!(!has_advanced_terminal_state);
 
     assert_eq!(
@@ -1110,14 +1104,12 @@ fn synchronized_output_deadline_releases_replies_shell_facts_and_graphics() {
         None
     );
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), ' ');
-    let (terminal_replies, shell_integration_facts) = engine
-        .expire_synchronized_output(test_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION)
-        .expect("the deadline releases the update");
-
-    assert_eq!(terminal_replies, b"\x1b[0n");
     assert_eq!(
-        shell_integration_facts,
-        [ShellIntegrationFact::CommandStarted]
+        engine.expire_synchronized_output(test_timestamp + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION),
+        Some(TerminalAdvance {
+            device_query_replies: b"\x1b[0n".to_vec(),
+            program_facts: vec![ProgramFact::CommandStarted],
+        })
     );
     assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Z');
     assert_eq!(engine.get_terminal_state().list_image_placements().len(), 1);
@@ -1125,39 +1117,12 @@ fn synchronized_output_deadline_releases_replies_shell_facts_and_graphics() {
 }
 
 #[test]
-fn finish_releases_synchronized_text_and_reports_an_inner_truncated_image() {
-    let test_timestamp = Instant::now();
-    let mut engine = build_test_terminal_engine();
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
-    let (_, _, has_advanced_terminal_state) = engine
-        .process_pty_output_with_shell_integration_at(b"Q\x1b_Gf=32,s=1,v=1;AAAA", test_timestamp);
-    assert!(!has_advanced_terminal_state);
-
-    assert_eq!(
-        engine.finish_graphics_stream(),
-        [Err(GraphicsError::Truncated {
-            protocol: GraphicsProtocol::Kitty,
-        })]
-    );
-    assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'Q');
-    assert!(engine
-        .get_synchronized_output_transport(test_timestamp)
-        .is_none());
-}
-
-#[test]
 fn synchronized_output_deadline_keeps_elapsed_process_swap_time() {
     let test_timestamp = Instant::now();
     let wall_clock_timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
     let mut engine = build_test_terminal_engine();
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
-    let (_, _, _) = engine.process_pty_output_with_shell_integration_at(b"R", test_timestamp);
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
+    let _ = engine.process_pty_output_at(b"R", test_timestamp);
     let synchronized_output_transport = engine
         .get_synchronized_output_transport_at(
             test_timestamp + Duration::from_millis(40),
@@ -1192,7 +1157,10 @@ fn synchronized_output_deadline_keeps_elapsed_process_swap_time() {
     );
     assert_eq!(
         restored_engine.expire_synchronized_output(restored_timestamp + Duration::from_millis(10)),
-        Some((Vec::new(), Vec::new()))
+        Some(TerminalAdvance {
+            device_query_replies: Vec::new(),
+            program_facts: Vec::new(),
+        })
     );
     assert_eq!(get_terminal_cell_character(&restored_engine, 0, 0), 'R');
 }
@@ -1202,10 +1170,7 @@ fn synchronized_output_transport_rejects_impossible_scanner_state() {
     let test_timestamp = Instant::now();
     let wall_clock_timestamp = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
     let mut engine = build_test_terminal_engine();
-    let _ = engine.process_pty_output_with_shell_integration_at(
-        BEGIN_SYNCHRONIZED_OUTPUT_BYTES,
-        test_timestamp,
-    );
+    let _ = engine.process_pty_output_at(BEGIN_SYNCHRONIZED_OUTPUT_BYTES, test_timestamp);
     let mut serialized_transport = serde_json::to_value(
         engine
             .get_synchronized_output_transport_at(test_timestamp, wall_clock_timestamp)
@@ -1279,8 +1244,9 @@ fn overlong_open_string_keeps_its_scanner_state_across_process_swap() {
     );
 
     let _ = uninterrupted_engine.process_pty_output(string_suffix_bytes);
-    let (_, _, has_advanced_terminal_state) = restored_engine
-        .process_pty_output_with_shell_integration_at(string_suffix_bytes, test_timestamp);
+    let has_advanced_terminal_state = restored_engine
+        .process_pty_output_at(string_suffix_bytes, test_timestamp)
+        .is_some();
 
     assert!(has_advanced_terminal_state);
     assert_eq!(
@@ -1383,11 +1349,9 @@ fn malformed_synchronized_modes_remain_ordinary_terminal_input() {
     ] {
         let test_timestamp = Instant::now();
         let mut engine = build_test_terminal_engine();
-        let (_, _, has_advanced_terminal_state) = engine
-            .process_pty_output_with_shell_integration_at(
-                malformed_terminal_input_bytes,
-                test_timestamp,
-            );
+        let has_advanced_terminal_state = engine
+            .process_pty_output_at(malformed_terminal_input_bytes, test_timestamp)
+            .is_some();
 
         assert!(has_advanced_terminal_state);
         assert_eq!(get_terminal_cell_character(&engine, 0, 0), 'X');
@@ -3453,4 +3417,219 @@ fn every_control_sequence_final_byte_lets_a_following_eight_bit_csi_apply() {
             "final byte {final_byte:#04x}"
         );
     }
+}
+
+/// The program facts `chunk` gave `engine`, empty when no byte reached the
+/// parsers.
+fn take_chunk_program_facts(engine: &mut TerminalEngine, chunk: &[u8]) -> Vec<ProgramFact> {
+    match engine.process_pty_output_at(chunk, Instant::now()) {
+        Some(terminal_advance) => terminal_advance.program_facts,
+        None => Vec::new(),
+    }
+}
+
+/// Each attention sequence, byte-exact, with the facts it gives a fresh engine.
+fn build_attention_sequence_cases() -> Vec<(Vec<u8>, Vec<ProgramFact>)> {
+    let hello_notification = ProgramFact::Notify {
+        title: None,
+        body: "hello".to_string(),
+        notification_id: None,
+    };
+    let build_notification = ProgramFact::Notify {
+        title: Some("Build".to_string()),
+        body: "done".to_string(),
+        notification_id: None,
+    };
+    let kitty_notification = ProgramFact::Notify {
+        title: Some("Hi".to_string()),
+        body: String::new(),
+        notification_id: Some("1".to_string()),
+    };
+    let kitty_withdrawal = ProgramFact::NotificationWithdrawn {
+        notification_id: "1".to_string(),
+    };
+    let command_facts = vec![
+        ProgramFact::CommandStarted,
+        ProgramFact::CommandFinished {
+            exit_code: Some(101),
+        },
+    ];
+    vec![
+        (b"\x07".to_vec(), vec![ProgramFact::Bell]),
+        (
+            b"\x1b]9;hello\x1b\\".to_vec(),
+            vec![hello_notification.clone()],
+        ),
+        (b"\x1b]9;hello\x07".to_vec(), vec![hello_notification]),
+        (
+            b"\x1b]777;notify;Build;done\x1b\\".to_vec(),
+            vec![build_notification.clone()],
+        ),
+        (
+            b"\x1b]777;notify;Build;done\x07".to_vec(),
+            vec![build_notification],
+        ),
+        (
+            b"\x1b]99;i=1;Hi\x1b\\".to_vec(),
+            vec![kitty_notification.clone()],
+        ),
+        (b"\x1b]99;i=1;Hi\x07".to_vec(), vec![kitty_notification]),
+        (
+            b"\x1b]99;i=1:p=close;\x1b\\".to_vec(),
+            vec![kitty_withdrawal.clone()],
+        ),
+        (b"\x1b]99;i=1:p=close;\x07".to_vec(), vec![kitty_withdrawal]),
+        (
+            b"\x1b]133;C\x1b\\\x1b]133;D;101\x1b\\".to_vec(),
+            command_facts.clone(),
+        ),
+        (b"\x1b]133;C\x07\x1b]133;D;101\x07".to_vec(), command_facts),
+    ]
+}
+
+#[test]
+fn each_attention_sequence_gives_its_facts_with_either_terminator() {
+    for (sequence_bytes, expected_program_facts) in build_attention_sequence_cases() {
+        let mut engine = build_test_terminal_engine();
+        assert_eq!(
+            take_chunk_program_facts(&mut engine, &sequence_bytes),
+            expected_program_facts,
+            "sequence {sequence_bytes:?}"
+        );
+    }
+}
+
+#[test]
+fn an_attention_sequence_split_at_any_byte_gives_its_facts_once() {
+    for (sequence_bytes, expected_program_facts) in build_attention_sequence_cases() {
+        for split_byte_index in 1..sequence_bytes.len() {
+            let mut engine = build_test_terminal_engine();
+            let mut program_facts =
+                take_chunk_program_facts(&mut engine, &sequence_bytes[..split_byte_index]);
+            program_facts.extend(take_chunk_program_facts(
+                &mut engine,
+                &sequence_bytes[split_byte_index..],
+            ));
+            assert_eq!(
+                program_facts, expected_program_facts,
+                "sequence {sequence_bytes:?} split at {split_byte_index}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_bel_that_ends_or_sits_inside_a_string_is_not_a_bell() {
+    let mut engine = build_test_terminal_engine();
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]0;title\x07"),
+        Vec::new()
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]7;file://host/home/user\x07"),
+        Vec::new()
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1bPzz\x07zz\x1b\\"),
+        Vec::new()
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x9d9;hi\x07"),
+        vec![ProgramFact::Notify {
+            title: None,
+            body: "hi".to_string(),
+            notification_id: None,
+        }]
+    );
+}
+
+#[test]
+fn bells_in_one_read_fold_into_one_bell_until_another_fact() {
+    let mut engine = build_test_terminal_engine();
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, &[0x07; 500]),
+        vec![ProgramFact::Bell]
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x07\x1b]9;x\x07\x07\x07"),
+        vec![
+            ProgramFact::Bell,
+            ProgramFact::Notify {
+                title: None,
+                body: "x".to_string(),
+                notification_id: None,
+            },
+            ProgramFact::Bell,
+        ]
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x07"),
+        vec![ProgramFact::Bell]
+    );
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x07"),
+        vec![ProgramFact::Bell]
+    );
+}
+
+#[test]
+fn a_long_osc777_body_keeps_its_first_512_bytes() {
+    let mut engine = build_test_terminal_engine();
+    let mut sequence_bytes = "\x1b]777;notify;Build\u{202E}gpj;".as_bytes().to_vec();
+    sequence_bytes.extend(vec![b'b'; 5000]);
+    sequence_bytes.push(0x07);
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, &sequence_bytes),
+        vec![ProgramFact::Notify {
+            title: Some("Buildgpj".to_string()),
+            body: "b".repeat(512),
+            notification_id: None,
+        }]
+    );
+}
+
+#[test]
+fn an_osc9_body_keeps_the_fifteen_parameters_the_parser_splits() {
+    let mut engine = build_test_terminal_engine();
+    let parameter_letters: Vec<String> = ('a'..='t').map(String::from).collect();
+    let sequence_bytes = format!("\x1b]9;{}\x07", parameter_letters.join(";"));
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, sequence_bytes.as_bytes()),
+        vec![ProgramFact::Notify {
+            title: None,
+            body: parameter_letters[..15].join(";"),
+            notification_id: None,
+        }]
+    );
+}
+
+#[test]
+fn an_open_osc99_notification_does_not_ride_a_state_round_trip() {
+    let mut engine = build_test_terminal_engine();
+    assert_eq!(
+        take_chunk_program_facts(&mut engine, b"\x1b]99;i=1:d=0;Old\x07"),
+        Vec::new()
+    );
+    let terminal_state_json =
+        serde_json::to_value(engine.get_terminal_state()).expect("state serializes");
+    let restored_terminal_state: TerminalState =
+        serde_json::from_value(terminal_state_json).expect("state deserializes");
+    let mut restored_engine = TerminalEngine::from_carried_state(
+        restored_terminal_state,
+        &[],
+        &[],
+        GraphicsTransportState::default(),
+        None,
+        Instant::now(),
+        SystemTime::UNIX_EPOCH,
+    );
+
+    assert_eq!(
+        take_chunk_program_facts(&mut restored_engine, b"\x1b]99;i=1:p=body;New\x07"),
+        vec![ProgramFact::Notify {
+            title: None,
+            body: "New".to_string(),
+            notification_id: Some("1".to_string()),
+        }]
+    );
 }

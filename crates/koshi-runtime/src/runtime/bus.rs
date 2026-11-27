@@ -365,9 +365,11 @@ impl EventBus {
     /// the caller can drop whatever it keeps alongside the subscription. The
     /// returned list is empty on every publish that removes nobody.
     ///
-    /// Only [`Event::PanePlacementCommitted`], [`Event::Quit`] and
+    /// Only [`Event::PanePlacementCommitted`], [`Event::PaneAttentionRaised`],
+    /// [`Event::PaneAttentionCleared`], [`Event::Quit`] and
     /// [`Event::Restarting`] reach a subscriber, as
-    /// [`Delivery::PanePlacementCommitted`], [`Delivery::Quit`] and
+    /// [`Delivery::PanePlacementCommitted`], [`Delivery::PaneAttentionRaised`],
+    /// [`Delivery::PaneAttentionCleared`], [`Delivery::Quit`] and
     /// [`Delivery::Restarting`]. Every other event reaches no subscriber,
     /// counts as missed by no desynced subscriber, and returns an empty list.
     /// The match names every [`Event`] variant and takes no wildcard arm.
@@ -379,6 +381,14 @@ impl EventBus {
         let (delivery, session_ending) = match event {
             Event::PanePlacementCommitted(pane_placement_committed) => (
                 Delivery::PanePlacementCommitted(pane_placement_committed.clone()),
+                None,
+            ),
+            Event::PaneAttentionRaised(pane_attention_raised) => (
+                Delivery::PaneAttentionRaised(pane_attention_raised.clone()),
+                None,
+            ),
+            Event::PaneAttentionCleared(pane_attention_cleared) => (
+                Delivery::PaneAttentionCleared(*pane_attention_cleared),
                 None,
             ),
             Event::Quit(_) => (Delivery::Quit, Some(SessionEnding::Quit)),
@@ -1096,7 +1106,11 @@ fn hold_command_rejection(
 /// A [`Delivery::PanePlacementCommitted`] becomes
 /// [`SessionEvent::PanePlacementCommitted`] carrying the same command id,
 /// source panes, source and destination tabs, and placement target. A
-/// [`Delivery::Quit`] becomes [`SessionEvent::Quit`], and a
+/// [`Delivery::PaneAttentionRaised`] becomes
+/// [`SessionEvent::PaneAttentionRaised`] carrying the same pane, tab, reason
+/// and raise time, and a [`Delivery::PaneAttentionCleared`] becomes
+/// [`SessionEvent::PaneAttentionCleared`] carrying the same pane, tab and
+/// client. A [`Delivery::Quit`] becomes [`SessionEvent::Quit`], and a
 /// [`Delivery::Restarting`] becomes [`SessionEvent::Restarting`].
 ///
 /// The match names every [`Delivery`] variant and takes no wildcard arm.
@@ -1114,6 +1128,21 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 source_tab_id: pane_placement_committed.source_tab_id,
                 destination_tab_id: pane_placement_committed.destination_tab_id,
                 placement_target: pane_placement_committed.placement_target.clone(),
+            })
+        }
+        Delivery::PaneAttentionRaised(pane_attention_raised) => {
+            Some(SessionEvent::PaneAttentionRaised {
+                pane_id: pane_attention_raised.pane_id,
+                tab_id: pane_attention_raised.tab_id,
+                reason: pane_attention_raised.reason.clone(),
+                raised_at: pane_attention_raised.raised_at,
+            })
+        }
+        Delivery::PaneAttentionCleared(pane_attention_cleared) => {
+            Some(SessionEvent::PaneAttentionCleared {
+                pane_id: pane_attention_cleared.pane_id,
+                tab_id: pane_attention_cleared.tab_id,
+                client_id: pane_attention_cleared.client_id,
             })
         }
         Delivery::Quit => Some(SessionEvent::Quit),

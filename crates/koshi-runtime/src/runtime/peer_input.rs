@@ -244,7 +244,9 @@ impl Server {
     /// of each subscription that views another client of the same session
     /// ([`PeerInputView::record_input`]). A subscription whose record makes a
     /// mark has its view marked changed: its next frame names `pane_id` for
-    /// `client_id`. A client no session holds records nothing.
+    /// `client_id`. Then end `pane_id`'s wait for a person, naming
+    /// `client_id` ([`Server::clear_attended_pane_attention`]). A client no
+    /// session holds records nothing and clears nothing.
     ///
     /// Five paths call it, each once the pane took the bytes: keystrokes
     /// ([`Server::handle_key_inputs`]), pasted text
@@ -281,6 +283,7 @@ impl Server {
                 frame_subscription.frame_pace.mark_view_changed();
             }
         }
+        self.clear_attended_pane_attention(client_id, pane_id);
     }
 
     /// Count the queued marks of subscription `subscription_index` as taken at

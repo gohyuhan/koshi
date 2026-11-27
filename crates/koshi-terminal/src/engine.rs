@@ -36,7 +36,7 @@ use crate::graphics::{
     GraphicsProtocol, ImageRecord, MAX_IMAGE_BYTE_COUNT,
 };
 use crate::scrollback::ScrollbackLimit;
-use crate::state::{ShellIntegrationFact, TerminalState};
+use crate::state::{ProgramFact, TerminalState};
 pub use clipboard_copy::ClipboardCopy;
 use clipboard_copy::ClipboardCopyParser;
 
@@ -811,6 +811,18 @@ impl C1InputNormalizer {
 /// past this and dispatches what it holds when the sequence ends.
 pub(crate) const OSC_BUFFER_BYTE_CAPACITY: usize = 8 * 1024;
 
+/// What one advance of a pane's parsers produced for the engine's caller.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalAdvance {
+    /// The answers to the device queries (DA, DSR, DECRQM) the advance read,
+    /// in order. The caller writes them back into the pane's PTY. Empty when
+    /// the advance read no query.
+    pub device_query_replies: Vec<u8>,
+    /// The program facts the advance read, in the order the program wrote
+    /// them. Empty when it read none.
+    pub program_facts: Vec<ProgramFact>,
+}
+
 /// One pane's emulation engine: the byte decoder and the screen model it
 /// feeds.
 pub struct TerminalEngine {
@@ -914,40 +926,31 @@ impl TerminalEngine {
     /// Chunks may split an escape sequence or a UTF-8 code point at any byte; the parser resumes
     /// the partial decode on the next call, and
     /// [`get_undecoded_terminal_bytes`](Self::get_undecoded_terminal_bytes) is set to the canonical
-    /// bytes that put another parser where this one now stands. This method drains
-    /// shell-integration facts without returning them; use
-    /// [`Self::process_pty_output_with_shell_integration`] when the caller handles those facts.
+    /// bytes that put another parser where this one now stands. This method drops the
+    /// program facts the chunk produced; use [`Self::process_pty_output_at`] when the caller
+    /// handles those facts.
     #[must_use = "undelivered replies hang the querying app"]
     pub fn process_pty_output(&mut self, pty_output_bytes: &[u8]) -> Vec<u8> {
-        let (reply_bytes, _) = self.process_pty_output_with_shell_integration(pty_output_bytes);
-        reply_bytes
+        match self.process_pty_output_at(pty_output_bytes, Instant::now()) {
+            Some(terminal_advance) => terminal_advance.device_query_replies,
+            None => Vec::new(),
+        }
     }
 
-    /// Feed one chunk through the parser and return device replies plus the
-    /// shell-integration facts that the chunk produced. A `C` marker when the
-    /// shell is not already running a command returns
-    /// [`ShellIntegrationFact::CommandStarted`], and a matched `D` marker
-    /// returns [`ShellIntegrationFact::CommandFinished`].
-    /// The facts contain no command text. `ESC ] 133 ; C` followed by
-    /// `ESC ] 133 ; D ; 137` returns both facts in that order.
-    #[must_use = "undelivered replies or shell facts are lost"]
-    pub fn process_pty_output_with_shell_integration(
-        &mut self,
-        pty_output_bytes: &[u8],
-    ) -> (Vec<u8>, Vec<ShellIntegrationFact>) {
-        let (reply_bytes, shell_integration_facts, _) =
-            self.process_pty_output_with_shell_integration_at(pty_output_bytes, Instant::now());
-        (reply_bytes, shell_integration_facts)
-    }
-
-    /// Feed one chunk at `monotonic_timestamp` and report whether bytes reached
-    /// the terminal parsers.
-    #[must_use = "undelivered replies or shell facts are lost"]
-    pub fn process_pty_output_with_shell_integration_at(
+    /// Feed one chunk of PTY output at `monotonic_timestamp` through the parsers,
+    /// and take what the advance produced: the device query replies and the
+    /// program facts, in the order the program wrote them. Returns `None`, and
+    /// takes nothing, when no byte reached the parsers, as while synchronized
+    /// output (`CSI ? 2026 h`) holds the chunk.
+    ///
+    /// `ESC ] 133 ; C`, then `BEL`, then `ESC ] 133 ; D ; 137` gives
+    /// `program_facts: [CommandStarted, Bell, CommandFinished { exit_code: Some(137) }]`.
+    #[must_use = "undelivered replies or program facts are lost"]
+    pub fn process_pty_output_at(
         &mut self,
         pty_output_bytes: &[u8],
         monotonic_timestamp: Instant,
-    ) -> (Vec<u8>, Vec<ShellIntegrationFact>, bool) {
+    ) -> Option<TerminalAdvance> {
         let normalized_terminal_input = self
             .terminal_input_normalizer
             .normalize_terminal_input_bytes(pty_output_bytes);
@@ -959,11 +962,15 @@ impl TerminalEngine {
             |normalized_bytes| self.process_normalized_terminal_bytes(normalized_bytes),
         );
         self.synchronized_output = synchronized_output;
-        (
-            self.terminal_state.take_device_query_replies(),
-            self.terminal_state.take_shell_integration_facts(),
-            has_advanced,
-        )
+        has_advanced.then(|| self.take_terminal_advance())
+    }
+
+    /// Take the device query replies and the program facts the state holds.
+    fn take_terminal_advance(&mut self) -> TerminalAdvance {
+        TerminalAdvance {
+            device_query_replies: self.terminal_state.take_device_query_replies(),
+            program_facts: self.terminal_state.take_program_facts(),
+        }
     }
 
     fn process_normalized_terminal_bytes(&mut self, normalized_bytes: &[u8]) {
@@ -1164,25 +1171,6 @@ impl TerminalEngine {
         graphics_events
     }
 
-    /// Finish the graphics stream, report any incomplete transfer, and drain
-    /// all image events already queued by the engine.
-    ///
-    /// A stream ending after `ESC _ Gf=32,s=1,v=1;` returns one typed
-    /// `Truncated` error and leaves the terminal cells unchanged.
-    pub fn finish_graphics_stream(&mut self) -> Vec<GraphicsEvent> {
-        let mut synchronized_output = mem::take(&mut self.synchronized_output);
-        synchronized_output.release_buffered_bytes(&mut |normalized_bytes| {
-            self.process_normalized_terminal_bytes(normalized_bytes)
-        });
-        self.synchronized_output = synchronized_output;
-        let cursor_position = self.terminal_state.get_active_cursor_position();
-        for graphics_event in self.graphics_parser.finish_graphics_stream() {
-            self.process_graphics_operation(graphics_event, cursor_position);
-        }
-        self.terminal_input_normalizer = C1InputNormalizer::default();
-        self.take_graphics_events()
-    }
-
     /// The canonical bytes that put another parser where this one stands: one escape
     /// sequence that has no final byte yet, the opening of a string whose body
     /// is still arriving, or the first bytes of a UTF-8 code point. Empty when
@@ -1261,24 +1249,22 @@ impl TerminalEngine {
             .compute_release_delay(monotonic_timestamp)
     }
 
-    /// Release an expired synchronized-output group through both terminal parsers.
-    #[must_use = "undelivered replies or shell facts are lost"]
+    /// Release an expired synchronized-output group through both terminal
+    /// parsers, and take what the release produced, as
+    /// [`process_pty_output_at`](Self::process_pty_output_at) does. Returns
+    /// `None`, and takes nothing, when no group was due at `monotonic_timestamp`.
+    #[must_use = "undelivered replies or program facts are lost"]
     pub fn expire_synchronized_output(
         &mut self,
         monotonic_timestamp: Instant,
-    ) -> Option<(Vec<u8>, Vec<ShellIntegrationFact>)> {
+    ) -> Option<TerminalAdvance> {
         let mut synchronized_output = mem::take(&mut self.synchronized_output);
         let has_advanced = synchronized_output
             .release_expired_bytes(monotonic_timestamp, |normalized_bytes| {
                 self.process_normalized_terminal_bytes(normalized_bytes)
             });
         self.synchronized_output = synchronized_output;
-        has_advanced.then(|| {
-            (
-                self.terminal_state.take_device_query_replies(),
-                self.terminal_state.take_shell_integration_facts(),
-            )
-        })
+        has_advanced.then(|| self.take_terminal_advance())
     }
 
     /// Start reading the `OSC 52` clipboard copies in this pane's output, each

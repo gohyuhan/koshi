@@ -23,6 +23,7 @@ use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::saved_view::SavedView;
 use crate::server::Server;
 use koshi_config::layer::{PartialKoshiConfig, PartialScrollbackConfig};
+use koshi_core::attention::{Attention, AttentionReason};
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
     GridPosition, NewPaneArgs, NewPanePlacement, NewTabArgs, Selection, SelectionKind,
@@ -1687,7 +1688,11 @@ fn build_populated_server() -> PopulatedServer {
         .into_iter()
         .enumerate()
     {
-        server.handle_pty_output(pane_id, format!("pane {pane_index} output").as_bytes());
+        server.handle_pty_output(
+            pane_id,
+            format!("pane {pane_index} output").as_bytes(),
+            SystemTime::UNIX_EPOCH,
+        );
     }
 
     PopulatedServer {
@@ -1873,6 +1878,11 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     let mut populated_server = build_populated_server();
     let session_id = populated_server.session_id;
     let carried_pty_panes = build_carried_pty_panes(&populated_server.server, session_id);
+    let waiting_pane_id = list_session_pane_ids(&populated_server.server, session_id)[0];
+    let waiting_raised_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+    populated_server
+        .server
+        .handle_pty_output(waiting_pane_id, b"\x07", waiting_raised_at);
     let expected_tabs = populated_server.server.session_by_id[&session_id]
         .tabs
         .clone();
@@ -1936,6 +1946,18 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
     assert_eq!(
         session.panes, expected_pane_registry,
         "every pane carried by the header"
+    );
+    assert_eq!(
+        session
+            .panes
+            .get_pane_record_by_id(waiting_pane_id)
+            .and_then(|pane_record| pane_record.attention.clone()),
+        Some(Attention {
+            raised_at: waiting_raised_at,
+            reason: AttentionReason::Bell,
+            withdrawable_notification_id: None,
+        }),
+        "a waiting pane keeps its reason and raise time across the swap"
     );
     assert_eq!(
         session.clients.count_clients(),
@@ -2094,12 +2116,16 @@ fn floating_panes_and_a_clients_floating_view_come_back_whole_after_the_resume_f
         first_client.pin_floating_pane(pinned_floating_pane_id, Point { column: 10, row: 3 });
         assert!(first_client.minimize_floating_pane(minimized_floating_pane_id));
     }
-    populated_server
-        .server
-        .handle_pty_output(pinned_pane_id, b"pinned output");
-    populated_server
-        .server
-        .handle_pty_output(minimized_pane_id, b"minimized output");
+    populated_server.server.handle_pty_output(
+        pinned_pane_id,
+        b"pinned output",
+        SystemTime::UNIX_EPOCH,
+    );
+    populated_server.server.handle_pty_output(
+        minimized_pane_id,
+        b"minimized output",
+        SystemTime::UNIX_EPOCH,
+    );
     let expected_floating_panes = populated_server.server.session_by_id[&session_id]
         .floating_set
         .list_floating_panes()
@@ -2264,9 +2290,11 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
 
     // The shell reports /home/user/Projects/koshi through OSC 7, and the last
     // chunk before the swap ends after `/Proj`.
-    populated_server
-        .server
-        .handle_pty_output(reporting_pane_id, b"\x1b]7;file://host/home/user/Proj");
+    populated_server.server.handle_pty_output(
+        reporting_pane_id,
+        b"\x1b]7;file://host/home/user/Proj",
+        SystemTime::UNIX_EPOCH,
+    );
 
     let (resume_header, resume_body) = populated_server
         .server
@@ -2306,7 +2334,7 @@ fn a_report_the_swap_cut_in_half_finishes_in_the_next_image() {
         0,
     );
 
-    resumed_server.handle_pty_output(reporting_pane_id, b"ects/koshi\x07");
+    resumed_server.handle_pty_output(reporting_pane_id, b"ects/koshi\x07", SystemTime::UNIX_EPOCH);
 
     let terminal_state =
         resumed_server.terminal_engine_by_pane_id[&reporting_pane_id].get_terminal_state();
@@ -3199,7 +3227,11 @@ fn a_blank_screen_after_a_restart_keeps_the_scrollback_limit_the_startup_config_
     let scrolled_output_bytes: Vec<u8> = (0..60)
         .flat_map(|line_index| format!("line {line_index}\r\n").into_bytes())
         .collect();
-    resumed_server.handle_pty_output(blank_pane_id, &scrolled_output_bytes);
+    resumed_server.handle_pty_output(
+        blank_pane_id,
+        &scrolled_output_bytes,
+        SystemTime::UNIX_EPOCH,
+    );
 
     assert_eq!(
         resumed_server.terminal_engine_by_pane_id[&blank_pane_id]

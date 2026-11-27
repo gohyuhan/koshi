@@ -749,6 +749,17 @@ fn sample_events() -> Vec<SessionEvent> {
                 direction: Direction::Right,
             }),
         },
+        SessionEvent::PaneAttentionRaised {
+            pane_id: target_pane_id,
+            tab_id: Some(source_tab_id),
+            reason: koshi_core::attention::AttentionReason::Bell,
+            raised_at: std::time::SystemTime::UNIX_EPOCH,
+        },
+        SessionEvent::PaneAttentionCleared {
+            pane_id: target_pane_id,
+            tab_id: None,
+            client_id: Some(koshi_core::ids::ClientId::new()),
+        },
         SessionEvent::Quit,
         SessionEvent::Restarting,
         SessionEvent::Detached,

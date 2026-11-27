@@ -9,7 +9,7 @@ use koshi_core::geometry::Direction;
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord};
 
 use super::*;
-use crate::types::{ModeBindings, ModeName, RgbColor};
+use crate::types::{AttentionConfig, ModeBindings, ModeName, RgbColor};
 
 #[test]
 fn default_partial_config_preserves_server_and_client_defaults() {
@@ -190,6 +190,45 @@ fn a_higher_precedence_layer_overrides_each_pane_clipboard_write_field_on_its_ow
             should_allow_writes: false,
             maximum_copy_byte_count: 1024,
         }
+    );
+}
+
+#[test]
+fn attention_folds_onto_the_session_side_one_key_at_a_time() {
+    let user_layer = PartialKoshiConfig {
+        attention: Some(PartialAttentionConfig {
+            should_raise_for_bell: Some(false),
+            should_raise_for_notify: Some(false),
+            should_raise_for_command_finished: None,
+        }),
+        ..Default::default()
+    };
+    let session_layer = PartialKoshiConfig {
+        attention: Some(PartialAttentionConfig {
+            should_raise_for_bell: None,
+            should_raise_for_notify: Some(true),
+            should_raise_for_command_finished: None,
+        }),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        merge_server(
+            ServerConfig::default(),
+            vec![user_layer.clone(), session_layer]
+        ),
+        ServerConfig {
+            attention: AttentionConfig {
+                should_raise_for_bell: false,
+                should_raise_for_notify: true,
+                should_raise_for_command_finished: true,
+            },
+            ..ServerConfig::default()
+        }
+    );
+    assert_eq!(
+        merge_client(ClientConfig::default(), vec![user_layer]),
+        ClientConfig::default()
     );
 }
 

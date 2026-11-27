@@ -2298,6 +2298,9 @@ struct Uplink {
     /// Whether this link last said that the client keeps its keys in a local
     /// input mode, in its Attach or in its last `SetViewerLocalInputMode`.
     sent_is_viewer_local_input_mode_on: bool,
+    /// The terminal focus this link last reported in a `TerminalFocus`, or
+    /// `None` when it reported none.
+    sent_is_terminal_focused: Option<bool>,
 }
 
 /// One writer thread [`spawn_uplink_writer`] started: the queue it writes from,
@@ -2377,7 +2380,8 @@ impl Uplink {
     /// [`FIRST_POST_ATTACH_REQUEST_ID`]. The placement
     /// target and the local input mode this link last named become
     /// `sent_placement_preview_target` and `sent_is_viewer_local_input_mode_on`,
-    /// the ones the new connection's Attach named. The action table stays.
+    /// the ones the new connection's Attach named, and the link has reported
+    /// no terminal focus. The action table stays.
     fn start_connection(
         &mut self,
         uplink_writer: UplinkWriter,
@@ -2388,6 +2392,20 @@ impl Uplink {
         self.next_request_id = FIRST_POST_ATTACH_REQUEST_ID;
         self.sent_placement_preview_target = sent_placement_preview_target;
         self.sent_is_viewer_local_input_mode_on = sent_is_viewer_local_input_mode_on;
+        self.sent_is_terminal_focused = None;
+    }
+
+    /// Report whether the client's terminal has keyboard focus
+    /// (`TerminalFocus`) when `is_terminal_focused` differs from what this
+    /// link reported last. Sends nothing when they are equal.
+    fn send_terminal_focus(&mut self, is_terminal_focused: bool) {
+        if self.sent_is_terminal_focused == Some(is_terminal_focused) {
+            return;
+        }
+        self.send_request(IpcRequestKind::TerminalFocus {
+            is_terminal_focused,
+        });
+        self.sent_is_terminal_focused = Some(is_terminal_focused);
     }
 
     /// Say whether the client keeps its keys in a local input mode
@@ -3408,6 +3426,7 @@ fn attach_once(
         next_request_id: FIRST_POST_ATTACH_REQUEST_ID,
         sent_placement_preview_target: None,
         sent_is_viewer_local_input_mode_on: false,
+        sent_is_terminal_focused: None,
     };
     // Every frame is drawn at the client's viewport size, read here and on
     // each resize event. A terminal that reports no size, which is what a
@@ -4031,6 +4050,9 @@ fn run_attachment<B: Backend, W: Write>(
                 cell_size_query,
                 locally_measured_cell_size,
             );
+            if let Some(is_terminal_focused) = client.find_reported_terminal_focus() {
+                uplink.send_terminal_focus(is_terminal_focused);
+            }
             send_held_inputs(client, uplink, held_inputs);
             // The new connection numbers its rounds from the start, so no
             // answer to a border move written on the old one can arrive. The
@@ -5024,9 +5046,9 @@ enum HeldInput {
 /// after `<C-y>` with a 500 ms chord timeout: the held `NewTab` comes before
 /// the held paste. A frame from the connection that ended is dropped. A resize
 /// and a mouse event are dropped and not recorded. A cell-size reply is taken
-/// by `cell_size_query` and not sent. Focus lost ends what
-/// [`Client::handle_outer_terminal_focus_lost`] names, the same as while the
-/// link is up.
+/// by `cell_size_query` and not sent. A terminal focus report goes to
+/// [`Client::handle_outer_terminal_focus_change`], the same as while the link
+/// is up, and is not sent: the next connection sends the last report.
 /// `client`'s link status follows the stretch and is [`LinkStatus::Linked`]
 /// again when this returns; a join draws the screen once more without the
 /// tag.
@@ -5230,8 +5252,11 @@ fn run_without_link<B: Backend>(
                         RuntimeEvent::CellSize { cell_size, .. } => {
                             let _ = cell_size_query.accept_cell_size_reply(cell_size);
                         }
-                        RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                            client.handle_outer_terminal_focus_lost();
+                        RuntimeEvent::OuterTerminalFocusChanged {
+                            is_terminal_focused,
+                            ..
+                        } => {
+                            client.handle_outer_terminal_focus_change(is_terminal_focused);
                         }
                         RuntimeEvent::MouseInput { .. } => {
                             client.close_client_chip_tooltip();
@@ -6705,9 +6730,10 @@ fn expire_input_timers(
 /// - After each mouse event that one of the three paths above took, the viewer
 ///   finds the hovered pane and the placement handle hover at the event's cell
 ///   ([`Client::update_pointer_hover`]).
-/// - A loss of the outer terminal's focus ends what
-///   [`Client::handle_outer_terminal_focus_lost`] names, and sends nothing of
-///   its own.
+/// - A terminal focus report goes to
+///   [`Client::handle_outer_terminal_focus_change`], then up as
+///   `TerminalFocus` when it differs from the last one this link sent
+///   ([`Uplink::send_terminal_focus`]).
 /// - Every other event writes the held mouse actions as one round, then sends
 ///   its own requests
 ///   ([`process_runtime_input_with_cell_size`]).
@@ -6778,8 +6804,12 @@ fn handle_terminal_input_event(
                 }
                 client.update_pointer_hover(mouse_input, mouse_frame);
             }
-            RuntimeEvent::OuterTerminalFocusLost { .. } => {
-                client.handle_outer_terminal_focus_lost();
+            RuntimeEvent::OuterTerminalFocusChanged {
+                is_terminal_focused,
+                ..
+            } => {
+                client.handle_outer_terminal_focus_change(is_terminal_focused);
+                uplink.send_terminal_focus(is_terminal_focused);
             }
             other_runtime_event => {
                 flush_mouse_round(uplink, sent_border_moves, pending_mouse_actions);

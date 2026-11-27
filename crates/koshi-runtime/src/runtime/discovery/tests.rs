@@ -190,7 +190,7 @@ fn a_pane_reports_the_title_its_child_set_and_no_argv_for_a_shell() {
     assert_eq!(overview_before_title_update.panes[0].pane_title, None);
 
     // OSC 2 sets the window title, ended here by BEL.
-    server.handle_pty_output(pane_id, b"\x1b]2;build watch\x07");
+    server.handle_pty_output(pane_id, b"\x1b]2;build watch\x07", SystemTime::UNIX_EPOCH);
 
     let overview_after_title_update = server.build_overview().expect("one session is running");
     assert_eq!(

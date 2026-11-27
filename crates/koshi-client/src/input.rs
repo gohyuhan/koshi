@@ -461,16 +461,31 @@ impl Client {
         }
     }
 
-    /// End what a loss of the outer terminal's focus ends: a grab-handle
-    /// drag, pane placement mode that waits for no placement, the move
-    /// chooser, floating pane move mode that waits for no move, the floating
-    /// pane tray, and the client chip tooltip. Sends nothing.
-    pub(crate) fn handle_outer_terminal_focus_lost(&mut self) {
+    /// Record the keyboard focus the outer terminal reported:
+    /// `is_terminal_focused` is `true` for `CSI I` and `false` for `CSI O`
+    /// ([`find_reported_terminal_focus`](Self::find_reported_terminal_focus)).
+    /// A loss of focus also ends a grab-handle drag, pane placement mode that
+    /// waits for no placement, the move chooser, floating pane move mode that
+    /// waits for no move, the floating pane tray, and the client chip
+    /// tooltip. Sends nothing.
+    pub(crate) fn handle_outer_terminal_focus_change(&mut self, is_terminal_focused: bool) {
+        self.reported_is_terminal_focused = Some(is_terminal_focused);
+        if is_terminal_focused {
+            return;
+        }
         self.cancel_floating_pane_move_drag();
         self.cancel_placement_mode();
         self.close_pane_move_mode();
         self.close_floating_pane_tray();
         self.close_client_chip_tooltip();
+    }
+
+    /// The keyboard focus the outer terminal last reported: `Some(true)` after
+    /// `CSI I`, `Some(false)` after `CSI O`, and `None` before its first
+    /// report.
+    #[must_use]
+    pub(crate) fn find_reported_terminal_focus(&self) -> Option<bool> {
+        self.reported_is_terminal_focused
     }
 
     /// Whether floating pane move mode waits for the session's answer to the

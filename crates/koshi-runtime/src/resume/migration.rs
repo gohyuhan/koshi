@@ -853,7 +853,7 @@ const FORMAT_THREE_SIXEL_REGISTER_COUNT: usize = 256;
 /// [`FORMAT_THREE_SIXEL_REGISTER_COLORS`] then black registers up to
 /// [`FORMAT_THREE_SIXEL_REGISTER_COUNT`], and `shell_integration_state` is
 /// `"Prompt"`.
-fn build_format_three_terminal_defaults() -> [(&'static str, Value); 11] {
+fn build_format_three_terminal_defaults() -> [(&'static str, Value); 10] {
     let mut sixel_register_colors: Vec<Value> = FORMAT_THREE_SIXEL_REGISTER_COLORS
         .iter()
         .map(|register_color| serde_json::json!(register_color))
@@ -873,7 +873,6 @@ fn build_format_three_terminal_defaults() -> [(&'static str, Value); 11] {
         ("next_image_placement_id", serde_json::json!(1)),
         ("sixel_palette", Value::Array(sixel_register_colors)),
         ("shell_integration_state", serde_json::json!("Prompt")),
-        ("shell_integration_facts", serde_json::json!([])),
     ]
 }
 
@@ -1320,11 +1319,13 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 /// 9. The saved-view store gains an empty `presented_token_hash_by_client_id`,
 ///    and each saved-view record's `connection_token_hash` `<h>` becomes
 ///    `connection_token_hashes: [<h>]`.
+/// 10. Each pane record of each session's `panes.pane_record_by_id` gains
+///     `attention: null`: no pane waits for a person.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
-/// a client record, a notification queue, a queued entry or a saved view is
-/// not an object, or misses a field that format 5 writes, or when a client
+/// a client record, a notification queue, a queued entry, a pane record or a
+/// saved view is not an object, or misses a field that format 5 writes, or when a client
 /// record's `color_index` is not a whole number, or its `origin` is neither
 /// `"Local"` nor `"Remote"`.
 fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageError> {
@@ -1366,6 +1367,22 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             },
         )?;
         assign_unique_color_indexes_five_to_six(client_by_id, &client_by_id_path)?;
+        let panes_path = format!("{session_path}.panes");
+        let panes = get_required_json_field(session_fields, "panes", session_path)?;
+        let pane_record_by_id = get_required_json_field(
+            get_json_object(panes, &panes_path)?,
+            "pane_record_by_id",
+            &panes_path,
+        )?;
+        migrate_json_object_members(
+            pane_record_by_id,
+            &format!("{panes_path}.pane_record_by_id"),
+            |pane_record, record_path| {
+                get_json_object(pane_record, record_path)?
+                    .insert("attention".to_string(), Value::Null);
+                Ok(())
+            },
+        )?;
         let notification_queue_path = format!("{session_path}.notification_queue");
         let notification_queue =
             get_required_json_field(session_fields, "notification_queue", session_path)?;
@@ -1586,12 +1603,13 @@ fn migrate_terminal_state(terminal_state: &mut Value, json_path: &str) -> Result
             "{json_path}.native_image_coverage must be a boolean"
         )));
     }
+    json_fields.remove("replies");
+    json_fields.remove("shell_integration_facts");
     rename_json_fields(
         json_fields,
         &[
             ("active", "active_screen"),
             ("reported_cwd", "reported_working_directory"),
-            ("replies", "device_query_replies"),
         ],
     );
     if let Some(reported_working_directory) = json_fields

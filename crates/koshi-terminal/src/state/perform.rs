@@ -12,7 +12,8 @@
 //!   (zero-width joiner) emoji sequences, variation selectors, skin tones,
 //!   flags — fold onto the base cell.
 //! - `execute` — C0 and C1 control bytes: newline, tab, backspace, line
-//!   movement, tab-stop setup, and the `SI`/`SO` charset shifts.
+//!   movement, tab-stop setup, the `SI`/`SO` charset shifts, and BEL, which
+//!   adds a [`ProgramFact::Bell`].
 //! - `csi_dispatch` — CSI sequences (Control Sequence Introducer, `ESC [ …`):
 //!   cursor moves (relative, absolute, line-relative), tab stops, erase in
 //!   display/line and erase-char, including active image placement clearing
@@ -26,7 +27,8 @@
 //!   tab-stop setup, terminal reset, and `G0`–`G3` charset designation.
 //! - `osc_dispatch` — OSC sequences (Operating System Command, `ESC ] …`,
 //!   carrying a text payload): the OSC 0/1/2 window title, OSC 7
-//!   working-directory report, and OSC 133 shell markers.
+//!   working-directory report, OSC 133 shell markers, and the OSC 9, OSC 777
+//!   and OSC 99 desktop notifications, which add program facts.
 //! - `hook`/`unhook` — start/end of a DCS (device control string,
 //!   `ESC P … ST`). They only clear the in-progress grapheme cluster (a DCS
 //!   ends a text run like any non-printing event); the payload and `put`
@@ -38,7 +40,8 @@
 //! stacks ([`keyboard`]), cursor motion / scrolling
 //! / the scroll region ([`motion`]), alternate-screen entry/exit
 //! ([`alt_screen`]), hard/soft reset ([`reset`]), SGR ([`sgr`]), OSC parsing
-//! ([`osc`]), and CSI parameter accessors ([`params`]) — while the
+//! ([`osc`]), desktop notification parsing ([`notification`]), and CSI
+//! parameter accessors ([`params`]) — while the
 //! [`vte::Perform`] trait impl itself stays here as the dispatch surface.
 
 use koshi_core::display_width::compute_character_display_width;
@@ -46,11 +49,14 @@ use koshi_core::text::sanitize_reported_text;
 
 use crate::grid::state::{Cell, ImagePlaceholder, RowEnd};
 use crate::state::{
-    CursorShape, MouseEncoding, MouseTracking, Screen, ShellIntegrationFact, ShellIntegrationState,
+    CursorShape, MouseEncoding, MouseTracking, ProgramFact, Screen, ShellIntegrationState,
     TerminalState,
 };
 
 use self::motion::{find_next_tab_stop, find_previous_tab_stop};
+use self::notification::{
+    apply_osc99_sequence, parse_osc777_notification, parse_osc9_notification,
+};
 use self::osc::{parse_osc133, parse_osc7_working_directory, Osc133};
 use self::params::{
     get_cursor_coordinate, get_cursor_move_count, get_first_parameter_number,
@@ -64,6 +70,7 @@ mod device;
 mod glyph;
 mod keyboard;
 mod motion;
+pub(super) mod notification;
 mod osc;
 mod params;
 mod reset;
@@ -267,7 +274,10 @@ impl vte::Perform for TerminalState {
             0x0E => self.get_active_render_mut().gl = 1,
             // SI (shift in): select G0 into the GL range for printing.
             0x0F => self.get_active_render_mut().gl = 0,
-            // BEL (0x07) and any other control byte: discarded, never rendered.
+            // BEL: a bell fact. A BEL that ends an OSC sequence reaches
+            // `osc_dispatch` and never this arm.
+            0x07 => self.push_program_fact(ProgramFact::Bell),
+            // Any other control byte: discarded, never rendered.
             _ => {}
         }
     }
@@ -894,8 +904,8 @@ impl vte::Perform for TerminalState {
     }
 
     /// Handle an Operating System Command (OSC) sequence: window/icon title
-    /// (OSC 0/1/2), working-directory report (OSC 7, `file://` URI), or shell
-    /// marker (OSC 133).
+    /// (OSC 0/1/2), working-directory report (OSC 7, `file://` URI), shell
+    /// marker (OSC 133), or desktop notification (OSC 9, OSC 777, OSC 99).
     fn osc_dispatch(&mut self, osc_parameters: &[&[u8]], _is_bell_terminated: bool) {
         // Any OSC ends a text run, so no following glyph folds into it.
         self.reset_cluster();
@@ -913,15 +923,13 @@ impl vte::Perform for TerminalState {
                 Osc133::CommandStart => {
                     if self.shell_integration_state != ShellIntegrationState::Running {
                         self.shell_integration_state = ShellIntegrationState::Running;
-                        self.shell_integration_facts
-                            .push(ShellIntegrationFact::CommandStarted);
+                        self.push_program_fact(ProgramFact::CommandStarted);
                     }
                 }
-                Osc133::CommandFinished => {
+                Osc133::CommandFinished(exit_code) => {
                     if self.shell_integration_state == ShellIntegrationState::Running {
                         self.shell_integration_state = ShellIntegrationState::Prompt;
-                        self.shell_integration_facts
-                            .push(ShellIntegrationFact::CommandFinished);
+                        self.push_program_fact(ProgramFact::CommandFinished { exit_code });
                     }
                 }
             }
@@ -957,6 +965,25 @@ impl vte::Perform for TerminalState {
                         self.reported_working_directory = Some(reported_working_directory);
                         self.is_working_directory_changed = true;
                     }
+                }
+            }
+            // OSC 9, OSC 777 and OSC 99 — desktop notifications. Each one the
+            // sequence completes becomes a program fact.
+            Ok("9") => {
+                if let Some(program_fact) = parse_osc9_notification(osc_parameters) {
+                    self.push_program_fact(program_fact);
+                }
+            }
+            Ok("777") => {
+                if let Some(program_fact) = parse_osc777_notification(osc_parameters) {
+                    self.push_program_fact(program_fact);
+                }
+            }
+            Ok("99") => {
+                if let Some(program_fact) =
+                    apply_osc99_sequence(&mut self.open_osc99_notification, osc_parameters)
+                {
+                    self.push_program_fact(program_fact);
                 }
             }
             // Any other OSC command is ignored.
