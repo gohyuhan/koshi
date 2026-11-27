@@ -24,7 +24,7 @@ use koshi_pty::backend::state::PtyBackend;
 use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 use koshi_session::client::ClientRegistry;
 use koshi_session::session::state::Session;
-use koshi_terminal::engine::TerminalEngine;
+use koshi_terminal::engine::{TerminalEngine, SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION};
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_spawn_spec;
 
@@ -1224,6 +1224,39 @@ fn list_delivered_frame_waiting_marks(
             _ => None,
         })
         .collect()
+}
+
+/// Alice views tab `docs`. A bell inside an open synchronized-output group in
+/// `build_pane_id` raises nothing while the group is open. The pass whose
+/// time ends the group raises the wait and delivers Alice a frame that marks
+/// tab `code`.
+#[test]
+fn a_bell_released_when_a_synchronized_output_group_times_out_marks_the_frame_of_the_same_pass() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    fixture.server.push_due_frames(Instant::now());
+    let _ = fixture.take_alice_deliveries();
+
+    fixture.write_build_pane_output(b"\x1b[?2026h\x07", build_wall_time(1_000));
+    assert_eq!(fixture.find_pane_attention(build_pane_id), None);
+
+    fixture
+        .server
+        .push_due_frames(Instant::now() + SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION);
+
+    assert_eq!(
+        fixture
+            .find_pane_attention(build_pane_id)
+            .map(|attention| attention.reason),
+        Some(AttentionReason::Bell)
+    );
+    assert_eq!(
+        list_delivered_frame_waiting_marks(fixture.take_alice_deliveries()),
+        [(
+            vec![("code".to_string(), true), ("docs".to_string(), false)],
+            1
+        )]
+    );
 }
 
 /// Alice views tab `docs`. Output in `build_pane_id`, in tab `code`, leaves

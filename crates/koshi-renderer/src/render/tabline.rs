@@ -635,7 +635,8 @@ fn get_tab_text_blocks(
 /// One tab's two-block ribbon (`#N` block + name block) at metadata index
 /// `tab_metadata_index`, colored on its own stop of the theme's chrome ramp.
 /// The [`WAITING_TAB_MARK_TEXT`] of a tab that holds a waiting pane takes the
-/// theme's attention color over the name block's background.
+/// attention style ([`compute_attention_border_style`]: the theme's attention
+/// color, in bold) over the name block's background.
 ///
 /// # Panics
 ///
@@ -657,7 +658,7 @@ fn build_tab_line(
         Some(tab_name_after_mark_text) => {
             tab_spans.push(Span::styled(
                 WAITING_TAB_MARK_TEXT,
-                tab_name_style.fg(theme.attention_border_color),
+                tab_name_style.patch(compute_attention_border_style(theme)),
             ));
             tab_spans.push(Span::styled(
                 tab_name_after_mark_text.to_owned(),

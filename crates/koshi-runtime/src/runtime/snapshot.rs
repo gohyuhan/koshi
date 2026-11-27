@@ -29,6 +29,7 @@ use std::sync::{Arc, OnceLock};
 use koshi_core::command::{Selection, SelectionKind};
 use koshi_core::geometry::FloatingPanePosition;
 use koshi_core::ids::{ClientId, PaneId};
+use koshi_layout::tree::LayoutNode;
 use koshi_renderer::snapshot::{
     ClientSnapshot, CursorSnapshot, FloatingPane, FloatingPaneSlot, GridView,
     ImagePlacementSnapshot, LayoutAreaSnapshot, PaneSnapshot, PeerSnapshot, RenderSnapshot,
@@ -92,12 +93,16 @@ impl Server {
             ),
         };
 
-        let waiting_pane_ids: Vec<PaneId> = session
+        let waiting_pane_ids: HashSet<PaneId> = session
             .panes
             .list_pane_records()
             .filter(|pane_record| pane_record.attention.is_some())
             .map(|pane_record| pane_record.get_pane_id())
             .collect();
+        let holds_waiting_pane = |layout_tree: &LayoutNode| {
+            !waiting_pane_ids.is_empty()
+                && layout_tree.has_pane_matching(&|pane_id| waiting_pane_ids.contains(&pane_id))
+        };
 
         // Metadata for every tab in the session, in display (index) order.
         let mut tabs_metadata: Vec<TabMetadata> = session
@@ -108,9 +113,7 @@ impl Server {
                 tab_name: tab.get_tab_name().to_owned(),
                 tab_index: tab.get_tab_index(),
                 is_active: tab.get_tab_id() == active_tab_id,
-                has_waiting_pane: waiting_pane_ids
-                    .iter()
-                    .any(|&waiting_pane_id| tab.get_layout_tree().has_pane(waiting_pane_id)),
+                has_waiting_pane: holds_waiting_pane(tab.get_layout_tree()),
             })
             .collect();
         tabs_metadata.sort_by_key(|tab_metadata| tab_metadata.tab_index);
@@ -143,9 +146,7 @@ impl Server {
                             },
                         ),
                         pane_count: NonZeroUsize::new(floating_pane.list_pane_ids().len())?,
-                        is_waiting: waiting_pane_ids
-                            .iter()
-                            .any(|&waiting_pane_id| floating_pane.has_pane(waiting_pane_id)),
+                        is_waiting: holds_waiting_pane(floating_pane.get_layout_tree()),
                     })
                 })
                 .collect(),

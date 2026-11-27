@@ -2142,11 +2142,13 @@ fn a_tab_that_holds_a_waiting_pane_draws_a_dot_in_place_of_its_leading_space_at_
         "● build"
     );
     let mark_cell = &waiting_render_buffer[(name_start_column, 0)];
+    let quiet_name_cell = &quiet_render_buffer[(name_start_column, 0)];
     assert_eq!(
-        (mark_cell.fg, mark_cell.bg),
+        (mark_cell.fg, mark_cell.bg, mark_cell.modifier),
         (
             theme.attention_border_color,
-            quiet_render_buffer[(name_start_column, 0)].bg
+            quiet_name_cell.bg,
+            quiet_name_cell.modifier | Modifier::BOLD
         )
     );
     assert_eq!(

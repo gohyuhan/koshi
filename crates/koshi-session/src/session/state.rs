@@ -372,8 +372,10 @@ impl FloatingPane {
 /// ([`PaneRecord::attention`] is `Some`) in `panes`. A pane `panes` does not
 /// hold waits for nobody.
 fn has_waiting_pane(panes: &PaneRegistry, layout_tree: &LayoutNode) -> bool {
-    panes.list_pane_records().any(|pane_record| {
-        pane_record.attention.is_some() && layout_tree.has_pane(pane_record.get_pane_id())
+    layout_tree.has_pane_matching(&|pane_id| {
+        panes
+            .get_pane_record_by_id(pane_id)
+            .is_some_and(|pane_record| pane_record.attention.is_some())
     })
 }
 
@@ -1281,9 +1283,9 @@ impl Session {
             return Vec::new();
         };
         let is_layout_tree_changed = tab.layout_area.layout != layout_tree;
-        let had_waiting_pane = has_waiting_pane(&self.panes, &tab.layout_area.layout);
+        let has_waiting_pane_before = has_waiting_pane(&self.panes, &tab.layout_area.layout);
         self.view_changes.is_attention_changed |=
-            had_waiting_pane != has_waiting_pane(&self.panes, &layout_tree);
+            has_waiting_pane_before != has_waiting_pane(&self.panes, &layout_tree);
         tab.layout_area.layout = layout_tree;
         let previous_layout_solve = tab.layout_area.update_layout_solve(pane_sizing);
         if is_layout_tree_changed || previous_layout_solve != tab.layout_area.layout_solve {
