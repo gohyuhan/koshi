@@ -46,6 +46,7 @@ fn each_text_command_number_gives_its_command() {
         ("9", OscTextCommand::Osc9Notification),
         ("777", OscTextCommand::Osc777Notification),
         ("99", OscTextCommand::Osc99Notification),
+        ("7501", OscTextCommand::ProgramStatus),
     ] {
         assert_eq!(
             read_osc_texts(format!("\x1b]{command_number};a;b\x07").as_bytes()),
@@ -57,7 +58,10 @@ fn each_text_command_number_gives_its_command() {
 
 #[test]
 fn every_other_command_number_gives_no_text() {
-    for command_number in ["", "3", "8", "52", "90", "133", "09", "7777", "9a", "9\x7f"] {
+    for command_number in [
+        "", "3", "8", "52", "90", "133", "09", "7777", "9a", "9\x7f", "750", "7502", "75010",
+        "07501",
+    ] {
         assert_eq!(
             read_osc_texts(format!("\x1b]{command_number};a\x07").as_bytes()),
             Vec::new(),

@@ -1,7 +1,7 @@
 //! The operating system commands (OSC) whose whole text koshi reads beside
 //! the VTE parser: the `OSC 52` clipboard copies, and the text of every OSC
 //! whose command is an [`OscTextCommand`]: `OSC 0`, `1`, `2`, `7`, `9`,
-//! `777` and `99`.
+//! `777`, `99` and `7501`.
 //!
 //! The VTE parser hands its performer at most 16 parameters of one OSC, and
 //! no byte after the 16th `;`. [`OscReader`] reads the bytes that the VTE
@@ -64,9 +64,9 @@ const FIELD_SEPARATOR_BYTE: u8 = b';';
 /// The command number of a clipboard copy, `52`.
 const CLIPBOARD_COMMAND_NUMBER_BYTES: &[u8; 2] = b"52";
 
-/// The most command number bytes the reader holds: the length of `777`. A
+/// The most command number bytes the reader holds: the length of `7501`. A
 /// longer command number names no command the reader reads.
-const MAX_READ_COMMAND_NUMBER_BYTE_COUNT: usize = 3;
+const MAX_READ_COMMAND_NUMBER_BYTE_COUNT: usize = 4;
 
 /// Where [`OscReader`] stands in the bytes it read.
 #[derive(Debug, Default)]
@@ -296,7 +296,7 @@ impl OscReader {
     ///
     /// In the command number, `;` opens the targets field of a copy after
     /// `52` while the reader keeps copies, opens the text after the number of
-    /// an [`OscTextCommand`], and makes every other command skipped. A fourth
+    /// an [`OscTextCommand`], and makes every other command skipped. A fifth
     /// command number byte makes the command skipped. In the targets field,
     /// `;` opens the payload, and every other byte goes through
     /// [`push_clipboard_target`].

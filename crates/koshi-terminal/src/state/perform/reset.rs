@@ -4,8 +4,8 @@ use koshi_sixel::SixelPalette;
 
 use crate::grid::state::Grid;
 use crate::state::{
-    build_default_tab_stops, AlternateScreen, Cursor, RenderState, Screen, ShellIntegrationState,
-    TerminalModes, TerminalState,
+    build_default_tab_stops, AlternateScreen, Cursor, ProgramFact, ProgramStatusFact, RenderState,
+    Screen, ShellIntegrationState, TerminalModes, TerminalState,
 };
 use crate::style::Style;
 
@@ -41,10 +41,10 @@ impl TerminalState {
     /// image-placement lists, resets both render states, every mode, both
     /// vertical and horizontal margin pairs, both Kitty keyboard flag stacks,
     /// the tab stops (every eighth column), the
-    /// title, and the OSC 133 shell state, and ends the
-    /// in-progress grapheme cluster. The reported cwd, queued device replies,
-    /// queued shell-integration facts, and the scrollback's total pushed line
-    /// count stay.
+    /// title, and the OSC 133 shell state, ends the in-progress grapheme
+    /// cluster, and adds a [`ProgramStatusFact::TerminalReset`] fact. The
+    /// reported cwd, queued device replies, the program facts not yet taken,
+    /// and the scrollback's total pushed line count stay.
     pub(super) fn apply_hard_reset(&mut self) {
         let (row_count, column_count) = self.primary.get_grid_dimensions();
         self.primary = Grid::build_blank(row_count, column_count, Style::default());
@@ -81,5 +81,6 @@ impl TerminalState {
         }
         self.shell_integration_state = ShellIntegrationState::default();
         self.reset_cluster();
+        self.push_program_fact(ProgramFact::ProgramStatus(ProgramStatusFact::TerminalReset));
     }
 }

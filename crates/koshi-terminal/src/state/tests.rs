@@ -3167,6 +3167,10 @@ fn a_resume_format_4_terminal_state_reads_back_the_screens_and_history_it_was_wr
         &mut terminal_state,
         b"ab\r\n\x1b]133;A\x07wrapped-line\r\n\x1b[41mred\x1b[0m\r\nlast",
     );
+    assert_eq!(
+        terminal_state.take_program_facts(),
+        vec![ProgramFact::ProgramStatus(ProgramStatusFact::PromptStarted)]
+    );
     assert_eq!(terminal_state.scrollback.get_retained_line_count(), 3);
     let terminal_state_json = write_as_resume_format_4(&terminal_state);
     assert_eq!(

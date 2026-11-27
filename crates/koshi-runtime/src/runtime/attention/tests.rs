@@ -18,6 +18,7 @@ use koshi_core::key::{
 };
 use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::process::{ExitStatus, PtySize};
+use koshi_core::program_status::{BlockedKind, ProgramStatusState};
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
@@ -25,6 +26,7 @@ use koshi_renderer::snapshot::{Delivery, RenderSnapshot};
 use koshi_session::client::ClientRegistry;
 use koshi_session::session::state::Session;
 use koshi_terminal::engine::{TerminalEngine, SYNCHRONIZED_OUTPUT_TIMEOUT_DURATION};
+use koshi_terminal::state::ProgramStatusFact;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_spawn_spec;
 
@@ -410,6 +412,79 @@ fn a_signal_whose_kind_koshi_kdl_switches_off_is_dropped() {
             "{attention_reason_kind:?}"
         );
     }
+}
+
+#[test]
+fn program_status_facts_raise_nothing_and_give_no_event() {
+    let mut fixture = build_attention_fixture();
+    let read_instant = Instant::now();
+
+    let emitted_events = fixture.server.apply_program_facts(
+        fixture.build_pane_id,
+        build_timed_program_facts(
+            vec![
+                ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
+                    record_id: String::new(),
+                    state: ProgramStatusState::Blocked,
+                    blocked_kind: Some(BlockedKind::Permission),
+                    progress_percent: None,
+                    app_name: Some("terraform".to_string()),
+                    title: None,
+                    message: Some("Apply?".to_string()),
+                }),
+                ProgramFact::ProgramStatus(ProgramStatusFact::Cleared {
+                    record_id: String::new(),
+                }),
+                ProgramFact::ProgramStatus(ProgramStatusFact::PromptStarted),
+                ProgramFact::ProgramStatus(ProgramStatusFact::TerminalReset),
+            ],
+            read_instant,
+        ),
+        build_wall_time(1_000),
+        read_instant,
+    );
+
+    assert_eq!(emitted_events, Vec::new());
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+}
+
+#[test]
+fn a_bell_between_program_status_facts_raises_as_it_does_alone() {
+    let mut fixture = build_attention_fixture();
+    let read_instant = Instant::now();
+    let read_at = build_wall_time(1_000);
+
+    let emitted_events = fixture.server.apply_program_facts(
+        fixture.build_pane_id,
+        build_timed_program_facts(
+            vec![
+                ProgramFact::ProgramStatus(ProgramStatusFact::PromptStarted),
+                ProgramFact::Bell,
+                ProgramFact::ProgramStatus(ProgramStatusFact::TerminalReset),
+            ],
+            read_instant,
+        ),
+        read_at,
+        read_instant,
+    );
+
+    assert_eq!(
+        emitted_events,
+        vec![Event::PaneAttentionRaised(PaneAttentionRaised {
+            pane_id: fixture.build_pane_id,
+            tab_id: Some(fixture.code_tab_id),
+            reason: AttentionReason::Bell,
+            raised_at: read_at,
+        })]
+    );
+    assert_eq!(
+        fixture.find_pane_attention(fixture.build_pane_id),
+        Some(Attention {
+            raised_at: read_at,
+            reason: AttentionReason::Bell,
+            withdrawable_notification_id: None,
+        })
+    );
 }
 
 #[test]
