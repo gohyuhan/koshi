@@ -1013,6 +1013,42 @@ impl<B: Backend> Screen<B> {
         self.commit_pending_snapshot(client, Instant::now())
     }
 
+    /// Whether the frame on the screen draws content of the pane `pane_id`: a
+    /// visible pane slot of the tab the last paint drew (`shown_tab_snapshot`),
+    /// or of a floating pane slot it drew. The floating pane slots are the
+    /// last session frame's, with the slides of the last paint in their place
+    /// ([`terminal::list_displayed_floating_pane_slots`]), each drawn as the
+    /// chrome of the last paint draws it
+    /// ([`ViewerChrome::is_floating_pane_slot_drawn`]). Before the first
+    /// paint, no pane is drawn.
+    ///
+    /// Example: in pane placement mode for the tiled pane 1, the floating pane
+    /// that holds pane 2 is not drawn, and pane 2 is not drawn.
+    fn is_pane_content_drawn(&self, pane_id: PaneId) -> bool {
+        let (Some(last_snapshot), Some(shown_tab_snapshot), Some(shown_viewer_paint)) = (
+            self.last_snapshot.as_ref(),
+            self.shown_tab_snapshot.as_ref(),
+            self.shown_viewer_paint.as_ref(),
+        ) else {
+            return false;
+        };
+        let shown_layout_area = &shown_tab_snapshot.layout_area;
+        shown_layout_area.find_visible_pane_slot(pane_id).is_some()
+            || terminal::list_displayed_floating_pane_slots(
+                &last_snapshot.session_snapshot.floating_pane_slots,
+                &self.shown_animated_floating_pane_slots,
+            )
+            .any(|floating_pane_slot| {
+                shown_viewer_paint
+                    .chrome
+                    .is_floating_pane_slot_drawn(shown_layout_area, floating_pane_slot)
+                    && floating_pane_slot
+                        .layout_area
+                        .find_visible_pane_slot(pane_id)
+                        .is_some()
+            })
+    }
+
     /// Keep the outer terminal's Shift mouse reporting request aligned with
     /// this viewer's placement mode, including changes made by session frames.
     fn update_shift_mouse_capture<W: Write>(
@@ -1236,8 +1272,8 @@ impl<B: Backend> Screen<B> {
     /// committed region solve draws nothing until the next session frame.
     ///
     /// Each refresh first advances the toast's clock and the notification
-    /// center's slide ([`Client::advance_notification_clocks`]), with the
-    /// shown frame as the one that says which panes this viewer draws. The toast's
+    /// center's slide ([`Client::advance_notification_clocks`]), with
+    /// [`Self::is_pane_content_drawn`] saying which panes this viewer draws. The toast's
     /// clock stops while no frame shows, while the viewport differs from the
     /// one the shown frame was committed for, and while the shown frame has
     /// no room for the toast ([`has_notification_toast_room`]): a viewport
@@ -1266,11 +1302,9 @@ impl<B: Backend> Screen<B> {
                     &self.committed_regions,
                 ))
             });
-        client.advance_notification_clocks(
-            current_time,
-            is_toast_paused,
-            self.last_snapshot.as_ref(),
-        );
+        client.advance_notification_clocks(current_time, is_toast_paused, &|pane_id| {
+            self.is_pane_content_drawn(pane_id)
+        });
         if self.pending_snapshot.is_some() {
             return self.commit_pending_snapshot(client, current_time);
         }
@@ -3433,7 +3467,7 @@ fn attach_once(
         session_id,
         &notification_queue,
         &held_panes,
-        None,
+        &|_| false,
     );
     let mut uplink = Uplink {
         uplink_writer: Some(spawn_uplink_writer(writer)),
@@ -3799,7 +3833,7 @@ fn run_attachment<B: Backend, W: Write>(
                             if let Err(take_error) = client.take_session_notification_post(
                                 revision,
                                 posted_entry,
-                                screen.last_snapshot.as_ref(),
+                                &|pane_id| screen.is_pane_content_drawn(pane_id),
                             ) {
                                 tracing::warn!(%take_error, "a notification from the session was not taken");
                             }
@@ -3842,7 +3876,7 @@ fn run_attachment<B: Backend, W: Write>(
                                 session_id,
                                 &notification_queue,
                                 &held_panes,
-                                screen.last_snapshot.as_ref(),
+                                &|pane_id| screen.is_pane_content_drawn(pane_id),
                             );
                             if let Err(take_error) = client.take_held_command_rejections(
                                 &held_command_rejections,
@@ -4058,7 +4092,7 @@ fn run_attachment<B: Backend, W: Write>(
                 session_id,
                 &attach_answer.notification_queue,
                 &attach_answer.held_panes,
-                screen.last_snapshot.as_ref(),
+                &|pane_id| screen.is_pane_content_drawn(pane_id),
             );
             client.end_mouse_gestures();
             pending_mouse_actions.clear();
@@ -5930,21 +5964,21 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
 /// Take `notification_queue`, the queue of session `session_id`, with
 /// `held_panes`, every pane the session holds, as an attach answer or a
 /// `Resync` carried them, into `client`'s notification history
-/// ([`Client::take_session_notification_queue`]). `painted_frame` is the frame
-/// this viewer last painted, or `None` before its first paint. A queue the
-/// history does not take changes nothing and logs one warning.
+/// ([`Client::take_session_notification_queue`]). `is_pane_drawn` says
+/// whether the frame on the viewer's screen draws a pane's content. A queue
+/// the history does not take changes nothing and logs one warning.
 fn apply_session_notification_queue(
     client: &mut Client,
     session_id: SessionId,
     notification_queue: &NotificationQueue,
     held_panes: &[HeldPane],
-    painted_frame: Option<&RenderSnapshot>,
+    is_pane_drawn: &dyn Fn(PaneId) -> bool,
 ) {
     if let Err(take_error) = client.take_session_notification_queue(
         session_id,
         notification_queue,
         held_panes,
-        painted_frame,
+        is_pane_drawn,
     ) {
         tracing::warn!(%take_error, "the session's notification queue was not taken");
     }

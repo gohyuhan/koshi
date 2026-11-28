@@ -2250,6 +2250,74 @@ fn a_pane_that_stops_waiting_or_closes_withdraws_its_toast_and_keeps_its_entry()
 }
 
 #[test]
+fn a_pane_that_waits_again_while_its_toast_withdraws_turns_the_toast_back_unless_the_frame_draws_it(
+) {
+    let pane_id = PaneId::new();
+    for is_pane_drawn in [false, true] {
+        let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+        let (revision, posted_entry) = post_to_session_about_subject(
+            &mut session_queue,
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(pane_id),
+        );
+        notification_history
+            .take_session_post(revision, posted_entry, &|_| false, true)
+            .expect("take the post");
+        let start = Instant::now();
+        for elapsed_millisecond_count in [0, 2000] {
+            notification_history.advance_notification_clocks(
+                start + Duration::from_millis(elapsed_millisecond_count),
+                DEFAULT_TOAST_TIMING,
+                false,
+                &|_| false,
+            );
+        }
+        notification_history.withdraw_pane_previews(pane_id);
+        for elapsed_millisecond_count in [2000, 2250] {
+            notification_history.advance_notification_clocks(
+                start + Duration::from_millis(elapsed_millisecond_count),
+                DEFAULT_TOAST_TIMING,
+                false,
+                &|_| false,
+            );
+        }
+        let (repeat_revision, repeated_entry) = post_to_session_about_subject(
+            &mut session_queue,
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(pane_id),
+        );
+
+        notification_history
+            .take_session_post(
+                repeat_revision,
+                repeated_entry,
+                &|drawn_pane_id| is_pane_drawn && drawn_pane_id == pane_id,
+                true,
+            )
+            .expect("take the repeat");
+        notification_history.advance_notification_clocks(
+            start + Duration::from_millis(2500),
+            DEFAULT_TOAST_TIMING,
+            false,
+            &|_| false,
+        );
+
+        let newest_entry = get_newest_entry(&notification_history);
+        assert_eq!(newest_entry.repeat_count, 2);
+        assert_eq!(
+            find_shown_toast_content(&notification_history),
+            (!is_pane_drawn).then_some((NotificationToastContent::Entry(&newest_entry), 500)),
+            "the frame draws the pane: {is_pane_drawn}"
+        );
+        assert_eq!(
+            notification_history.find_shown_toast_number(),
+            (!is_pane_drawn).then_some(1),
+            "the frame draws the pane: {is_pane_drawn}"
+        );
+    }
+}
+
+#[test]
 fn a_queue_withdraws_toasts_of_panes_that_wait_no_more_and_previews_only_hidden_waiting_panes() {
     let (attended_pane_id, waiting_pane_id, drawn_pane_id) =
         (PaneId::new(), PaneId::new(), PaneId::new());

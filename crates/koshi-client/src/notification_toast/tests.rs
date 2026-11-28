@@ -1376,6 +1376,136 @@ fn withdrawing_a_pane_drops_its_waiting_previews_and_slides_its_toast_out_in_hal
 }
 
 #[test]
+fn a_repeat_of_a_withdrawing_toast_turns_it_back_from_where_it_stands_as_a_new_toast() {
+    let pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.withdraw_pane_previews(&|withdrawn_pane_id| withdrawn_pane_id == pane_id);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2250),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let mut repeated_entry = posted_entries[0].clone();
+    repeated_entry.repeat_count = 2;
+
+    toast_queue.queue_preview(&repeated_entry);
+    let turned_back_preview = clone_shown_preview(&toast_queue);
+    let turned_back_toast_number = toast_queue.find_shown_toast_number();
+    let mut slide_positions = Vec::new();
+    for elapsed_millisecond_count in [2250, 2750, 3250, 6000] {
+        toast_queue.advance(
+            compute_instant_after_milliseconds(start, elapsed_millisecond_count),
+            DEFAULT_TOAST_TIMING,
+            false,
+            &|_| false,
+        );
+        slide_positions.push(clone_shown_preview(&toast_queue));
+    }
+
+    assert_eq!(
+        turned_back_preview,
+        build_shown_entry_preview(&repeated_entry, 500)
+    );
+    assert_eq!(turned_back_toast_number, Some(1));
+    assert_eq!(toast_queue.waiting_entries.len(), 0);
+    assert_eq!(
+        slide_positions,
+        vec![
+            build_shown_entry_preview(&repeated_entry, 500),
+            build_shown_entry_preview(&repeated_entry, 250),
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 0),
+        ]
+    );
+}
+
+#[test]
+fn a_repeat_after_a_requested_withdraw_keeps_the_toast_in_place_as_a_new_toast() {
+    let posted_entries = post_own_entries(1);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.request_withdraw();
+    let mut repeated_entry = posted_entries[0].clone();
+    repeated_entry.repeat_count = 2;
+
+    toast_queue.queue_preview(&repeated_entry);
+    let mut slide_positions = Vec::new();
+    for elapsed_millisecond_count in [2000, 2500, 5900, 6100] {
+        toast_queue.advance(
+            compute_instant_after_milliseconds(start, elapsed_millisecond_count),
+            DEFAULT_TOAST_TIMING,
+            false,
+            &|_| false,
+        );
+        slide_positions.push(clone_shown_preview(&toast_queue));
+    }
+
+    assert_eq!(toast_queue.find_shown_toast_number(), Some(1));
+    assert_eq!(
+        slide_positions,
+        vec![
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 100),
+        ]
+    );
+}
+
+#[test]
+fn a_repeat_of_a_toast_in_place_counts_on_the_same_toast() {
+    let posted_entries = post_own_entries(1);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let mut repeated_entry = posted_entries[0].clone();
+    repeated_entry.repeat_count = 2;
+
+    toast_queue.queue_preview(&repeated_entry);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 4100),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert_eq!(toast_queue.find_shown_toast_number(), Some(0));
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        build_shown_entry_preview(&repeated_entry, 100)
+    );
+}
+
+#[test]
 fn withdrawing_a_pane_keeps_its_entries_counted_in_the_waiting_summary() {
     let withdrawn_pane_id = PaneId::new();
     let posted_entries = post_pane_entries(&[withdrawn_pane_id; 5]);

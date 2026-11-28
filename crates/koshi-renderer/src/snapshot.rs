@@ -274,32 +274,6 @@ impl RenderSnapshot {
         }
     }
 
-    /// Whether this frame draws content of the pane `pane_id`: a visible
-    /// pane slot of the active tab, or of a floating pane slot the viewing
-    /// client shows ([`LayoutAreaSnapshot::find_visible_pane_slot`]). A pane
-    /// on another tab, in a floating pane the client minimized, collapsed in a
-    /// stack, hidden behind a zoomed pane, or suppressed for want of room is
-    /// not drawn. A visible tiled pane that a floating pane covers in part or
-    /// whole is drawn.
-    #[must_use]
-    pub fn is_pane_content_drawn(&self, pane_id: PaneId) -> bool {
-        let session_snapshot = &self.session_snapshot;
-        session_snapshot
-            .active_tab_snapshot
-            .layout_area
-            .find_visible_pane_slot(pane_id)
-            .is_some()
-            || session_snapshot
-                .floating_pane_slots
-                .iter()
-                .any(|floating_pane_slot| {
-                    floating_pane_slot
-                        .layout_area
-                        .find_visible_pane_slot(pane_id)
-                        .is_some()
-                })
-    }
-
     /// The content snapshot of the pane `pane_id` in this frame, or `None`
     /// when the frame carries no content for it.
     #[must_use]
@@ -523,6 +497,39 @@ pub struct ViewerChrome {
     /// The viewer's toast as this frame draws it, over every other part of
     /// the pane area. `None` while no toast shows.
     pub notification_toast: Option<NotificationToast>,
+}
+
+impl ViewerChrome {
+    /// Whether a frame painted with this chrome, whose active tab has the
+    /// layout `active_tab_layout_area`, draws `floating_pane_slot`. No slot is
+    /// drawn while `active_tab_layout_area.is_every_pane_suppressed` is
+    /// `true`. While `is_pane_placement_visible` is `true`, the only slot
+    /// drawn is the one whose tree holds `placement_source_pane_id`, and only
+    /// while `active_tab_layout_area` holds no slot of that pane. Otherwise
+    /// every slot is drawn.
+    ///
+    /// Example: in pane placement mode for the tiled pane 1, a floating pane
+    /// that holds pane 2 is not drawn.
+    #[must_use]
+    pub fn is_floating_pane_slot_drawn(
+        &self,
+        active_tab_layout_area: &LayoutAreaSnapshot,
+        floating_pane_slot: &FloatingPaneSlot,
+    ) -> bool {
+        if active_tab_layout_area.is_every_pane_suppressed {
+            return false;
+        }
+        if !self.is_pane_placement_visible {
+            return true;
+        }
+        self.placement_source_pane_id
+            .is_some_and(|placement_source_pane_id| {
+                floating_pane_slot
+                    .layout_area
+                    .has_pane(placement_source_pane_id)
+                    && !active_tab_layout_area.has_pane(placement_source_pane_id)
+            })
+    }
 }
 
 /// One viewer's notification center as one frame draws it: where its body
@@ -806,38 +813,20 @@ impl<'a> FrameLayout<'a> {
     pub fn list_drawn_floating_pane_slots(
         &self,
     ) -> impl DoubleEndedIterator<Item = DrawnFloatingPaneSlot<'a>> + 'a {
-        let floating_pane_slots: &'a [FloatingPaneSlot] = if self
+        let frame_layout = *self;
+        let active_tab_layout_area = &frame_layout
             .session_snapshot
             .active_tab_snapshot
-            .layout_area
-            .is_every_pane_suppressed
-        {
-            &[]
-        } else {
-            &self.session_snapshot.floating_pane_slots
-        };
-        let frame_layout = *self;
-        let is_drawn_floating_pane_slot = move |floating_pane_slot: &&FloatingPaneSlot| {
-            if !frame_layout.viewer_chrome.is_pane_placement_visible {
-                return true;
-            }
-            frame_layout
-                .viewer_chrome
-                .placement_source_pane_id
-                .is_some_and(|placement_source_pane_id| {
-                    floating_pane_slot
-                        .layout_area
-                        .has_pane(placement_source_pane_id)
-                        && !frame_layout
-                            .session_snapshot
-                            .active_tab_snapshot
-                            .layout_area
-                            .has_pane(placement_source_pane_id)
-                })
-        };
-        floating_pane_slots
+            .layout_area;
+        frame_layout
+            .session_snapshot
+            .floating_pane_slots
             .iter()
-            .filter(is_drawn_floating_pane_slot)
+            .filter(move |floating_pane_slot| {
+                frame_layout
+                    .viewer_chrome
+                    .is_floating_pane_slot_drawn(active_tab_layout_area, floating_pane_slot)
+            })
             .map(move |floating_pane_slot| {
                 let outer_rect = match frame_layout.viewer_chrome.floating_pane_move_draft {
                     Some(floating_pane_move_draft)

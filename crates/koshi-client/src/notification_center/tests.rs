@@ -793,13 +793,21 @@ fn a_center_that_slides_out_takes_the_events_on_its_cells_and_acts_on_none() {
     post_own_entries(&mut client, 30);
     let start = Instant::now();
     open_center(&mut client, &mouse_frame);
-    client.advance_notification_clocks(start, false, None);
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 160), false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 160),
+        false,
+        &|_| false,
+    );
     client.apply_client_action(
         ClientActionKind::CloseNotificationCenter,
         Some(&mouse_frame),
     );
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 200), false, None);
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 200),
+        false,
+        &|_| false,
+    );
     let sliding_out_center = get_center(&client);
 
     let answers: Vec<Option<Vec<MouseAction>>> = [
@@ -1091,16 +1099,28 @@ fn an_opened_center_slides_in_and_a_closed_center_slides_out_with_the_keyboard_b
 
     open_center(&mut client, &mouse_frame);
     let wakeup_before_the_first_advance = client.compute_next_notification_wakeup(start);
-    client.advance_notification_clocks(start, false, None);
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 80), false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 80),
+        false,
+        &|_| false,
+    );
     let halfway_in = get_center(&client);
     client.apply_client_action(
         ClientActionKind::CloseNotificationCenter,
         Some(&mouse_frame),
     );
     let mode_while_sliding_out = client.get_active_input_mode();
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 100), false, None);
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 260), false, None);
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 100),
+        false,
+        &|_| false,
+    );
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 260),
+        false,
+        &|_| false,
+    );
 
     assert_eq!(wakeup_before_the_first_advance, Some(Duration::ZERO));
     assert_eq!(
@@ -1122,7 +1142,7 @@ fn a_sliding_center_wakes_once_per_frame_interval_of_the_frame_rate() {
     let start = Instant::now();
     open_center(&mut client, &mouse_frame);
 
-    client.advance_notification_clocks(start, false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
 
     assert_eq!(
         client.compute_next_notification_wakeup(compute_instant_after_milliseconds(start, 10)),
@@ -1164,8 +1184,12 @@ fn the_toast_clock_slides_the_toast_in_and_names_its_next_wakeup() {
     let start = Instant::now();
     let wakeup_before_the_clock = client.compute_next_notification_wakeup(start);
 
-    client.advance_notification_clocks(start, false, None);
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 500), false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 500),
+        false,
+        &|_| false,
+    );
 
     assert_eq!(wakeup_before_the_clock, Some(Duration::ZERO));
     assert_eq!(
@@ -1189,18 +1213,18 @@ fn reduced_motion_and_a_longer_toast_duration_set_the_toast_clock() {
     post_own_entries(&mut client, 1);
     let start = Instant::now();
 
-    client.advance_notification_clocks(start, false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
     let first_frame = client.build_notification_toast(&mouse_frame.committed_regions);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 4999),
         false,
-        None,
+        &|_| false,
     );
     let last_stay_frame = client.build_notification_toast(&mouse_frame.committed_regions);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 5000),
         false,
-        None,
+        &|_| false,
     );
 
     let shown_toast = Some(NotificationToast {
@@ -1221,11 +1245,11 @@ fn a_left_press_on_the_toast_close_control_withdraws_the_toast_and_keeps_its_ent
     let (mut client, mouse_frame) = build_sliding_center_client();
     post_own_entries(&mut client, 1);
     let start = Instant::now();
-    client.advance_notification_clocks(start, false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 1000),
         false,
-        None,
+        &|_| false,
     );
     let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
 
@@ -1236,12 +1260,12 @@ fn a_left_press_on_the_toast_close_control_withdraws_the_toast_and_keeps_its_ent
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 1000),
         false,
-        None,
+        &|_| false,
     );
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 2000),
         false,
-        None,
+        &|_| false,
     );
 
     assert_eq!(press_answer, Some(Vec::new()));
@@ -1258,11 +1282,11 @@ fn the_pointer_on_the_toast_close_control_hovers_no_pane() {
     let pane_id = mouse_frame.mouse_panes[0].pane_id;
     post_own_entries(&mut client, 1);
     let start = Instant::now();
-    client.advance_notification_clocks(start, false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 1000),
         false,
-        None,
+        &|_| false,
     );
     let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
 
@@ -1285,18 +1309,22 @@ fn a_press_on_a_drawn_toast_close_control_leaves_the_toast_that_replaced_it() {
     let (mut client, mouse_frame) = build_sliding_center_client();
     post_own_entries(&mut client, 2);
     let start = Instant::now();
-    client.advance_notification_clocks(start, false, None);
-    client.advance_notification_clocks(compute_instant_after_milliseconds(start, 500), false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
+    client.advance_notification_clocks(
+        compute_instant_after_milliseconds(start, 500),
+        false,
+        &|_| false,
+    );
     let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 1500),
         false,
-        None,
+        &|_| false,
     );
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 2000),
         false,
-        None,
+        &|_| false,
     );
     let shown_toast_number_at_the_press =
         client.get_notification_history().find_shown_toast_number();
@@ -1308,12 +1336,12 @@ fn a_press_on_a_drawn_toast_close_control_leaves_the_toast_that_replaced_it() {
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 3000),
         false,
-        None,
+        &|_| false,
     );
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 3500),
         false,
-        None,
+        &|_| false,
     );
 
     assert_eq!(
@@ -1337,11 +1365,11 @@ fn a_right_press_on_the_toast_close_control_is_taken_and_keeps_the_toast() {
     let (mut client, mouse_frame) = build_sliding_center_client();
     post_own_entries(&mut client, 1);
     let start = Instant::now();
-    client.advance_notification_clocks(start, false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 1000),
         false,
-        None,
+        &|_| false,
     );
     let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
 
@@ -1352,7 +1380,7 @@ fn a_right_press_on_the_toast_close_control_is_taken_and_keeps_the_toast() {
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 2000),
         false,
-        None,
+        &|_| false,
     );
 
     assert_eq!(press_answer, Some(Vec::new()));
@@ -1371,11 +1399,11 @@ fn a_press_on_the_toast_body_and_a_motion_on_its_close_control_take_the_next_pat
     let (mut client, mouse_frame) = build_sliding_center_client();
     post_own_entries(&mut client, 1);
     let start = Instant::now();
-    client.advance_notification_clocks(start, false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
     client.advance_notification_clocks(
         compute_instant_after_milliseconds(start, 1000),
         false,
-        None,
+        &|_| false,
     );
     let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
 
@@ -1406,7 +1434,7 @@ fn two_viewers_of_one_session_keep_their_own_toast_setting_and_clear_state() {
     let (mut toasting_client, _) = build_center_client();
     for client in [&mut quiet_client, &mut toasting_client] {
         client
-            .take_session_notification_queue(session_id, &session_queue, &[], None)
+            .take_session_notification_queue(session_id, &session_queue, &[], &|_| false)
             .expect("take the attach queue");
     }
     let posted_entry = session_queue
@@ -1423,7 +1451,7 @@ fn two_viewers_of_one_session_keep_their_own_toast_setting_and_clear_state() {
             .take_session_notification_post(
                 session_queue.get_revision(),
                 posted_entry.clone(),
-                None,
+                &|_| false,
             )
             .expect("take the post");
     }

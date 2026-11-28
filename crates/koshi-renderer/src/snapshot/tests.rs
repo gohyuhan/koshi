@@ -2,8 +2,8 @@
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
 //! cloning shares every row by reference (no cell copy), confirm equality, and
 //! check the mouse-frame projection, the borrowed layout views, the selection
-//! row lookup, the pane slots of a layout solve, the panes a frame draws, the
-//! tab a placement
+//! row lookup, the pane slots of a layout solve, the floating pane slots a
+//! frame draws, the tab a placement
 //! preview shows for a tiled and a floating source, the comparison of two
 //! frames' floating pane visibility, and a floating pane slot resized for a
 //! slide: each rect edge scaled per axis, a content rect only inside a box of
@@ -1335,57 +1335,47 @@ fn a_resized_split_slot_scales_each_pane_box_and_each_stack_header_and_keeps_its
     );
 }
 
-/// A frame draws the content of a visible slot of its active tab and of a
-/// visible slot of a floating pane it shows. A slot with no content (a
-/// collapsed stack member, a pane a zoomed sibling hides, a suppressed pane), a
-/// hidden slot inside a shown floating pane, and a pane the frame holds no slot
-/// for (on another tab, or in a minimized floating pane) are not drawn.
+/// A frame draws every floating pane slot outside pane placement mode, none
+/// while every pane of its active tab is suppressed, and in pane placement
+/// mode only the slot that holds the pane being placed, while the active tab
+/// holds no slot of that pane.
 #[test]
-fn a_frame_draws_only_the_visible_slots_of_its_active_tab_and_its_shown_floating_panes() {
-    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
-    let tiled_pane_id = render_snapshot
+fn a_frame_draws_a_floating_pane_slot_as_placement_mode_and_room_allow() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let active_tab_layout_area = &render_snapshot
         .session_snapshot
         .active_tab_snapshot
-        .layout_area
-        .pane_slots[0]
-        .pane_id;
-    let (hidden_tiled_pane_id, floating_pane_id, hidden_floating_pane_id) =
-        (PaneId::new(), PaneId::new(), PaneId::new());
-    render_snapshot
-        .session_snapshot
-        .active_tab_snapshot
-        .layout_area
-        .pane_slots
-        .push(PaneSlot {
-            pane_id: hidden_tiled_pane_id,
-            outer_rect: build_cell_rect(0, 0, 10, 1),
-            content_rect: None,
-            is_visible: false,
-            is_suppressed: false,
-        });
-    let mut floating_pane_slot =
+        .layout_area;
+    let tiled_pane_id = active_tab_layout_area.pane_slots[0].pane_id;
+    let floating_pane_id = PaneId::new();
+    let floating_pane_slot =
         build_one_pane_floating_pane_slot(floating_pane_id, build_cell_rect(0, 0, 40, 12), false);
-    floating_pane_slot.layout_area.pane_slots.push(PaneSlot {
-        pane_id: hidden_floating_pane_id,
-        outer_rect: build_cell_rect(0, 0, 0, 0),
-        content_rect: None,
-        is_visible: false,
-        is_suppressed: true,
-    });
-    render_snapshot
-        .session_snapshot
-        .floating_pane_slots
-        .push(floating_pane_slot);
+    let mut suppressed_layout_area = active_tab_layout_area.clone();
+    suppressed_layout_area.is_every_pane_suppressed = true;
+    let build_placement_chrome = |placement_source_pane_id: PaneId| ViewerChrome {
+        is_pane_placement_visible: true,
+        placement_source_pane_id: Some(placement_source_pane_id),
+        ..ViewerChrome::default()
+    };
 
     assert_eq!(
         [
-            tiled_pane_id,
-            hidden_tiled_pane_id,
-            floating_pane_id,
-            hidden_floating_pane_id,
-            PaneId::new(),
-        ]
-        .map(|pane_id| render_snapshot.is_pane_content_drawn(pane_id)),
-        [true, false, true, false, false]
+            ViewerChrome::default()
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            ViewerChrome::default()
+                .is_floating_pane_slot_drawn(&suppressed_layout_area, &floating_pane_slot),
+            build_placement_chrome(floating_pane_id)
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            build_placement_chrome(tiled_pane_id)
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            build_placement_chrome(PaneId::new())
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            ViewerChrome {
+                is_pane_placement_visible: true,
+                ..ViewerChrome::default()
+            }
+            .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+        ],
+        [true, false, true, false, false, false]
     );
 }

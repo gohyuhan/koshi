@@ -2328,7 +2328,7 @@ fn a_viewer_that_rejoins_after_a_restart_keeps_the_toast_of_a_pane_the_answer_li
     let mut session_notification_queue =
         NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
     client
-        .take_session_notification_queue(session_id, &session_notification_queue, &[], None)
+        .take_session_notification_queue(session_id, &session_notification_queue, &[], &|_| false)
         .expect("the attach answer's queue is the session's");
     let posted_entry = session_notification_queue
         .post_core_entry(
@@ -2343,7 +2343,7 @@ fn a_viewer_that_rejoins_after_a_restart_keeps_the_toast_of_a_pane_the_answer_li
         .take_session_notification_post(
             session_notification_queue.get_revision(),
             posted_entry,
-            None,
+            &|_| false,
         )
         .expect("the post names the queue the viewer took");
 
@@ -2354,7 +2354,7 @@ fn a_viewer_that_rejoins_after_a_restart_keeps_the_toast_of_a_pane_the_answer_li
         client,
         &mut build_test_screen(),
     );
-    client.advance_notification_clocks(Instant::now(), false, None);
+    client.advance_notification_clocks(Instant::now(), false, &|_| false);
 
     assert_eq!(attachment_ending, AttachmentEnding::ConnectionDied);
     assert_eq!(
@@ -16191,6 +16191,89 @@ fn build_minimized_pane_snapshots(
     (shown_snapshot, minimized_snapshot)
 }
 
+/// The frame on the screen draws a pane only where the last paint drew it: a
+/// visible slot of the painted tab, a visible slot of a floating pane the paint
+/// drew, and a floating pane that slides to the tray. In pane placement mode
+/// for a tiled pane, the floating pane is not drawn. Before the first paint,
+/// and after the slide ends, it is not drawn.
+#[test]
+fn the_screen_draws_a_pane_only_where_the_last_paint_drew_it() {
+    let mut client = build_test_client();
+    let mut screen = build_test_screen();
+    let floating_slot_pane_id = PaneId::new();
+    let (shown_snapshot, minimized_snapshot) =
+        build_minimized_pane_snapshots(floating_slot_pane_id);
+    let is_drawn_before_paint = screen.is_pane_content_drawn(floating_slot_pane_id);
+    let started_at = Instant::now();
+    commit_test_snapshot(&mut client, &mut screen, &shown_snapshot, started_at);
+    let is_drawn_when_shown = screen.is_pane_content_drawn(floating_slot_pane_id);
+    let is_unknown_pane_drawn = screen.is_pane_content_drawn(PaneId::new());
+    let tiled_pane_id = PaneId::new();
+    screen
+        .shown_tab_snapshot
+        .as_mut()
+        .expect("the painted tab")
+        .layout_area
+        .pane_slots
+        .push(PaneSlot {
+            pane_id: tiled_pane_id,
+            outer_rect: CoreRect {
+                origin: Point { column: 0, row: 0 },
+                size: Size {
+                    column_count: 10,
+                    row_count: 5,
+                },
+            },
+            content_rect: Some(CoreRect {
+                origin: Point { column: 1, row: 1 },
+                size: Size {
+                    column_count: 8,
+                    row_count: 3,
+                },
+            }),
+            is_visible: true,
+            is_suppressed: false,
+        });
+    let shown_chrome = &mut screen
+        .shown_viewer_paint
+        .as_mut()
+        .expect("the painted chrome")
+        .chrome;
+    shown_chrome.is_pane_placement_visible = true;
+    shown_chrome.placement_source_pane_id = Some(tiled_pane_id);
+    let is_drawn_in_placement = screen.is_pane_content_drawn(floating_slot_pane_id);
+    let is_placed_pane_drawn = screen.is_pane_content_drawn(tiled_pane_id);
+    let shown_chrome = &mut screen
+        .shown_viewer_paint
+        .as_mut()
+        .expect("the painted chrome")
+        .chrome;
+    shown_chrome.is_pane_placement_visible = false;
+    shown_chrome.placement_source_pane_id = None;
+    commit_test_snapshot(&mut client, &mut screen, &minimized_snapshot, started_at);
+    let is_drawn_while_sliding = screen.is_pane_content_drawn(floating_slot_pane_id);
+    commit_test_snapshot(
+        &mut client,
+        &mut screen,
+        &minimized_snapshot,
+        started_at + Duration::from_secs(10),
+    );
+    let is_drawn_after_slide = screen.is_pane_content_drawn(floating_slot_pane_id);
+
+    assert_eq!(
+        [
+            is_drawn_before_paint,
+            is_drawn_when_shown,
+            is_unknown_pane_drawn,
+            is_drawn_in_placement,
+            is_placed_pane_drawn,
+            is_drawn_while_sliding,
+            is_drawn_after_slide,
+        ],
+        [false, true, false, false, true, true, false]
+    );
+}
+
 /// Paint `render_snapshot` on `screen` for `client` at `current_time`.
 fn commit_test_snapshot(
     client: &mut Client,
@@ -16574,7 +16657,7 @@ fn run_painted_attachment_over_notification_events(
     incoming_events: Vec<Incoming>,
 ) -> Client {
     client
-        .take_session_notification_queue(session_id, attached_notification_queue, &[], None)
+        .take_session_notification_queue(session_id, attached_notification_queue, &[], &|_| false)
         .expect("the attach answer's queue is the session's");
     let client_id = client.get_client_id();
     let (request_sender, _request_receiver) = mpsc::channel();
@@ -17084,8 +17167,8 @@ fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_a
         SystemTime::UNIX_EPOCH,
     );
     let start = Instant::now();
-    client.advance_notification_clocks(start, false, None);
-    client.advance_notification_clocks(start + Duration::from_secs(1), false, None);
+    client.advance_notification_clocks(start, false, &|_| false);
+    client.advance_notification_clocks(start + Duration::from_secs(1), false, &|_| false);
     let painted_mouse_frame = paint_viewer_chrome(&client, &mouse_frame);
 
     let pending_mouse_actions = press_once(
@@ -17094,8 +17177,8 @@ fn a_press_on_the_toast_close_control_beside_the_open_tray_withdraws_the_toast_a
         Point { column: 76, row: 1 },
         start + Duration::from_secs(1),
     );
-    client.advance_notification_clocks(start + Duration::from_secs(1), false, None);
-    client.advance_notification_clocks(start + Duration::from_secs(2), false, None);
+    client.advance_notification_clocks(start + Duration::from_secs(1), false, &|_| false);
+    client.advance_notification_clocks(start + Duration::from_secs(2), false, &|_| false);
 
     assert_eq!(pending_mouse_actions, Vec::new());
     assert_eq!(client.floating_pane_tray, open_floating_pane_tray);
@@ -17276,11 +17359,9 @@ fn a_refresh_drops_a_toast_about_a_pane_the_shown_frame_draws_before_it_shows() 
         .expect("paint");
     let drawn_pane_id = PaneId::new();
     screen
-        .last_snapshot
+        .shown_tab_snapshot
         .as_mut()
-        .expect("the painted frame")
-        .session_snapshot
-        .active_tab_snapshot
+        .expect("the painted tab")
         .layout_area
         .pane_slots
         .push(PaneSlot {
@@ -17306,7 +17387,7 @@ fn a_refresh_drops_a_toast_about_a_pane_the_shown_frame_draws_before_it_shows() 
     let mut session_notification_queue =
         NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
     client
-        .take_session_notification_queue(session_id, &session_notification_queue, &[], None)
+        .take_session_notification_queue(session_id, &session_notification_queue, &[], &|_| false)
         .expect("the attach answer's queue is the session's");
     let posted_entry = session_notification_queue
         .post_core_entry(
@@ -17321,7 +17402,7 @@ fn a_refresh_drops_a_toast_about_a_pane_the_shown_frame_draws_before_it_shows() 
         .take_session_notification_post(
             session_notification_queue.get_revision(),
             posted_entry,
-            None,
+            &|_| false,
         )
         .expect("the post names the queue the viewer took");
     let queued_toast_number = client.get_notification_history().find_shown_toast_number();
@@ -18208,7 +18289,7 @@ fn a_pane_that_stops_waiting_or_closes_takes_its_toast_down_and_its_entry_stays(
                 build_session_event_incoming(ending_event.clone()),
             ],
         );
-        client.advance_notification_clocks(Instant::now(), false, None);
+        client.advance_notification_clocks(Instant::now(), false, &|_| false);
 
         assert_eq!(
             client.get_notification_history().find_shown_toast_number(),
@@ -18280,7 +18361,12 @@ fn a_post_about_a_pane_the_painted_frame_draws_shows_no_toast() {
             )
             .clone();
         let mut screen = build_test_screen();
-        screen.last_snapshot = Some(painted_snapshot.clone());
+        commit_test_snapshot(
+            &mut build_test_client(),
+            &mut screen,
+            &painted_snapshot,
+            Instant::now(),
+        );
 
         let client = run_painted_attachment_over_notification_events(
             build_test_client(),
@@ -18355,7 +18441,7 @@ fn a_resync_takes_down_the_toast_of_a_pane_that_waits_no_more_and_shows_one_that
             }),
         ],
     );
-    client.advance_notification_clocks(Instant::now(), false, None);
+    client.advance_notification_clocks(Instant::now(), false, &|_| false);
 
     assert_eq!(
         client.get_notification_history().find_shown_toast_number(),
