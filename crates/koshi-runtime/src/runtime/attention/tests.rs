@@ -2804,26 +2804,33 @@ fn a_dropped_raise_posts_no_entry() {
 fn every_subscribed_client_receives_the_posted_entry() {
     let mut fixture = build_attention_fixture();
     let build_pane_id = fixture.build_pane_id;
+    let bob_client_id = fixture.attach_bob_to_build_pane(TerminalFocus::Unfocused);
+    let (bob_delivery_receiver, _) = fixture.server.subscribe(bob_client_id, 60, None);
+    fixture.server.handle_attach_answer_received(bob_client_id);
+    let _ = fixture.alice_delivery_receiver.try_iter().count();
+    let _ = bob_delivery_receiver.try_iter().count();
 
     fixture.apply_build_pane_facts(vec![build_notify_fact(None, "x")], build_wall_time(10));
 
-    let posted_subjects: Vec<(u64, Option<NotificationSubject>, String)> = fixture
-        .alice_delivery_receiver
-        .try_iter()
-        .filter_map(|delivery| match delivery {
-            Delivery::NotificationPosted {
-                revision,
-                posted_entry,
-            } => Some((revision, posted_entry.subject, posted_entry.text)),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        posted_subjects,
-        [(
-            1,
-            build_pane_subject(build_pane_id, AttentionReasonKind::Notify),
-            format!("code › {} · x", build_pane_id.format_short_label()),
-        )]
-    );
+    let expected_posted_entries = [(
+        1,
+        build_pane_subject(build_pane_id, AttentionReasonKind::Notify),
+        format!("code › {} · x", build_pane_id.format_short_label()),
+    )];
+    for (client_name, delivery_receiver) in [
+        ("alice", &fixture.alice_delivery_receiver),
+        ("bob", &bob_delivery_receiver),
+    ] {
+        let posted_entries: Vec<(u64, Option<NotificationSubject>, String)> = delivery_receiver
+            .try_iter()
+            .filter_map(|delivery| match delivery {
+                Delivery::NotificationPosted {
+                    revision,
+                    posted_entry,
+                } => Some((revision, posted_entry.subject, posted_entry.text)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(posted_entries, expected_posted_entries, "{client_name}");
+    }
 }

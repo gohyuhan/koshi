@@ -22,7 +22,8 @@
 //!
 //! A read that makes the pane wait with a new reason posts one entry to the
 //! session's notification queue, once for each reason kind between two
-//! visits ([`Server::post_pane_attention_notification`]).
+//! visits. A bell posts no entry
+//! ([`Server::post_pane_attention_notification`]).
 //!
 //! Example: `cargo test` runs for 12 seconds in pane 3 while Alice reads tab
 //! 2, and fails with exit code `101`. Pane 3 waits with
@@ -84,7 +85,8 @@ impl Server {
     /// [`Event::PaneAttentionCleared`] with `client_id: None` when the pane
     /// waited before and waits no more. A `PaneAttentionRaised` also posts
     /// its reason to the session's notification queue
-    /// ([`Self::post_pane_attention_notification`]).
+    /// ([`Self::post_pane_attention_notification`]), except for a bell and
+    /// for a reason kind the pane posted since a client last attended it.
     ///
     /// Example: `C` read at 14:00:00 and `D;101` read at 14:00:12.2 give
     /// `PaneCommandStarted`, then `PaneCommandFinished` and

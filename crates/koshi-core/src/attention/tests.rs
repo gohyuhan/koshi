@@ -193,7 +193,7 @@ fn each_reason_gives_the_severity_and_text_of_its_entry() {
             exit_code,
             elapsed_secs,
         };
-    let root_records = [build_program_status_record(
+    let root_program_status_records = [build_program_status_record(
         "",
         ProgramStatusState::Blocked,
         Some("codex"),
@@ -269,8 +269,9 @@ fn each_reason_gives_the_severity_and_text_of_its_entry() {
     ] {
         let description = format!("{reason:?}");
         assert_eq!(
-            reason.format_notification_entry(&root_records),
-            expected_entry.map(|(severity, text)| (severity, text.to_string())),
+            reason.format_notification_entry(&root_program_status_records),
+            expected_entry
+                .map(|(severity, notification_text)| (severity, notification_text.to_string())),
             "{description}"
         );
     }
@@ -278,7 +279,7 @@ fn each_reason_gives_the_severity_and_text_of_its_entry() {
 
 #[test]
 fn a_record_label_takes_its_own_app_name_else_the_nearest_ancestor_one_then_its_title() {
-    let records = [
+    let program_status_records = [
         build_program_status_record("", ProgramStatusState::Working, Some("agent"), None),
         build_program_status_record("deploy", ProgramStatusState::Working, Some("deploy"), None),
         build_program_status_record(
@@ -295,13 +296,29 @@ fn a_record_label_takes_its_own_app_name_else_the_nearest_ancestor_one_then_its_
         ),
         build_program_status_record("build/linux/arm", ProgramStatusState::Blocked, None, None),
     ];
-    let records_without_root = &records[1..];
+    let program_status_records_without_root = &program_status_records[1..];
     for (program_status_records, record_id, expected_text) in [
-        (&records[..], "deploy/eu-west", "deploy / EU West: blocked"),
-        (&records[..], "deploy/us-east", "terraform: blocked"),
-        (&records[..], "build/linux/arm", "agent: blocked"),
-        (&records[..], "", "agent: blocked"),
-        (records_without_root, "build/linux/arm", "blocked"),
+        (
+            &program_status_records[..],
+            "deploy/eu-west",
+            "deploy / EU West: blocked",
+        ),
+        (
+            &program_status_records[..],
+            "deploy/us-east",
+            "terraform: blocked",
+        ),
+        (
+            &program_status_records[..],
+            "build/linux/arm",
+            "agent: blocked",
+        ),
+        (&program_status_records[..], "", "agent: blocked"),
+        (
+            program_status_records_without_root,
+            "build/linux/arm",
+            "blocked",
+        ),
         (&[][..], "gone", "blocked"),
     ] {
         let reason = AttentionReason::ProgramBlocked {
@@ -316,7 +333,7 @@ fn a_record_label_takes_its_own_app_name_else_the_nearest_ancestor_one_then_its_
         );
     }
 
-    let title_only_records = [build_program_status_record(
+    let title_only_program_status_records = [build_program_status_record(
         "job",
         ProgramStatusState::Done,
         None,
@@ -327,7 +344,7 @@ fn a_record_label_takes_its_own_app_name_else_the_nearest_ancestor_one_then_its_
         message: None,
     };
     assert_eq!(
-        done_reason.format_notification_entry(&title_only_records),
+        done_reason.format_notification_entry(&title_only_program_status_records),
         Some((NotificationSeverity::Info, "Nightly: done".to_string()))
     );
 }
