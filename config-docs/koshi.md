@@ -241,6 +241,45 @@ The mark comes before every other border color: a waiting pane that has the
 focus or the pointer shows the attention color. `koshi list-panes` names the
 reason each pane waits in its `attention` column ([cli.md](cli.md)).
 
+A pane that starts to wait, or waits with a new reason, also posts one
+notification to the session. Every attached client lists it in its
+notification center ([`notifications`](#notifications)). A bell posts no
+notification. The text reads `<place> › <pane> · <what>`:
+
+- `<place>` is the name of the tab that holds the pane, or `floating` for a
+  floating pane.
+- `<pane>` is the title on the pane's border, or `pane …a1b2` (the last four
+  hex digits of the pane id) when the pane has no title.
+- `<what>` is what the program sent:
+
+| Reason | Level | `<what>` |
+|---|---|---|
+| desktop notification | info | `<title>: <body>`, or `<body>` when it has no title |
+| finished command, exit code `0` or none | info | `finished after <time>` |
+| finished command, another exit code | warning | `failed — exit <code> after <time>` |
+| `blocked` report | warning | `<app>: blocked (<kind>) — <message>` |
+| `done` report | info | `<app>: done — <message>` |
+| `error` report | error | `<app>: failed — <message>` |
+
+`<time>` reads `45s`, `2m 14s` or `1h 3m`. A part the program did not send
+drops out with its separator. `<app>` is the record's app name, or the app
+name of the nearest record above it, then ` / ` and the record's title when it
+has one.
+
+Examples:
+
+```text
+agents › pane …a1b2 · codex: blocked (question) — Which branch?
+build › cargo test · failed — exit 101 after 2m 14s
+floating › pane …09f3 · Claude Code: Waiting for input
+```
+
+A pane posts each reason at most once between two visits. A visit is one of
+the first three ends of a wait above, also on a pane that waits for nobody.
+Example: a program that reports `blocked`, `working` and `blocked` again 1000
+times while nobody visits the pane posts one notification. A visit, then
+`blocked` again, posts a new one.
+
 Example: a program writes `BEL` and `ESC ] 9 ; tests passed ESC \` 500 times
 in one write. Each client receives one start of a wait, with the reason
 `Notify`.

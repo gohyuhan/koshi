@@ -63,7 +63,7 @@ fn a_post_takes_the_next_sequence_under_the_queue_owner_and_epoch() {
             text: "pane …a1b2 killed by signal 9".to_string(),
             created_at: compute_time_after_unix_epoch(10),
             repeat_count: 1,
-            subject_client_id: None,
+            subject: None,
         }
     );
     assert_eq!(second_entry.notification_id.sequence, 1);
@@ -106,32 +106,32 @@ fn a_post_equal_to_the_newest_entry_merges_into_it() {
 }
 
 #[test]
-fn a_post_merges_into_the_newest_entry_only_when_it_reports_on_the_same_client() {
+fn a_post_merges_into_the_newest_entry_only_when_it_reports_on_the_same_subject() {
     let mut notification_queue = create_session_queue();
     let first_bob_client_id = ClientId::new();
     let second_bob_client_id = ClientId::new();
 
-    for (subject_client_id, created_at_seconds) in [
-        (Some(first_bob_client_id), 1),
-        (Some(second_bob_client_id), 2),
-        (Some(second_bob_client_id), 3),
+    for (subject, created_at_seconds) in [
+        (Some(NotificationSubject::Client(first_bob_client_id)), 1),
+        (Some(NotificationSubject::Client(second_bob_client_id)), 2),
+        (Some(NotificationSubject::Client(second_bob_client_id)), 3),
         (None, 4),
     ] {
         notification_queue.post_core_entry(
             NotificationSeverity::Info,
             "bob (2) left",
-            subject_client_id,
+            subject,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(created_at_seconds),
         );
     }
 
-    let listed_entries: Vec<(u64, Option<ClientId>, u32)> = notification_queue
+    let listed_entries: Vec<(u64, Option<NotificationSubject>, u32)> = notification_queue
         .list_queued_entries()
         .map(|queued_entry| {
             (
                 queued_entry.notification_id.sequence,
-                queued_entry.subject_client_id,
+                queued_entry.subject,
                 queued_entry.repeat_count,
             )
         })
@@ -139,12 +139,60 @@ fn a_post_merges_into_the_newest_entry_only_when_it_reports_on_the_same_client()
     assert_eq!(
         listed_entries,
         vec![
-            (0, Some(first_bob_client_id), 1),
-            (1, Some(second_bob_client_id), 2),
+            (0, Some(NotificationSubject::Client(first_bob_client_id)), 1),
+            (
+                1,
+                Some(NotificationSubject::Client(second_bob_client_id)),
+                2
+            ),
             (2, None, 1),
         ]
     );
     assert_eq!(notification_queue.get_revision(), 4);
+}
+
+#[test]
+fn a_post_about_a_pane_merges_only_into_an_entry_about_the_same_pane_and_kind() {
+    let mut notification_queue = create_session_queue();
+    let pane_id = PaneId::new();
+    let pane_subject = |attention_reason_kind: AttentionReasonKind| {
+        Some(NotificationSubject::Pane {
+            pane_id,
+            attention_reason_kind: Some(attention_reason_kind),
+        })
+    };
+
+    for (subject, created_at_seconds) in [
+        (pane_subject(AttentionReasonKind::ProgramBlocked), 1),
+        (pane_subject(AttentionReasonKind::ProgramBlocked), 2),
+        (pane_subject(AttentionReasonKind::ProgramDone), 3),
+        (
+            Some(NotificationSubject::Pane {
+                pane_id: PaneId::new(),
+                attention_reason_kind: Some(AttentionReasonKind::ProgramDone),
+            }),
+            4,
+        ),
+    ] {
+        notification_queue.post_core_entry(
+            NotificationSeverity::Warning,
+            "code › pane …a1b2 · blocked",
+            subject,
+            NonZeroU32::MIN,
+            compute_time_after_unix_epoch(created_at_seconds),
+        );
+    }
+
+    let listed_entries: Vec<(u64, u32)> = notification_queue
+        .list_queued_entries()
+        .map(|queued_entry| {
+            (
+                queued_entry.notification_id.sequence,
+                queued_entry.repeat_count,
+            )
+        })
+        .collect();
+    assert_eq!(listed_entries, vec![(0, 2), (1, 1), (2, 1)]);
 }
 
 #[test]
@@ -461,7 +509,7 @@ fn a_replacing_post_takes_the_place_of_the_newest_entry_that_holds_the_replaced_
         .post_core_entry(
             NotificationSeverity::Info,
             "bob (2) disconnected",
-            Some(dropped_client_id),
+            Some(NotificationSubject::Client(dropped_client_id)),
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(10),
         )
@@ -471,7 +519,7 @@ fn a_replacing_post_takes_the_place_of_the_newest_entry_that_holds_the_replaced_
         .post_core_entry_replacing(
             NotificationSeverity::Info,
             "bob (2) reconnected",
-            Some(returning_client_id),
+            Some(NotificationSubject::Client(returning_client_id)),
             "bob (2) disconnected",
             compute_time_after_unix_epoch(12),
         )
@@ -486,7 +534,7 @@ fn a_replacing_post_takes_the_place_of_the_newest_entry_that_holds_the_replaced_
             text: "bob (2) reconnected".to_string(),
             created_at: compute_time_after_unix_epoch(12),
             repeat_count: 2,
-            subject_client_id: Some(returning_client_id),
+            subject: Some(NotificationSubject::Client(returning_client_id)),
         }
     );
     assert_eq!(
@@ -507,7 +555,7 @@ fn a_replacing_post_adds_an_entry_when_the_newest_entry_is_another_text_severity
             .post_core_entry_replacing(
                 NotificationSeverity::Info,
                 "bob (2) reconnected",
-                Some(client_id),
+                Some(NotificationSubject::Client(client_id)),
                 "bob (2) disconnected",
                 compute_time_after_unix_epoch(12),
             )
@@ -560,7 +608,7 @@ fn a_replacing_post_of_the_newest_entrys_own_text_and_subject_merges_as_a_repeat
     notification_queue.post_core_entry(
         NotificationSeverity::Info,
         "bob (2) reconnected",
-        Some(client_id),
+        Some(NotificationSubject::Client(client_id)),
         NonZeroU32::MIN,
         compute_time_after_unix_epoch(10),
     );
@@ -569,7 +617,7 @@ fn a_replacing_post_of_the_newest_entrys_own_text_and_subject_merges_as_a_repeat
         .post_core_entry_replacing(
             NotificationSeverity::Info,
             "bob (2) reconnected",
-            Some(client_id),
+            Some(NotificationSubject::Client(client_id)),
             "bob (2) disconnected",
             compute_time_after_unix_epoch(12),
         )

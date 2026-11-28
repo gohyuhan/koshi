@@ -2,13 +2,17 @@
 //!
 //! A layout tree holds only a `PaneId` at each leaf. [`PaneRecord`] holds
 //! everything else about that pane: its spawn specification, its working
-//! directory, what its program asked a person to look at, and what its
-//! programs reported about themselves.
+//! directory, what its program asked a person to look at, which of those
+//! requests it posted a notification entry for, and what its programs
+//! reported about themselves.
 
 use std::path::PathBuf;
 
 use koshi_core::{
-    attention::Attention, ids::PaneId, process::SpawnSpec, program_status::ProgramStatusRecord,
+    attention::{Attention, AttentionReasonKind},
+    ids::PaneId,
+    process::SpawnSpec,
+    program_status::ProgramStatusRecord,
 };
 use serde::{Deserialize, Serialize};
 
@@ -34,11 +38,17 @@ pub struct PaneRecord {
     /// one for each record id. A record without `program_status_records` is
     /// refused.
     pub program_status_records: Vec<ProgramStatusRecord>,
+    /// The reason kinds this pane posted a notification entry for since a
+    /// client last attended it, in the order it posted them, each once.
+    /// Empty for a pane that posted none since. A record without
+    /// `notified_attention_kinds` is refused.
+    pub notified_attention_kinds: Vec<AttentionReasonKind>,
 }
 
 impl PaneRecord {
     /// A record for the terminal pane `pane_id` with no spawn specification,
-    /// no working directory, no attention, and no program status record.
+    /// no working directory, no attention, no program status record, and no
+    /// notified attention kind.
     pub fn from_terminal_pane(pane_id: PaneId) -> Self {
         Self {
             pane_id,
@@ -46,6 +56,7 @@ impl PaneRecord {
             working_directory: None,
             attention: None,
             program_status_records: Vec::new(),
+            notified_attention_kinds: Vec::new(),
         }
     }
 

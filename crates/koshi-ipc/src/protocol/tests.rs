@@ -522,7 +522,7 @@ pub(crate) fn build_fixed_notification_entry_json() -> serde_json::Value {
         "text": "pane …a1b2 killed by signal 9",
         "created_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
         "repeat_count": 1,
-        "subject_client_id": null
+        "subject": null
     })
 }
 

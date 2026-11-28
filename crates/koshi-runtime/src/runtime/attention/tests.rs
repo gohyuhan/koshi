@@ -17,6 +17,7 @@ use koshi_core::key::{
     BindingModifierFlags, Key, KeyEventKind, KeyIdentity, KeyInput, KeyModifierFlags, NamedKey,
 };
 use koshi_core::mouse::{MouseButton, MouseKind};
+use koshi_core::notification::NotificationSeverity;
 use koshi_core::process::{ExitStatus, PtySize};
 use koshi_core::program_status::{
     BlockedKind, ProgramStatusRecord, ProgramStatusState, PROGRAM_STATUS_RECORDS_MAX,
@@ -32,7 +33,10 @@ use koshi_terminal::state::ProgramStatusFact;
 use koshi_test_support::fake_pty::FakePtyBackend;
 use koshi_test_support::fixtures::build_spawn_spec;
 
-use crate::runtime::command::tests::{attach_client, build_in_session_source, build_tab};
+use crate::runtime::command::tests::{
+    attach_client, build_floating_new_pane_args, build_in_session_source, build_tab,
+    create_floating_pane,
+};
 use crate::runtime::delivery_queue::DeliveryReceiver;
 use crate::runtime::pty_inbox::InboxSink;
 use crate::runtime::render_schedule::tests::{
@@ -40,6 +44,19 @@ use crate::runtime::render_schedule::tests::{
 };
 
 use super::*;
+
+/// What one queued notification entry holds, as
+/// [`AttentionFixture::list_session_entries`] lists it.
+type SessionEntrySummary = (
+    NotificationSeverity,
+    String,
+    Option<NotificationSubject>,
+    u32,
+);
+
+/// The severity, the text after `<place> › <pane>` and the reason kind of the
+/// one entry a raise posts, or `None` for a raise that posts no entry.
+type ExpectedPostedEntry = Option<(NotificationSeverity, &'static str, AttentionReasonKind)>;
 
 /// A server holding one session with two tabs. Tab `code` shows
 /// `build_pane_id`, and tab `docs` shows `docs_pane_id`. Each pane has an
@@ -149,9 +166,42 @@ impl AttentionFixture {
     }
 
     /// Everything the bus delivered to Alice since the last call, oldest
-    /// first.
+    /// first, except each `NotificationPosted`:
+    /// [`list_session_entries`](Self::list_session_entries) reads the entries
+    /// from the session's queue.
     fn take_alice_deliveries(&self) -> Vec<Delivery> {
-        self.alice_delivery_receiver.try_iter().collect()
+        self.alice_delivery_receiver
+            .try_iter()
+            .filter(|delivery| !matches!(delivery, Delivery::NotificationPosted { .. }))
+            .collect()
+    }
+
+    /// The severity, the text, the subject and the repeat count of each entry
+    /// of the session's notification queue, oldest first.
+    fn list_session_entries(&self) -> Vec<SessionEntrySummary> {
+        self.server.session_by_id[&self.session_id]
+            .notification_queue
+            .list_queued_entries()
+            .map(|queued_entry| {
+                (
+                    queued_entry.severity,
+                    queued_entry.text.clone(),
+                    queued_entry.subject,
+                    queued_entry.repeat_count,
+                )
+            })
+            .collect()
+    }
+
+    /// The reason kinds `build_pane_id` posted an entry for since its last
+    /// visit.
+    fn list_build_pane_notified_kinds(&self) -> Vec<AttentionReasonKind> {
+        self.server.session_by_id[&self.session_id]
+            .panes
+            .get_pane_record_by_id(self.build_pane_id)
+            .expect("the pane has a record")
+            .notified_attention_kinds
+            .clone()
     }
 
     /// The attention that `pane_id`'s record holds.
@@ -2064,5 +2114,716 @@ fn a_child_exit_removes_the_pane_with_its_records_and_its_wait() {
             .panes
             .get_pane_record_by_id(fixture.build_pane_id),
         None
+    );
+}
+
+/// An OSC 7501 report for `record_id` in `program_status_state` with
+/// `blocked_kind`, `app_name`, `title` and `message`, and no progress.
+fn build_labelled_report_fact(
+    record_id: &str,
+    program_status_state: ProgramStatusState,
+    blocked_kind: Option<BlockedKind>,
+    app_name: Option<&str>,
+    title: Option<&str>,
+    message: Option<&str>,
+) -> ProgramFact {
+    ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
+        record_id: record_id.to_string(),
+        program_status_state,
+        blocked_kind,
+        progress_percent: None,
+        app_name: app_name.map(str::to_string),
+        title: title.map(str::to_string),
+        message: message.map(str::to_string),
+    })
+}
+
+/// A desktop notification titled `title` with `body` and no OSC 99 id.
+fn build_notify_fact(title: Option<&str>, body: &str) -> ProgramFact {
+    ProgramFact::Notify {
+        title: title.map(str::to_string),
+        body: body.to_string(),
+        notification_id: None,
+    }
+}
+
+/// The subject of an entry that an attention raise of `attention_reason_kind`
+/// on `pane_id` posts.
+fn build_pane_subject(
+    pane_id: PaneId,
+    attention_reason_kind: AttentionReasonKind,
+) -> Option<NotificationSubject> {
+    Some(NotificationSubject::Pane {
+        pane_id,
+        attention_reason_kind: Some(attention_reason_kind),
+    })
+}
+
+/// Apply a command start and, `command_seconds` later, a command finish with
+/// `exit_code` to `pane_id` as one read.
+fn apply_timed_command(
+    fixture: &mut AttentionFixture,
+    pane_id: PaneId,
+    exit_code: Option<i32>,
+    command_seconds: u64,
+) {
+    let started_instant = Instant::now();
+    let finished_instant = started_instant + Duration::from_secs(command_seconds);
+    fixture.server.apply_program_facts(
+        pane_id,
+        vec![
+            TimedProgramFact {
+                program_fact: ProgramFact::CommandStarted,
+                read_instant: started_instant,
+            },
+            TimedProgramFact {
+                program_fact: ProgramFact::CommandFinished { exit_code },
+                read_instant: finished_instant,
+            },
+        ],
+        build_wall_time(1000),
+        finished_instant,
+    );
+}
+
+#[test]
+fn each_raise_posts_one_entry_with_the_severity_and_text_of_its_reason() {
+    let read_at = build_wall_time(100);
+    let cases: Vec<(Vec<ProgramFact>, ExpectedPostedEntry)> = vec![
+        (
+            vec![build_notify_fact(Some("Claude Code"), "Waiting for input")],
+            Some((
+                NotificationSeverity::Info,
+                " · Claude Code: Waiting for input",
+                AttentionReasonKind::Notify,
+            )),
+        ),
+        (
+            vec![build_notify_fact(None, "Build done")],
+            Some((
+                NotificationSeverity::Info,
+                " · Build done",
+                AttentionReasonKind::Notify,
+            )),
+        ),
+        (
+            vec![build_notify_fact(Some("Build"), "")],
+            Some((
+                NotificationSeverity::Info,
+                " · Build",
+                AttentionReasonKind::Notify,
+            )),
+        ),
+        (
+            vec![build_notify_fact(None, "")],
+            Some((NotificationSeverity::Info, "", AttentionReasonKind::Notify)),
+        ),
+        (
+            vec![ProgramFact::CommandFinished { exit_code: None }],
+            Some((
+                NotificationSeverity::Info,
+                " · finished",
+                AttentionReasonKind::CommandFinished,
+            )),
+        ),
+        (
+            vec![ProgramFact::CommandFinished { exit_code: Some(1) }],
+            Some((
+                NotificationSeverity::Warning,
+                " · failed — exit 1",
+                AttentionReasonKind::CommandFinished,
+            )),
+        ),
+        (
+            vec![build_labelled_report_fact(
+                "",
+                ProgramStatusState::Blocked,
+                Some(BlockedKind::Question),
+                Some("codex"),
+                None,
+                Some("Which branch?"),
+            )],
+            Some((
+                NotificationSeverity::Warning,
+                " · codex: blocked (question) — Which branch?",
+                AttentionReasonKind::ProgramBlocked,
+            )),
+        ),
+        (
+            vec![build_report_fact("", ProgramStatusState::Blocked, None)],
+            Some((
+                NotificationSeverity::Warning,
+                " · blocked",
+                AttentionReasonKind::ProgramBlocked,
+            )),
+        ),
+        (
+            vec![build_labelled_report_fact(
+                "",
+                ProgramStatusState::Done,
+                None,
+                Some("codex"),
+                None,
+                Some("Merged"),
+            )],
+            Some((
+                NotificationSeverity::Info,
+                " · codex: done — Merged",
+                AttentionReasonKind::ProgramDone,
+            )),
+        ),
+        (
+            vec![build_report_fact(
+                "",
+                ProgramStatusState::Error,
+                Some("Tests failed"),
+            )],
+            Some((
+                NotificationSeverity::Error,
+                " · failed — Tests failed",
+                AttentionReasonKind::ProgramFailed,
+            )),
+        ),
+        (vec![ProgramFact::Bell], None),
+    ];
+    for (program_facts, expected_entry) in cases {
+        let mut fixture = build_attention_fixture();
+        let build_pane_id = fixture.build_pane_id;
+        let description = format!("{program_facts:?}");
+
+        fixture.apply_build_pane_facts(program_facts, read_at);
+
+        let pane_place = format!("code › {}", build_pane_id.format_short_label());
+        let expected_entries: Vec<SessionEntrySummary> = expected_entry
+            .into_iter()
+            .map(|(severity, reason_text, attention_reason_kind)| {
+                (
+                    severity,
+                    format!("{pane_place}{reason_text}"),
+                    build_pane_subject(build_pane_id, attention_reason_kind),
+                    1,
+                )
+            })
+            .collect();
+        assert_eq!(
+            fixture.list_session_entries(),
+            expected_entries,
+            "{description}"
+        );
+        let expected_kinds: Vec<AttentionReasonKind> = expected_entries
+            .iter()
+            .filter_map(|(_, _, subject, _)| match subject {
+                Some(NotificationSubject::Pane {
+                    attention_reason_kind,
+                    ..
+                }) => *attention_reason_kind,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            fixture.list_build_pane_notified_kinds(),
+            expected_kinds,
+            "{description}"
+        );
+    }
+}
+
+#[test]
+fn a_finished_command_names_its_exit_code_and_its_whole_running_time() {
+    for (exit_code, command_seconds, expected_severity, expected_reason_text) in [
+        (
+            Some(0),
+            45,
+            NotificationSeverity::Info,
+            "finished after 45s",
+        ),
+        (
+            None,
+            3780,
+            NotificationSeverity::Info,
+            "finished after 1h 3m",
+        ),
+        (
+            Some(101),
+            134,
+            NotificationSeverity::Warning,
+            "failed — exit 101 after 2m 14s",
+        ),
+    ] {
+        let mut fixture = build_attention_fixture();
+        let build_pane_id = fixture.build_pane_id;
+
+        apply_timed_command(&mut fixture, build_pane_id, exit_code, command_seconds);
+
+        assert_eq!(
+            fixture.list_session_entries(),
+            [(
+                expected_severity,
+                format!(
+                    "code › {} · {expected_reason_text}",
+                    build_pane_id.format_short_label()
+                ),
+                build_pane_subject(build_pane_id, AttentionReasonKind::CommandFinished),
+                1,
+            )]
+        );
+    }
+}
+
+#[test]
+fn an_entry_names_the_pane_by_its_border_title_and_by_its_short_label_when_the_title_is_empty() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    fixture.write_build_pane_output(b"\x1b]2;cargo test\x07", build_wall_time(10));
+
+    apply_timed_command(&mut fixture, build_pane_id, Some(101), 134);
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Warning,
+            "code › cargo test · failed — exit 101 after 2m 14s".to_string(),
+            build_pane_subject(build_pane_id, AttentionReasonKind::CommandFinished),
+            1,
+        )]
+    );
+
+    let mut untitled_fixture = build_attention_fixture();
+    untitled_fixture.write_build_pane_output(b"\x1b]2;\x07", build_wall_time(10));
+
+    untitled_fixture
+        .apply_build_pane_facts(vec![build_notify_fact(None, "Done")], build_wall_time(20));
+
+    assert_eq!(
+        untitled_fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Info,
+            format!(
+                "code › {} · Done",
+                untitled_fixture.build_pane_id.format_short_label()
+            ),
+            build_pane_subject(untitled_fixture.build_pane_id, AttentionReasonKind::Notify),
+            1,
+        )]
+    );
+}
+
+#[test]
+fn a_child_record_is_labelled_with_its_inherited_app_name_and_its_title() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+
+    fixture.apply_build_pane_facts(
+        vec![
+            build_labelled_report_fact(
+                "deploy",
+                ProgramStatusState::Working,
+                None,
+                Some("deploy"),
+                None,
+                None,
+            ),
+            build_labelled_report_fact(
+                "deploy/eu-west",
+                ProgramStatusState::Blocked,
+                Some(BlockedKind::Permission),
+                None,
+                Some("EU West"),
+                Some("Approve deploy to eu-west (production)?"),
+            ),
+        ],
+        build_wall_time(100),
+    );
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Warning,
+            format!(
+                "code › {} · deploy / EU West: blocked (permission) — Approve deploy to eu-west (production)?",
+                build_pane_id.format_short_label()
+            ),
+            build_pane_subject(build_pane_id, AttentionReasonKind::ProgramBlocked),
+            1,
+        )]
+    );
+}
+
+#[test]
+fn a_floating_pane_posts_its_entry_under_the_place_floating() {
+    let mut fixture = build_attention_fixture();
+    let in_session_source = build_in_session_source(
+        fixture.session_id,
+        Some(fixture.alice_client_id),
+        fixture.docs_pane_id,
+    );
+    let floating_pane_id = create_floating_pane(
+        &mut fixture.server,
+        in_session_source,
+        build_floating_new_pane_args(None, None, false),
+    );
+    let read_instant = Instant::now();
+
+    fixture.server.apply_program_facts(
+        floating_pane_id,
+        build_timed_program_facts(
+            vec![build_notify_fact(Some("Claude Code"), "Waiting for input")],
+            read_instant,
+        ),
+        build_wall_time(100),
+        read_instant,
+    );
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Info,
+            format!(
+                "floating › {} · Claude Code: Waiting for input",
+                floating_pane_id.format_short_label()
+            ),
+            build_pane_subject(floating_pane_id, AttentionReasonKind::Notify),
+            1,
+        )]
+    );
+}
+
+#[test]
+fn a_program_that_loops_through_blocked_with_no_visit_posts_one_entry() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    let blocked_report = build_report_fact("", ProgramStatusState::Blocked, Some("Which branch?"));
+    let working_report = build_report_fact("", ProgramStatusState::Working, None);
+
+    for loop_index in 0..1000_u64 {
+        fixture.apply_build_pane_facts(
+            vec![blocked_report.clone()],
+            build_wall_time(2 * loop_index),
+        );
+        fixture.apply_build_pane_facts(
+            vec![working_report.clone()],
+            build_wall_time(2 * loop_index + 1),
+        );
+    }
+    fixture.apply_build_pane_facts(vec![blocked_report], build_wall_time(5000));
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Warning,
+            format!(
+                "code › {} · blocked — Which branch?",
+                build_pane_id.format_short_label()
+            ),
+            build_pane_subject(build_pane_id, AttentionReasonKind::ProgramBlocked),
+            1,
+        )]
+    );
+    assert_eq!(
+        fixture.list_build_pane_notified_kinds(),
+        [AttentionReasonKind::ProgramBlocked]
+    );
+}
+
+#[test]
+fn blocked_then_done_with_no_visit_posts_one_entry_for_each_kind() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    let pane_label = build_pane_id.format_short_label();
+
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Apply?"),
+        )],
+        build_wall_time(10),
+    );
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Done,
+            Some("Applied"),
+        )],
+        build_wall_time(20),
+    );
+    fixture.apply_build_pane_facts(vec![build_notify_fact(None, "first")], build_wall_time(30));
+    fixture.apply_build_pane_facts(vec![build_notify_fact(None, "second")], build_wall_time(40));
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [
+            (
+                NotificationSeverity::Warning,
+                format!("code › {pane_label} · blocked — Apply?"),
+                build_pane_subject(build_pane_id, AttentionReasonKind::ProgramBlocked),
+                1,
+            ),
+            (
+                NotificationSeverity::Info,
+                format!("code › {pane_label} · done — Applied"),
+                build_pane_subject(build_pane_id, AttentionReasonKind::ProgramDone),
+                1,
+            ),
+            (
+                NotificationSeverity::Info,
+                format!("code › {pane_label} · first"),
+                build_pane_subject(build_pane_id, AttentionReasonKind::Notify),
+                1,
+            ),
+        ]
+    );
+    assert_eq!(
+        fixture.list_build_pane_notified_kinds(),
+        [
+            AttentionReasonKind::ProgramBlocked,
+            AttentionReasonKind::ProgramDone,
+            AttentionReasonKind::Notify,
+        ]
+    );
+}
+
+#[test]
+fn a_visit_between_two_blocked_reports_posts_the_second_one() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    let alice_client_id = fixture.alice_client_id;
+    let blocked_text = format!(
+        "code › {} · blocked — Which branch?",
+        build_pane_id.format_short_label()
+    );
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Which branch?"),
+        )],
+        build_wall_time(10),
+    );
+
+    fixture
+        .server
+        .clear_attended_pane_attention(alice_client_id, build_pane_id);
+
+    assert_eq!(fixture.list_build_pane_notified_kinds(), []);
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Working, None)],
+        build_wall_time(20),
+    );
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Which branch?"),
+        )],
+        build_wall_time(30),
+    );
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Warning,
+            blocked_text,
+            build_pane_subject(build_pane_id, AttentionReasonKind::ProgramBlocked),
+            2,
+        )]
+    );
+    assert_eq!(
+        fixture.list_build_pane_notified_kinds(),
+        [AttentionReasonKind::ProgramBlocked]
+    );
+}
+
+#[test]
+fn a_visit_to_a_pane_whose_wait_the_program_withdrew_still_empties_its_notified_kinds() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    let alice_client_id = fixture.alice_client_id;
+    let pane_label = build_pane_id.format_short_label();
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Apply?"),
+        )],
+        build_wall_time(10),
+    );
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Working, None)],
+        build_wall_time(20),
+    );
+    assert_eq!(fixture.find_pane_attention(build_pane_id), None);
+    assert_eq!(
+        fixture.list_build_pane_notified_kinds(),
+        [AttentionReasonKind::ProgramBlocked]
+    );
+
+    fixture
+        .server
+        .clear_attended_pane_attention(alice_client_id, build_pane_id);
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Overwrite?"),
+        )],
+        build_wall_time(30),
+    );
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [
+            (
+                NotificationSeverity::Warning,
+                format!("code › {pane_label} · blocked — Apply?"),
+                build_pane_subject(build_pane_id, AttentionReasonKind::ProgramBlocked),
+                1,
+            ),
+            (
+                NotificationSeverity::Warning,
+                format!("code › {pane_label} · blocked — Overwrite?"),
+                build_pane_subject(build_pane_id, AttentionReasonKind::ProgramBlocked),
+                1,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_read_that_raises_nothing_it_keeps_posts_no_entry() {
+    let withdrawn_notification = vec![
+        ProgramFact::Notify {
+            title: None,
+            body: "Build done".to_string(),
+            notification_id: Some("7".to_string()),
+        },
+        ProgramFact::NotificationWithdrawn {
+            notification_id: "7".to_string(),
+        },
+    ];
+    let blocked_then_cleared = vec![
+        build_report_fact("", ProgramStatusState::Blocked, Some("Apply?")),
+        ProgramFact::ProgramStatus(ProgramStatusFact::Cleared {
+            record_id: String::new(),
+        }),
+    ];
+    for program_facts in [withdrawn_notification, blocked_then_cleared] {
+        let mut fixture = build_attention_fixture();
+        let description = format!("{program_facts:?}");
+
+        let emitted_events = fixture.apply_build_pane_facts(program_facts, build_wall_time(10));
+
+        assert_eq!(emitted_events, [], "{description}");
+        assert_eq!(fixture.list_session_entries(), [], "{description}");
+        assert_eq!(
+            fixture.list_build_pane_notified_kinds(),
+            [],
+            "{description}"
+        );
+    }
+}
+
+#[test]
+fn five_hundred_bells_and_notifications_in_one_read_post_one_entry() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    let mut program_facts = Vec::new();
+    for _ in 0..500 {
+        program_facts.push(ProgramFact::Bell);
+        program_facts.push(build_notify_fact(None, "x"));
+    }
+
+    fixture.apply_build_pane_facts(program_facts, build_wall_time(10));
+
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Info,
+            format!("code › {} · x", build_pane_id.format_short_label()),
+            build_pane_subject(build_pane_id, AttentionReasonKind::Notify),
+            1,
+        )]
+    );
+}
+
+#[test]
+fn a_new_reason_of_a_kind_already_posted_since_the_last_visit_posts_no_entry() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+    fixture.apply_build_pane_facts(vec![build_notify_fact(None, "first")], build_wall_time(10));
+
+    let emitted_events = fixture
+        .apply_build_pane_facts(vec![build_notify_fact(None, "second")], build_wall_time(20));
+
+    assert_eq!(
+        emitted_events,
+        [Event::PaneAttentionRaised(PaneAttentionRaised {
+            pane_id: build_pane_id,
+            tab_id: Some(fixture.code_tab_id),
+            reason: AttentionReason::Notify {
+                title: None,
+                body: "second".to_string(),
+            },
+            raised_at: build_wall_time(10),
+        })]
+    );
+    assert_eq!(
+        fixture.list_session_entries(),
+        [(
+            NotificationSeverity::Info,
+            format!("code › {} · first", build_pane_id.format_short_label()),
+            build_pane_subject(build_pane_id, AttentionReasonKind::Notify),
+            1,
+        )]
+    );
+}
+
+#[test]
+fn a_dropped_raise_posts_no_entry() {
+    let mut watched_fixture = build_attention_fixture();
+    watched_fixture.attach_bob_to_build_pane(TerminalFocus::Focused);
+    watched_fixture.apply_build_pane_facts(vec![build_notify_fact(None, "x")], build_wall_time(10));
+    assert_eq!(watched_fixture.list_session_entries(), []);
+
+    let mut switched_off_fixture = build_attention_fixture();
+    switch_off_attention_kind(
+        &mut switched_off_fixture.server.config.attention,
+        AttentionReasonKind::Notify,
+    );
+    switched_off_fixture
+        .apply_build_pane_facts(vec![build_notify_fact(None, "x")], build_wall_time(10));
+    assert_eq!(switched_off_fixture.list_session_entries(), []);
+    assert_eq!(switched_off_fixture.list_build_pane_notified_kinds(), []);
+
+    let mut short_command_fixture = build_attention_fixture();
+    let build_pane_id = short_command_fixture.build_pane_id;
+    apply_timed_command(&mut short_command_fixture, build_pane_id, Some(0), 4);
+    assert_eq!(short_command_fixture.list_session_entries(), []);
+}
+
+#[test]
+fn every_subscribed_client_receives_the_posted_entry() {
+    let mut fixture = build_attention_fixture();
+    let build_pane_id = fixture.build_pane_id;
+
+    fixture.apply_build_pane_facts(vec![build_notify_fact(None, "x")], build_wall_time(10));
+
+    let posted_subjects: Vec<(u64, Option<NotificationSubject>, String)> = fixture
+        .alice_delivery_receiver
+        .try_iter()
+        .filter_map(|delivery| match delivery {
+            Delivery::NotificationPosted {
+                revision,
+                posted_entry,
+            } => Some((revision, posted_entry.subject, posted_entry.text)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        posted_subjects,
+        [(
+            1,
+            build_pane_subject(build_pane_id, AttentionReasonKind::Notify),
+            format!("code › {} · x", build_pane_id.format_short_label()),
+        )]
     );
 }

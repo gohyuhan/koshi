@@ -19,6 +19,7 @@ use std::sync::mpsc;
 use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::command::{
     ClosePaneArgs, Command, CommandSource, DetachArgs, NewPaneArgs, NewPanePlacement,
     PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget,
@@ -33,6 +34,7 @@ use koshi_core::ids::{CommandId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::notification::{
     NotificationEntry, NotificationQueue, NotificationQueueOwner, NotificationSeverity,
+    NotificationSubject,
 };
 use koshi_core::process::PtySize;
 use koshi_ipc::protocol::ConnectionToken;
@@ -4779,12 +4781,14 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
 
 /// The text and the subject of each `NotificationPosted` that
 /// `delivery_receiver` holds, oldest first. Every other delivery is dropped.
-fn take_posted_notices(delivery_receiver: &DeliveryReceiver) -> Vec<(String, Option<ClientId>)> {
+fn take_posted_notices(
+    delivery_receiver: &DeliveryReceiver,
+) -> Vec<(String, Option<NotificationSubject>)> {
     delivery_receiver
         .try_iter()
         .filter_map(|delivery| match delivery {
             Delivery::NotificationPosted { posted_entry, .. } => {
-                Some((posted_entry.text, posted_entry.subject_client_id))
+                Some((posted_entry.text, posted_entry.subject))
             }
             _ => None,
         })
@@ -4793,16 +4797,21 @@ fn take_posted_notices(delivery_receiver: &DeliveryReceiver) -> Vec<(String, Opt
 
 /// The text and the subject of each entry `notification_queue` holds, oldest
 /// first.
-fn list_queued_notices(notification_queue: &NotificationQueue) -> Vec<(String, Option<ClientId>)> {
+fn list_queued_notices(
+    notification_queue: &NotificationQueue,
+) -> Vec<(String, Option<NotificationSubject>)> {
     notification_queue
         .list_queued_entries()
-        .map(|queued_entry| (queued_entry.text.clone(), queued_entry.subject_client_id))
+        .map(|queued_entry| (queued_entry.text.clone(), queued_entry.subject))
         .collect()
 }
 
-/// `text` as a notice that reports on `subject_client_id`.
-fn build_notice(text: &str, subject_client_id: ClientId) -> (String, Option<ClientId>) {
-    (text.to_string(), Some(subject_client_id))
+/// `text` as a notice that reports on the client `subject_client_id`.
+fn build_notice(text: &str, subject_client_id: ClientId) -> (String, Option<NotificationSubject>) {
+    (
+        text.to_string(),
+        Some(NotificationSubject::Client(subject_client_id)),
+    )
 }
 
 /// A connection end with no `Leaving` for `client_id`, as the driver takes it
@@ -5089,11 +5098,15 @@ fn detach_all_posts_left_for_each_client_in_client_id_order() {
         Command::DetachAll,
     ));
 
-    let mut expected_notices = vec![
-        build_notice("bob (2) left", bob_attachment.client_id),
-        build_notice("carol (3) left", carol_attachment.client_id),
+    let mut left_notices = [
+        (bob_attachment.client_id, "bob (2) left"),
+        (carol_attachment.client_id, "carol (3) left"),
     ];
-    expected_notices.sort_by_key(|(_, subject_client_id)| *subject_client_id);
+    left_notices.sort_by_key(|(left_client_id, _)| *left_client_id);
+    let expected_notices: Vec<(String, Option<NotificationSubject>)> = left_notices
+        .into_iter()
+        .map(|(left_client_id, notice_text)| build_notice(notice_text, left_client_id))
+        .collect();
     let session = server.get_sole_session().expect("the session");
     assert_eq!(
         list_queued_notices(&session.notification_queue)[notice_count_before..].to_vec(),
@@ -5227,6 +5240,34 @@ fn a_redial_before_the_drop_is_read_posts_disconnected_then_reconnected() {
     );
 }
 
+#[test]
+fn an_image_swap_keeps_the_attention_kinds_each_pane_posted_since_its_last_visit() {
+    let (mut server, _) = boot_server();
+    let pane_id = *server.live_pane_ids.iter().next().expect("one pane");
+    server
+        .get_session_for_pane_mut(pane_id)
+        .and_then(|session| session.panes.get_pane_record_mut_by_id(pane_id))
+        .expect("the pane has a record")
+        .notified_attention_kinds = vec![
+        AttentionReasonKind::ProgramBlocked,
+        AttentionReasonKind::Notify,
+    ];
+
+    let resumed_server = swap_server_image(&mut server);
+
+    assert_eq!(
+        resumed_server
+            .get_session_for_pane(pane_id)
+            .and_then(|session| session.panes.get_pane_record_by_id(pane_id))
+            .expect("the pane has a record")
+            .notified_attention_kinds,
+        [
+            AttentionReasonKind::ProgramBlocked,
+            AttentionReasonKind::Notify
+        ]
+    );
+}
+
 /// `server` carried across an image swap and resumed: every client it held
 /// awaits its re-attach.
 fn swap_server_image(server: &mut Server) -> Server {
@@ -5283,9 +5324,9 @@ fn a_resume_claim_and_a_token_takeover_of_a_record_awaiting_its_reattach_post_no
             .notification_queue,
     );
 
-    let presence_notices_before: Vec<(String, Option<ClientId>)> = notices_before
+    let presence_notices_before: Vec<(String, Option<NotificationSubject>)> = notices_before
         .iter()
-        .filter(|(_, subject_client_id)| subject_client_id.is_some())
+        .filter(|(_, subject)| subject.is_some())
         .cloned()
         .collect();
     assert_eq!(
@@ -5391,7 +5432,7 @@ fn the_grace_window_closing_posts_disconnected_for_a_host_terminal_whose_only_ot
 fn list_queued_notices_after(
     server: &Server,
     queued_notice_count: usize,
-) -> Vec<(String, Option<ClientId>)> {
+) -> Vec<(String, Option<NotificationSubject>)> {
     let session = server.get_sole_session().expect("the session");
     list_queued_notices(&session.notification_queue)[queued_notice_count..].to_vec()
 }

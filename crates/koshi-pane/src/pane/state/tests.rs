@@ -3,7 +3,7 @@
 use super::*;
 
 /// The JSON form of a fresh terminal pane record with the nil uuid as its id.
-const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"pane_id":"00000000-0000-0000-0000-000000000000","spawn_spec":null,"working_directory":null,"attention":null,"program_status_records":[]}"#;
+const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"pane_id":"00000000-0000-0000-0000-000000000000","spawn_spec":null,"working_directory":null,"attention":null,"program_status_records":[],"notified_attention_kinds":[]}"#;
 
 /// The `PaneId` whose uuid is all zeros.
 fn build_nil_pane_id() -> PaneId {
@@ -21,6 +21,7 @@ fn a_new_record_has_empty_metadata() {
     assert_eq!(pane_record.working_directory, None);
     assert_eq!(pane_record.attention, None);
     assert_eq!(pane_record.program_status_records, Vec::new());
+    assert_eq!(pane_record.notified_attention_kinds, Vec::new());
 }
 
 #[test]
@@ -108,7 +109,7 @@ fn a_record_without_a_pane_id_fails_to_deserialize() {
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `pane_id` at line 1 column 89"
+        "missing field `pane_id` at line 1 column 119"
     );
 }
 
@@ -121,7 +122,7 @@ fn a_record_without_attention_fails_to_deserialize() {
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `attention` at line 1 column 121"
+        "missing field `attention` at line 1 column 151"
     );
 }
 
@@ -135,7 +136,42 @@ fn a_record_without_program_status_records_fails_to_deserialize() {
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `program_status_records` at line 1 column 110"
+        "missing field `program_status_records` at line 1 column 140"
+    );
+}
+
+#[test]
+fn a_record_without_notified_attention_kinds_fails_to_deserialize() {
+    let pane_record_json =
+        FRESH_TERMINAL_RECORD_JSON.replacen(r#","notified_attention_kinds":[]"#, "", 1);
+
+    let deserialization_error =
+        serde_json::from_str::<PaneRecord>(&pane_record_json).expect_err("missing field");
+
+    assert_eq!(
+        deserialization_error.to_string(),
+        "missing field `notified_attention_kinds` at line 1 column 138"
+    );
+}
+
+#[test]
+fn a_record_keeps_its_notified_attention_kinds_in_order_through_a_round_trip() {
+    let mut pane_record = PaneRecord::from_terminal_pane(build_nil_pane_id());
+    pane_record.notified_attention_kinds = vec![
+        AttentionReasonKind::ProgramBlocked,
+        AttentionReasonKind::CommandFinished,
+    ];
+
+    let pane_record_json = serde_json::to_string(&pane_record).expect("serialize");
+
+    assert!(
+        pane_record_json
+            .ends_with(r#""notified_attention_kinds":["ProgramBlocked","CommandFinished"]}"#),
+        "{pane_record_json}"
+    );
+    assert_eq!(
+        serde_json::from_str::<PaneRecord>(&pane_record_json).expect("deserialize"),
+        pane_record
     );
 }
 
