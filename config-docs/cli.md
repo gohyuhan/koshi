@@ -554,7 +554,7 @@ The `attention` column names the reason a pane waits for a person: `bell`,
 `program-failed` ([koshi.md](koshi.md#attention)). A pane that waits for
 nobody prints `-`. `--format json` writes `"attention": null` for that pane,
 and else the same kind with the time of the first signal:
-`"attention": {"kind": "notify", "raised_at": "2025-01-01T00:00:00Z"}`.
+`"attention": {"reason_kind": "notify", "raised_at": "2025-01-01T00:00:00Z"}`.
 
 The `program_status` column prints the pane's root program status record, the
 record a program reports with `OSC 7501` and no `id`: its state, then its
@@ -562,7 +562,7 @@ blocked kind, its progress and its app name when the record holds them, such
 as `working 40% cargo`, `blocked question codex` or `done`. A pane with no
 root record prints `-`. `--format json` writes `"program_status": null` for
 that pane, and else
-`"program_status": {"state": "blocked", "blocked_kind": "question", "progress_percent": null, "app_name": "codex"}`.
+`"program_status": {"program_status_state": "blocked", "blocked_kind": "question", "progress_percent": null, "app_name": "codex"}`.
 The listing never prints a record's title or message.
 
 Example: `htop` and `top` share one floating pane, `vim` and `codex` are

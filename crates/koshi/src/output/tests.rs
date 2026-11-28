@@ -679,7 +679,7 @@ fn a_waiting_pane_lists_its_attention_kind_and_raise_time_in_json() {
     "session_id": "session-00000000-0000-0000-0000-000000000001",
     "session_name": "quiet-lake",
     "attention": {
-      "kind": "notify",
+      "reason_kind": "notify",
       "raised_at": "1970-01-01T00:20:34Z"
     },
     "program_status": null
@@ -3832,7 +3832,7 @@ fn a_pane_lists_its_root_program_status_in_json_without_title_or_message() {
     "session_name": "quiet-lake",
     "attention": null,
     "program_status": {
-      "state": "blocked",
+      "program_status_state": "blocked",
       "blocked_kind": "question",
       "progress_percent": null,
       "app_name": "codex"

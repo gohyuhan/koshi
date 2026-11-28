@@ -270,7 +270,7 @@ struct PaneListingRow {
 #[derive(Serialize)]
 struct PaneAttentionReport {
     /// The reason's kind, as [`format_attention_reason_kind`] names it.
-    kind: &'static str,
+    reason_kind: &'static str,
     /// When the pane began to wait, as [`format_utc_timestamp`] writes it.
     raised_at: String,
 }
@@ -281,7 +281,7 @@ struct PaneAttentionReport {
 #[derive(Serialize)]
 struct PaneProgramStatusReport {
     /// The state, as [`format_program_status_state`] names it.
-    state: &'static str,
+    program_status_state: &'static str,
     /// The blocked kind, as [`format_blocked_kind`] names it, or `None`.
     blocked_kind: Option<&'static str>,
     /// 0 to 100, or `None` when the work is indeterminate.
@@ -465,12 +465,14 @@ fn build_pane_listing_row(pane_row: &PaneRow) -> PaneListingRow {
         attention: pane_row
             .attention
             .map(|pane_attention| PaneAttentionReport {
-                kind: format_attention_reason_kind(pane_attention.reason_kind),
+                reason_kind: format_attention_reason_kind(pane_attention.reason_kind),
                 raised_at: format_utc_timestamp(pane_attention.raised_at),
             }),
         program_status: pane_row.program_status.as_ref().map(|program_status| {
             PaneProgramStatusReport {
-                state: format_program_status_state(program_status.program_status_state),
+                program_status_state: format_program_status_state(
+                    program_status.program_status_state,
+                ),
                 blocked_kind: program_status.blocked_kind.map(format_blocked_kind),
                 progress_percent: program_status.progress_percent,
                 app_name: program_status.app_name.clone(),
@@ -666,7 +668,11 @@ fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
         format_optional_cell(pane.floating_pane_id.as_ref()),
         pane.session_id.clone(),
         pane.session_name.clone(),
-        format_optional_cell(pane.attention.as_ref().map(|attention| &attention.kind)),
+        format_optional_cell(
+            pane.attention
+                .as_ref()
+                .map(|attention| &attention.reason_kind),
+        ),
         pane.program_status
             .as_ref()
             .map_or_else(|| String::from("-"), format_program_status_cell),
@@ -677,7 +683,7 @@ fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
 /// blocked kind, the progress and the app name that it holds, each after one
 /// space. Examples: `working 40% cargo`, `blocked question codex`, `done`.
 fn format_program_status_cell(program_status: &PaneProgramStatusReport) -> String {
-    let mut program_status_cell = String::from(program_status.state);
+    let mut program_status_cell = String::from(program_status.program_status_state);
     if let Some(blocked_kind) = program_status.blocked_kind {
         program_status_cell.push(' ');
         program_status_cell.push_str(blocked_kind);
