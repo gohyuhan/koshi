@@ -1054,6 +1054,11 @@ impl TerminalOwner {
         Arc::clone(&self.input_read_clock)
     }
 
+    /// Whether this process's standard output is a terminal.
+    pub(crate) fn is_output_terminal(&self) -> bool {
+        self.is_output_terminal
+    }
+
     /// Return the native graphics support proved by the terminal probe.
     pub(crate) fn get_graphics_support(&self) -> GraphicsSupport {
         self.graphics_support
@@ -2270,4 +2275,4 @@ pub(crate) fn build_window_title(render_snapshot: &RenderSnapshot) -> String {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

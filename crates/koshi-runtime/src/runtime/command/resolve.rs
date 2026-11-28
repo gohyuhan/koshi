@@ -1825,10 +1825,9 @@ impl Server {
     }
 
     /// Confirm `pane_id` is in the client's **active tab** layout AND has a
-    /// live registry record. Every focus-derived target (explicit
-    /// [`Command::FocusPane`] and the focused-pane default alike) resolves
-    /// through here. A pane in another tab, absent from the registry, or in a
-    /// different session is rejected.
+    /// live registry record. The focused-pane default and a directional
+    /// [`Command::FocusPane`] resolve through here. A pane in another tab,
+    /// absent from the registry, or in a different session is rejected.
     pub(super) fn require_pane_in_active_tab(
         session: &Session,
         client_id: ClientId,
@@ -1853,9 +1852,9 @@ impl Server {
     }
 
     /// Resolve the [`Command::FocusPane`] target: the client whose focus moves
-    /// and the pane, a tiled pane in that client's active tab or a floating
-    /// pane of the acting session. Validation and [`Self::handle_focus_pane`]
-    /// both call this.
+    /// and the pane, a tiled pane in any tab of the acting session or a
+    /// floating pane of it. Validation and [`Self::handle_focus_pane`] both
+    /// call this.
     ///
     /// The target client is the explicit `client` argument when set — it wins
     /// even over an in-session issuer, and one not attached to the acting
@@ -1871,7 +1870,10 @@ impl Server {
     ///   client`. A pane with no record in the session's registry is
     ///   [`RejectReason::TargetNotFound`] with the help ``pane pane-<uuid> is
     ///   not in session `work` `` ([`format_member_not_in_session_help`]).
-    ///   Any other pane resolves through [`Self::require_pane_in_active_tab`].
+    ///   Any other pane resolves to the tab whose layout holds it
+    ///   ([`Session::find_tab_by_pane_id`]), the client's active tab or
+    ///   another one. A pane that no tab holds is
+    ///   [`RejectReason::TargetNotFound`] `pane is in no tab`.
     /// - [`FocusTarget::Direction`] with a floating pane focused resolves
     ///   geometrically from the pane that takes the client's input inside it,
     ///   over the client's view of that floating pane, and stays inside it.
@@ -1925,7 +1927,18 @@ impl Server {
                         SessionMemberId::Pane(pane_id),
                     ));
                 }
-                pane_id
+                let pane_tab = session.find_tab_by_pane_id(pane_id).ok_or_else(|| {
+                    Rejection::from_reason_and_help(
+                        RejectReason::TargetNotFound,
+                        "pane is in no tab",
+                    )
+                })?;
+                return Ok(ClientViewPaneTarget::Tiled(ClientPaneTarget {
+                    session_id: session.session_id,
+                    client_id,
+                    tab_id: pane_tab.get_tab_id(),
+                    pane_id,
+                }));
             }
             FocusTarget::Direction(direction) => {
                 if let (Some(floating_pane_id), Some(input_pane_id)) = (

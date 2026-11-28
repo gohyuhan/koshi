@@ -167,6 +167,14 @@ A toast slides in from the side edge of its corner in 1 s, stays in place for
 each of the three parts takes 0.5 s. With `reduced-motion #true`, the toast
 appears and goes in one frame, and it stays in place as long.
 
+With `attention-bell #true`, a toast about a program that reports `blocked`
+([`attention`](#attention)) writes one `BEL` (`0x07`) to this terminal as it
+starts to slide in, and the terminal plays its own bell. A second such toast
+less than 1 s after the last bell writes no bell. A terminal whose koshi output
+goes to a file or a pipe writes no bell. Example: `codex` reports `blocked` in
+a pane of a tab you do not view. The toast slides in, and your terminal beeps
+once.
+
 A value the key does not accept is skipped with a warning, and the key keeps
 the value it had.
 
@@ -177,6 +185,7 @@ there for 5 s.
 | Key | Value / type | Default | Since |
 |---|---|---|---|
 | `toast` | boolean — show a toast for each new notification | `#true` | ≥ 0.6.0 |
+| `attention-bell` | boolean — write one BEL to this terminal when a toast about a blocked program starts to show, at most once a second | `#true` | ≥ 0.7.0 |
 | `toast-position` | `"top-right"`, `"top-left"`, `"bottom-right"` or `"bottom-left"` — the corner of the pane area the toast sits in | `"top-right"` | ≥ 0.6.0 |
 | `toast-duration-ms` | integer, `1000` to `60000` — how long a toast stays in place, in milliseconds | `3000` | ≥ 0.6.0 |
 
@@ -1152,6 +1161,7 @@ copy {
 
 notifications {
     toast #true
+    attention-bell #true
     toast-position "top-right"
     toast-duration-ms 3000
 }

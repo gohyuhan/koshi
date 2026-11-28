@@ -829,7 +829,17 @@ pub fn render_frame(
         notification_view.shown_toast,
         &frame_geometry.notification_toast_layout,
     ) {
-        draw_notification_toast(toast_layout, shown_toast, theme, drawn_rows, screen_buffer);
+        let has_focus_pane_control = viewer_chrome
+            .notification_toast
+            .is_some_and(|notification_toast| notification_toast.has_focus_pane_control);
+        draw_notification_toast(
+            toast_layout,
+            shown_toast,
+            has_focus_pane_control,
+            theme,
+            drawn_rows,
+            screen_buffer,
+        );
     }
 
     // The tabline draws from the same tab-row facts hit-testing reads.

@@ -5,8 +5,9 @@
 //! pane area. It draws the floating chrome ([`crate::floating_chrome`]) with
 //! the close button only, titled `Notifications`. Its body lists one card per
 //! entry, newest first, and its last content row holds the label
-//! `Clear all`. Each card's top border holds its dismiss button `✕`. A
-//! `24`-column center:
+//! `Clear all`. Each card's top border holds its dismiss button `✕`, and
+//! the card of an entry about a pane holds `↗` left of it while the session
+//! holds the pane, or `pane closed` once it is gone. A `24`-column center:
 //!
 //! ```text
 //! ┌──────────────────────┐   top border
@@ -28,8 +29,10 @@
 //! and slides out again when it closes.
 //!
 //! The toast is a box of the same width in one corner of the pane area. Its
-//! top border holds the close control, its first body row the entry's header,
-//! and up to [`MAX_TOAST_TEXT_ROW_COUNT`] rows of its text sit under that row:
+//! top border holds the close control, with the focus control ` ↗ ` left of
+//! it for an entry about a pane the session holds. Its first body row holds
+//! the entry's header, and up to [`MAX_TOAST_TEXT_ROW_COUNT`] rows of its
+//! text sit under that row:
 //!
 //! ```text
 //! ┌─────────────────────── ✕ ─┐
@@ -50,6 +53,7 @@ use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::geometry::{Point, Rect, Size};
+use koshi_core::ids::PaneId;
 use koshi_core::notification::{
     NotificationEntry, NotificationId, NotificationSeverity, NotificationSource,
 };
@@ -115,6 +119,25 @@ pub(crate) const NOTIFICATION_TOAST_CLOSE_CONTROL_TEXT: &str = " ✕ ";
 
 /// The cells [`NOTIFICATION_TOAST_CLOSE_CONTROL_TEXT`] takes.
 const NOTIFICATION_TOAST_CLOSE_CONTROL_COLUMN_COUNT: u16 = 3;
+
+/// The focus control on the top border of a toast about a pane, left of the
+/// close control.
+pub(crate) const NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_TEXT: &str = " ↗ ";
+
+/// The cells [`NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_TEXT`] takes.
+const NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_COLUMN_COUNT: u16 = 3;
+
+/// The columns a card's focus button `↗` sits left of its dismiss button: 2,
+/// with one blank column between them.
+const CARD_FOCUS_PANE_BUTTON_DISMISS_COLUMN_OFFSET: u16 = 2;
+
+/// The text on the top border of the card of an entry about a pane the
+/// session no longer holds, ending right before the dismiss button's blank
+/// column.
+pub(crate) const CARD_PANE_CLOSED_TEXT: &str = " pane closed";
+
+/// The cells [`CARD_PANE_CLOSED_TEXT`] takes.
+pub(crate) const CARD_PANE_CLOSED_COLUMN_COUNT: u16 = 12;
 
 /// The label on the center's last content row that clears the center.
 pub(crate) const NOTIFICATION_CLEAR_ALL_LABEL_TEXT: &str = "Clear all";
@@ -273,6 +296,11 @@ pub struct NotificationToastLayout {
     /// The close control ` ✕ ` on the top border, where this frame draws it.
     /// `None` while any of its cells lies past the side edge.
     pub close_rect: Option<Rect>,
+    /// The focus control ` ↗ ` on the top border, where this frame draws it.
+    /// `None` for a toast with no focus control
+    /// ([`NotificationToast::has_focus_pane_control`](crate::snapshot::NotificationToast::has_focus_pane_control)),
+    /// and while any of its cells lies past the side edge.
+    pub focus_pane_rect: Option<Rect>,
 }
 
 /// Whether `frame_layout` has room for the box of the toast
@@ -316,8 +344,9 @@ pub fn has_notification_toast_room(frame_layout: FrameLayout<'_>) -> bool {
 /// past the edge.
 ///
 /// A toast of no text row at `top-right` over a pane area at `(0, 1)` `80x22`
-/// sits at `(56, 1)` `24x3`. Half hidden, it draws its 12 left columns at
-/// `(68, 1)`, and its close control lies past the edge. A toast of 2 text rows
+/// sits at `(56, 1)` `24x3`, with its close control at `(75, 1)` and, for a
+/// toast about a pane, its focus control at `(72, 1)`. Half hidden, it draws
+/// its 12 left columns at `(68, 1)`, and both controls lie past the edge. A toast of 2 text rows
 /// over a pane area 4 rows tall keeps 1 text row.
 #[must_use]
 pub fn find_drawn_notification_toast_layout(
@@ -380,22 +409,30 @@ pub fn find_drawn_notification_toast_layout(
             row_count: toast_row_count,
         },
     );
-    let box_close_rect = compute_toast_close_rect(toast_rect);
-    let box_close_start_column = box_close_rect.origin.column - toast_rect.origin.column;
-    let is_close_drawn = box_close_start_column >= first_drawn_box_column
-        && box_close_start_column + NOTIFICATION_TOAST_CLOSE_CONTROL_COLUMN_COUNT
-            <= first_drawn_box_column + drawn_column_count;
+    let find_drawn_control_rect = |box_control_rect: Rect| {
+        let box_control_start_column = box_control_rect.origin.column - toast_rect.origin.column;
+        let control_column_count = box_control_rect.size.column_count;
+        let is_control_drawn = box_control_start_column >= first_drawn_box_column
+            && box_control_start_column + control_column_count
+                <= first_drawn_box_column + drawn_column_count;
+        is_control_drawn.then(|| {
+            build_row_rect(
+                drawn_start_column + box_control_start_column - first_drawn_box_column,
+                toast_rect.origin.row,
+                control_column_count,
+            )
+        })
+    };
     Some(NotificationToastLayout {
         toast_rect,
         drawn_rect,
         first_drawn_box_column,
-        close_rect: is_close_drawn.then(|| {
-            build_row_rect(
-                drawn_start_column + box_close_start_column - first_drawn_box_column,
-                toast_rect.origin.row,
-                NOTIFICATION_TOAST_CLOSE_CONTROL_COLUMN_COUNT,
-            )
-        }),
+        close_rect: find_drawn_control_rect(compute_toast_close_rect(toast_rect)),
+        focus_pane_rect: if notification_toast.has_focus_pane_control {
+            find_drawn_control_rect(compute_toast_focus_pane_rect(toast_rect))
+        } else {
+            None
+        },
     })
 }
 
@@ -628,8 +665,9 @@ impl ToastTextRowCache {
     }
 }
 
-/// One entry the notification center lists, and the rows its text wraps to
-/// ([`wrap_text_rows`]) in the text width last asked for.
+/// One entry the notification center lists, whether the pane it is about is
+/// gone, and the rows its text wraps to ([`wrap_text_rows`]) in the text
+/// width last asked for.
 ///
 /// The entry does not change after this type takes it. The rows are kept for
 /// one text width: asking again for that width reads them, and asking for
@@ -638,15 +676,28 @@ impl ToastTextRowCache {
 pub struct NotificationCenterEntry {
     /// The entry.
     notification_entry: NotificationEntry,
+    /// Whether the session no longer holds the pane the entry is about.
+    /// `false` for an entry about no pane.
+    is_subject_pane_closed: bool,
     /// The last rows taken, or `None` before any were taken.
     wrapped_text: RefCell<Option<WrappedEntryText>>,
 }
 
-/// Two entries are equal when their entries are equal, whatever rows each one
-/// keeps.
+/// What the top border of an entry's card holds left of its dismiss button.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardPaneControl {
+    /// The focus button `↗`, which focuses this pane.
+    FocusPane(PaneId),
+    /// The text `pane closed`: the session no longer holds the pane.
+    PaneClosed,
+}
+
+/// Two entries are equal when their entries and whether their panes are gone
+/// are equal, whatever rows each one keeps.
 impl PartialEq for NotificationCenterEntry {
     fn eq(&self, other: &Self) -> bool {
         self.notification_entry == other.notification_entry
+            && self.is_subject_pane_closed == other.is_subject_pane_closed
     }
 }
 
@@ -662,11 +713,13 @@ struct WrappedEntryText {
 }
 
 impl NotificationCenterEntry {
-    /// `notification_entry`, with no rows taken.
+    /// `notification_entry`, about a pane the session holds when it is about
+    /// a pane, with no rows taken.
     #[must_use]
     pub fn from_notification_entry(notification_entry: NotificationEntry) -> Self {
         NotificationCenterEntry {
             notification_entry,
+            is_subject_pane_closed: false,
             wrapped_text: RefCell::new(None),
         }
     }
@@ -675,6 +728,32 @@ impl NotificationCenterEntry {
     #[must_use]
     pub fn get_notification_entry(&self) -> &NotificationEntry {
         &self.notification_entry
+    }
+
+    /// What the card's top border holds left of its dismiss button: the focus
+    /// button for the pane the entry is about while the session holds it,
+    /// `pane closed` once it is gone, and `None` for an entry about no pane
+    /// ([`NotificationEntry::find_subject_pane_id`]).
+    #[must_use]
+    pub fn find_card_pane_control(&self) -> Option<CardPaneControl> {
+        let pane_id = self.notification_entry.find_subject_pane_id()?;
+        if self.is_subject_pane_closed {
+            Some(CardPaneControl::PaneClosed)
+        } else {
+            Some(CardPaneControl::FocusPane(pane_id))
+        }
+    }
+
+    /// The pane the card's focus button `↗` focuses: the pane the entry is
+    /// about while the session holds it. `None` for an entry about no pane
+    /// and for a card that shows `pane closed`
+    /// ([`find_card_pane_control`](Self::find_card_pane_control)).
+    #[must_use]
+    pub fn find_focus_pane_id(&self) -> Option<PaneId> {
+        match self.find_card_pane_control()? {
+            CardPaneControl::FocusPane(pane_id) => Some(pane_id),
+            CardPaneControl::PaneClosed => None,
+        }
     }
 
     /// The rows the entry's text wraps to in rows `text_column_count` cells
@@ -725,9 +804,11 @@ impl NotificationCenterEntry {
 /// center counted and drew from them.
 ///
 /// [`add_newest_center_entry`](Self::add_newest_center_entry),
-/// [`remove_center_entry_at`](Self::remove_center_entry_at) and
-/// [`clear_center_entries`](Self::clear_center_entries) are the only changes
-/// to the entries. Each one drops the counted rows and the kept body rows.
+/// [`remove_center_entry_at`](Self::remove_center_entry_at),
+/// [`clear_center_entries`](Self::clear_center_entries) and
+/// [`mark_subject_panes_closed`](Self::mark_subject_panes_closed) are the
+/// only changes to the entries. Each of the first three drops the counted rows
+/// and the kept body rows, and the fourth drops the kept body rows.
 #[derive(Debug, Clone, Default)]
 pub struct NotificationCenterEntries {
     /// The entries, oldest first.
@@ -820,6 +901,37 @@ impl NotificationCenterEntries {
     pub fn clear_center_entries(&mut self) {
         self.center_entries.clear();
         self.clear_counted_rows();
+    }
+
+    /// Mark the pane of every entry that `is_pane_gone` names as gone: each
+    /// entry about a pane ([`NotificationEntry::find_subject_pane_id`]) for
+    /// which `is_pane_gone` gives `true` with the entry and its pane. An
+    /// entry already marked stays marked. Returns whether an entry changed; a
+    /// change drops the kept body rows and keeps the counted rows.
+    ///
+    /// Example: two entries about pane 3 and one about pane 4, and a closure
+    /// that names pane 3, mark the two entries about pane 3. Their cards then
+    /// show `pane closed`.
+    pub fn mark_subject_panes_closed(
+        &mut self,
+        is_pane_gone: impl Fn(&NotificationEntry, PaneId) -> bool,
+    ) -> bool {
+        let mut is_entry_changed = false;
+        for center_entry in &mut self.center_entries {
+            let Some(pane_id) = center_entry.notification_entry.find_subject_pane_id() else {
+                continue;
+            };
+            if !center_entry.is_subject_pane_closed
+                && is_pane_gone(&center_entry.notification_entry, pane_id)
+            {
+                center_entry.is_subject_pane_closed = true;
+                is_entry_changed = true;
+            }
+        }
+        if is_entry_changed {
+            *self.center_body_rows.get_mut() = None;
+        }
+        is_entry_changed
     }
 
     /// Drop the counted rows and the kept body rows.
@@ -1035,22 +1147,23 @@ impl NotificationView<'_> {
         let card_rows = list_notification_center_rows(*self, body_column_count, row_start)
             .take(usize::from(body_rect.size.row_count))
             .map(|center_row| match center_row {
-                NotificationCenterRow::CardTopBorder(notification_entry) => {
-                    Some(NotificationCardRow {
-                        notification_id: notification_entry.notification_id,
-                        is_top_border: true,
-                    })
-                }
+                NotificationCenterRow::CardTopBorder(center_entry) => Some(NotificationCardRow {
+                    notification_id: center_entry.get_notification_entry().notification_id,
+                    is_top_border: true,
+                    focus_pane_id: center_entry.find_focus_pane_id(),
+                }),
                 NotificationCenterRow::CardHeader(notification_entry)
                 | NotificationCenterRow::CardBottomBorder(notification_entry) => {
                     Some(NotificationCardRow {
                         notification_id: notification_entry.notification_id,
                         is_top_border: false,
+                        focus_pane_id: None,
                     })
                 }
                 NotificationCenterRow::CardText { center_entry, .. } => Some(NotificationCardRow {
                     notification_id: center_entry.get_notification_entry().notification_id,
                     is_top_border: false,
+                    focus_pane_id: None,
                 }),
                 NotificationCenterRow::StatusText(_) => None,
             })
@@ -1158,8 +1271,10 @@ fn compute_status_text_column_count(body_column_count: u16) -> u16 {
 /// One row of the center's body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotificationCenterRow<'a> {
-    /// The top border of an entry's card, which holds its dismiss button.
-    CardTopBorder(&'a NotificationEntry),
+    /// The top border of an entry's card, which holds its dismiss button and,
+    /// for an entry about a pane, `↗` or `pane closed`
+    /// ([`NotificationCenterEntry::find_card_pane_control`]).
+    CardTopBorder(&'a NotificationCenterEntry),
     /// The header row of an entry's card ([`format_notification_header`]).
     CardHeader(&'a NotificationEntry),
     /// One row of the text of an entry's card: the row at `text_row_index`
@@ -1225,7 +1340,7 @@ pub fn list_notification_center_rows<'a>(
             let notification_entry = center_entry.get_notification_entry();
             let text_row_count = center_entry.list_text_rows(text_column_count).len();
             [
-                NotificationCenterRow::CardTopBorder(notification_entry),
+                NotificationCenterRow::CardTopBorder(center_entry),
                 NotificationCenterRow::CardHeader(notification_entry),
             ]
             .into_iter()
@@ -1301,13 +1416,16 @@ pub fn find_notification_card_row_range(
 }
 
 /// The card under one cell of the center's body, and whether the cell is its
-/// dismiss button.
+/// dismiss button or its focus button.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotificationCardHit {
     /// The entry whose card is under the cell.
     pub notification_id: NotificationId,
     /// Whether the cell is the card's dismiss button `✕`.
     pub is_on_dismiss_button: bool,
+    /// The pane the card's focus button `↗` names while the cell is that
+    /// button, or `None` on every other cell.
+    pub focus_pane_id: Option<PaneId>,
 }
 
 /// The card one body row of the center draws.
@@ -1318,6 +1436,11 @@ pub struct NotificationCardRow {
     /// Whether the row is the card's top border, which holds its dismiss
     /// button `✕`.
     pub is_top_border: bool,
+    /// The pane the focus button `↗` on this top border names, or `None`
+    /// on a row that draws no focus button: every row but the top border,
+    /// and the top border of a card that is not about a pane the session
+    /// holds ([`NotificationCenterEntry::find_focus_pane_id`]).
+    pub focus_pane_id: Option<PaneId>,
 }
 
 /// The rows the center's body draws for one body size, scroll and dropped
@@ -1351,7 +1474,9 @@ pub struct NotificationCenterBodyRows {
 /// row `card_rows` has no item for.
 ///
 /// The dismiss button is the cell 4 columns in from the card's right edge on
-/// its top border: column `18` of a `22`-column card.
+/// its top border: column `18` of a `22`-column card. The focus button is
+/// the cell 2 columns left of it, column `16`, on a top border that names a
+/// focus pane.
 #[must_use]
 pub fn find_notification_card_at(
     card_rows: &[Option<NotificationCardRow>],
@@ -1368,6 +1493,9 @@ pub fn find_notification_card_at(
         notification_id: card_row.notification_id,
         is_on_dismiss_button: card_row.is_top_border
             && resting_point.column == compute_card_dismiss_button_column(body_rect),
+        focus_pane_id: card_row
+            .focus_pane_id
+            .filter(|_| resting_point.column == compute_card_focus_pane_button_column(body_rect)),
     })
 }
 
@@ -1392,6 +1520,30 @@ pub(crate) fn compute_toast_close_rect(toast_rect: Rect) -> Rect {
         toast_rect.origin.row,
         NOTIFICATION_TOAST_CLOSE_CONTROL_COLUMN_COUNT,
     )
+}
+
+/// The focus control ` ↗ ` on the top border of the toast whose box is
+/// `toast_rect`, at least 10 columns wide: it ends where the close control
+/// starts ([`compute_toast_close_rect`]). A `24`-column box at `(56, 1)`
+/// gives `(72, 1)` `3x1`.
+pub(crate) fn compute_toast_focus_pane_rect(toast_rect: Rect) -> Rect {
+    let close_rect = compute_toast_close_rect(toast_rect);
+    build_row_rect(
+        close_rect.origin.column - NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_COLUMN_COUNT,
+        toast_rect.origin.row,
+        NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_COLUMN_COUNT,
+    )
+}
+
+/// The screen column of the focus button `↗` on the top border of a card
+/// that spans `body_rect`'s columns:
+/// [`CARD_FOCUS_PANE_BUTTON_DISMISS_COLUMN_OFFSET`] columns left of the
+/// dismiss button ([`compute_card_dismiss_button_column`]). A body at
+/// `(57, 4)` `22x17` gives `73`, and the 22-column top border reads
+/// `┌────────────── ↗ ✕ ─┐`.
+pub(crate) fn compute_card_focus_pane_button_column(body_rect: Rect) -> u16 {
+    compute_card_dismiss_button_column(body_rect)
+        .saturating_sub(CARD_FOCUS_PANE_BUTTON_DISMISS_COLUMN_OFFSET)
 }
 
 /// A one-row rect at `(start_column, row)`, `column_count` columns wide.

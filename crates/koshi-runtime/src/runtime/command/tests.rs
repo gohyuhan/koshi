@@ -4129,17 +4129,16 @@ fn quit_from_inside_a_pane_removes_the_client_that_pane_names() {
 }
 
 #[test]
-fn focus_pane_outside_the_active_tab_is_not_found() {
+fn focus_pane_on_a_pane_no_tab_holds_is_not_found() {
     let (mut runtime, _runtime_event_sender) = build_runtime();
     let client_id = ClientId::new();
     let tab_id = TabId::new();
     let pane_id = PaneId::new();
-    let outside_pane_id = PaneId::new();
+    let unplaced_pane_id = PaneId::new();
     let mut session = build_bare_session(SessionId::new());
     register_pane_record(&mut session, pane_id);
-    // `outside_pane_id` exists in the registry but is not in the active tab's layout,
-    // proving the check is tab-scoped, not mere global existence.
-    register_pane_record(&mut session, outside_pane_id);
+    // `unplaced_pane_id` exists in the registry, and no tab's layout holds it.
+    register_pane_record(&mut session, unplaced_pane_id);
     register_session_tab(&mut session, tab_id, pane_id);
     attach_client(&mut session, client_id, tab_id, Some(pane_id));
     runtime.session_by_id.insert(session.session_id, session);
@@ -4147,7 +4146,7 @@ fn focus_pane_outside_the_active_tab_is_not_found() {
     let command_envelope = build_command_envelope(
         CommandSource::from_key_binding(client_id),
         Command::FocusPane(FocusPaneArgs {
-            focus_target: FocusTarget::Pane(outside_pane_id),
+            focus_target: FocusTarget::Pane(unplaced_pane_id),
             client_id: None,
         }),
     );
@@ -4157,8 +4156,247 @@ fn focus_pane_outside_the_active_tab_is_not_found() {
         CommandResult::Rejected {
             command_id,
             reason: RejectReason::TargetNotFound,
-            help: Some("pane not in the client's active tab".to_string()),
+            help: Some("pane is in no tab".to_string()),
         }
+    );
+}
+
+/// A session with tab `main` holding `main_pane_id` and tab `agents` holding
+/// `agents_layout`, with Alice and Bob both viewing `main` and focused on
+/// `main_pane_id`. Alice reports `alice_pane_area`. Returns the session.
+fn build_two_tab_session(
+    alice_client_id: ClientId,
+    bob_client_id: ClientId,
+    (main_tab_id, main_pane_id): (TabId, PaneId),
+    (agents_tab_id, agents_layout): (TabId, LayoutNode),
+    alice_pane_area: Option<PaneArea>,
+) -> Session {
+    let mut session = build_bare_session(SessionId::new());
+    register_pane_record(&mut session, main_pane_id);
+    for agents_pane_id in agents_layout.list_leaf_pane_ids() {
+        register_pane_record(&mut session, agents_pane_id);
+    }
+    register_session_tab(&mut session, main_tab_id, main_pane_id);
+    session.tabs.insert(
+        agents_tab_id,
+        build_tab(agents_tab_id, "agents", 1, agents_layout),
+    );
+    attach_client_with_reported_pane_area(
+        &mut session,
+        alice_client_id,
+        main_tab_id,
+        Some(main_pane_id),
+        alice_pane_area,
+    );
+    attach_client(&mut session, bob_client_id, main_tab_id, Some(main_pane_id));
+    session
+}
+
+#[test]
+fn focus_pane_in_another_tab_switches_the_clients_tab_and_focuses_the_pane() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let (alice_client_id, bob_client_id) = (ClientId::new(), ClientId::new());
+    let (main_tab_id, agents_tab_id) = (TabId::new(), TabId::new());
+    let (main_pane_id, codex_pane_id) = (PaneId::new(), PaneId::new());
+    let session = build_two_tab_session(
+        alice_client_id,
+        bob_client_id,
+        (main_tab_id, main_pane_id),
+        (agents_tab_id, LayoutNode::Pane(codex_pane_id)),
+        None,
+    );
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+
+    let command_envelope = build_command_envelope(
+        CommandSource::from_mouse(alice_client_id),
+        Command::FocusPane(FocusPaneArgs {
+            focus_target: FocusTarget::Pane(codex_pane_id),
+            client_id: Some(alice_client_id),
+        }),
+    );
+    let command_id = command_envelope.command_id;
+    assert_eq!(
+        runtime.dispatch(command_envelope),
+        CommandResult::Ok {
+            command_id,
+            emitted_events: vec![
+                Event::TabFocused(TabFocused {
+                    client_id: alice_client_id,
+                    tab_id: agents_tab_id,
+                    previous_tab_id: main_tab_id,
+                }),
+                Event::PaneFocused(PaneFocused {
+                    client_id: alice_client_id,
+                    tab_id: Some(agents_tab_id),
+                    pane_id: codex_pane_id,
+                    previous_pane_id: None,
+                }),
+            ],
+        }
+    );
+    let session = &runtime.session_by_id[&session_id];
+    let alice_client = session.clients.get_client_by_id(alice_client_id).unwrap();
+    assert_eq!(alice_client.get_active_tab_id(), agents_tab_id);
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(codex_pane_id)
+    );
+    let bob_client = session.clients.get_client_by_id(bob_client_id).unwrap();
+    assert_eq!(bob_client.get_active_tab_id(), main_tab_id);
+    assert_eq!(bob_client.get_active_focused_pane_id(), Some(main_pane_id));
+    assert_eq!(
+        session.tabs[&agents_tab_id].list_focus_mru().first(),
+        Some(&codex_pane_id)
+    );
+}
+
+#[test]
+fn focus_pane_in_another_tab_opens_a_collapsed_stack_member() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let (alice_client_id, bob_client_id) = (ClientId::new(), ClientId::new());
+    let (main_tab_id, agents_tab_id) = (TabId::new(), TabId::new());
+    let (main_pane_id, active_pane_id, collapsed_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let stacked_layout = LayoutNode::Split(SplitNode::from_stacked_pane_ids(
+        vec![active_pane_id, collapsed_pane_id],
+        0,
+    ));
+    let session = build_two_tab_session(
+        alice_client_id,
+        bob_client_id,
+        (main_tab_id, main_pane_id),
+        (agents_tab_id, stacked_layout),
+        None,
+    );
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+
+    let (_, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_mouse(alice_client_id),
+        FocusTarget::Pane(collapsed_pane_id),
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["TabFocused", "LayoutChanged", "PaneFocused"])
+    );
+    let session = &runtime.session_by_id[&session_id];
+    let alice_client = session.clients.get_client_by_id(alice_client_id).unwrap();
+    assert_eq!(alice_client.get_active_tab_id(), agents_tab_id);
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(collapsed_pane_id)
+    );
+    assert!(!session.tabs[&agents_tab_id]
+        .get_layout_tree()
+        .is_pane_collapsed(
+            collapsed_pane_id,
+            alice_client.list_focus_history(agents_tab_id)
+        ));
+}
+
+#[test]
+fn focus_pane_in_another_tab_moves_the_clients_zoom_onto_the_pane() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let (alice_client_id, bob_client_id) = (ClientId::new(), ClientId::new());
+    let (main_tab_id, agents_tab_id) = (TabId::new(), TabId::new());
+    let (main_pane_id, zoomed_pane_id, hidden_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let split_layout = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutNode::Pane(zoomed_pane_id),
+            LayoutNode::Pane(hidden_pane_id),
+        ],
+    ));
+    let mut session = build_two_tab_session(
+        alice_client_id,
+        bob_client_id,
+        (main_tab_id, main_pane_id),
+        (agents_tab_id, split_layout),
+        None,
+    );
+    let alice_client = session
+        .clients
+        .get_client_mut_by_id(alice_client_id)
+        .unwrap();
+    alice_client.update_focused_pane(agents_tab_id, zoomed_pane_id);
+    alice_client.zoom_pane(agents_tab_id, zoomed_pane_id);
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+
+    let (_, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_mouse(alice_client_id),
+        FocusTarget::Pane(hidden_pane_id),
+    );
+    assert_eq!(
+        get_command_outcome(&command_result),
+        Ok(vec!["TabFocused", "LayoutChanged", "PaneFocused"])
+    );
+    assert_eq!(
+        get_client_layout_mode(&runtime, session_id, alice_client_id, agents_tab_id),
+        LayoutMode::Fullscreen {
+            focused_pane_id: hidden_pane_id
+        }
+    );
+}
+
+#[test]
+fn focus_pane_in_another_tab_with_no_room_there_is_refused_and_changes_nothing() {
+    let (mut runtime, _runtime_event_sender) = build_runtime();
+    let (alice_client_id, bob_client_id) = (ClientId::new(), ClientId::new());
+    let (main_tab_id, agents_tab_id) = (TabId::new(), TabId::new());
+    let (main_pane_id, first_pane_id, second_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let split_layout = LayoutNode::Split(SplitNode::with_equal_weights(
+        SplitDirection::Horizontal,
+        vec![
+            LayoutNode::Pane(first_pane_id),
+            LayoutNode::Pane(second_pane_id),
+        ],
+    ));
+    // `agents` is solved at 80x22 with no viewer, and both panes have room
+    // there. Alice's 6x5 pane area has room for one pane box only, so the
+    // tab she would arrive at suppresses the second pane.
+    let session = build_two_tab_session(
+        alice_client_id,
+        bob_client_id,
+        (main_tab_id, main_pane_id),
+        (agents_tab_id, split_layout),
+        Some(PaneArea::Reported(Size {
+            column_count: 6,
+            row_count: 5,
+        })),
+    );
+    let session_id = session.session_id;
+    runtime.session_by_id.insert(session_id, session);
+
+    let (command_id, command_result) = dispatch_focus_pane(
+        &mut runtime,
+        CommandSource::from_mouse(alice_client_id),
+        FocusTarget::Pane(second_pane_id),
+    );
+    assert_eq!(
+        command_result,
+        CommandResult::Rejected {
+            command_id,
+            reason: RejectReason::InvalidState,
+            help: Some("pane is suppressed; not enough space to show it".to_string()),
+        }
+    );
+    let session = &runtime.session_by_id[&session_id];
+    let alice_client = session.clients.get_client_by_id(alice_client_id).unwrap();
+    assert_eq!(alice_client.get_active_tab_id(), main_tab_id);
+    assert_eq!(
+        alice_client.get_active_focused_pane_id(),
+        Some(main_pane_id)
+    );
+    assert_eq!(alice_client.get_focused_pane_id(agents_tab_id), None);
+    assert_eq!(
+        session.tabs[&agents_tab_id].get_solved_tab_size(),
+        TEST_TAB_SIZE
     );
 }
 

@@ -631,7 +631,9 @@ The center's top row holds the title `Notifications` and the close button
 card per notification, newest first. A card shows a header above the text:
 `[Koshi] Error` above `pane …a1b2 killed by signal 9`. A notification that
 repeats shows the count in its header: `[Koshi] Warning ×3`. Each card holds
-a dismiss button `✕` on its top border. When this client held more
+a dismiss button `✕` on its top border. A card about a pane also holds `↗`
+left of `✕` while the session holds that pane, and `pane closed` after the
+pane closes. When this client held more
 notifications than it keeps, the text under the last card reads
 `3 older notifications were dropped`.
 
@@ -647,6 +649,9 @@ and the center consumes every key it does not bind. No key reaches a pane.
 - `x` (`core:dismiss-selected-notification`) and a click on a card's `✕`
   remove that notification. If the removed card was selected, the next older
   card is selected, or the next newer card when no older card is left.
+- A click on a card's `↗` closes the center and takes this client to the
+  card's pane: onto the pane's tab, with the pane focused. A card that shows
+  `pane closed` has no `↗`.
 - A click on a card selects it. The mouse wheel over the center scrolls it by
   `scroll-lines` rows.
 - Escape (`core:close-notification-center`), `<A-n>`, a click on the button,
@@ -679,7 +684,13 @@ takes 0.5 s. At most 3 notifications wait for a toast. Each further one joins
 one last toast that counts them: `36 more notifications in the center`. Once
 that toast shows, it counts no new notification: a notification that arrives
 then waits for a toast of its own after it. A click on the toast's ` ✕ `
-slides it out at once, and its notification stays in the center. Opening the
+slides it out at once, and its notification stays in the center. A toast
+about a pane that the session holds shows ` ↗ ` left of ` ✕ `. A click on
+` ↗ ` takes this client to that pane, and closes the floating pane tray first
+when the tray is open. The click does nothing while pane placement, the move
+chooser or floating pane move mode is on, while a placement waits for the
+session's answer, and while the link to the session is lost. A click on ` ↗ ` that lands this client's input on a waiting pane
+ends the wait, as any other click does. Opening the
 center removes every toast. A notification that arrives while the center is
 open shows no toast.
 

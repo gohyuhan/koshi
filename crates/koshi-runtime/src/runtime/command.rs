@@ -41,7 +41,7 @@ use koshi_core::{
     event::{
         Event, FloatingPaneLayoutChanged, FloatingPaneMoved, FloatingPanePinChanged,
         InputModeChanged, LayoutChanged, MouseSelectChanged, PanePlacementCommitted,
-        PaneProcessExited, PtyResized, RejectReason, SelectionChanged,
+        PaneProcessExited, PtyResized, RejectReason, SelectionChanged, TabFocused,
     },
     geometry::{
         Direction, FloatingPaneDimension, FloatingPanePosition, FloatingPaneSize, PaneArea,
@@ -92,6 +92,10 @@ use koshi_session::session::{
     state::{compute_one_pane_floating_content_size, FloatingPane, Session},
     tab_ops,
 };
+
+/// The help of the [`RejectReason::InvalidState`] of a command on a tab that
+/// no attached client contributes a pane area to.
+const TAB_NOT_VIEWED_HELP: &str = "pane's tab is not viewed by any client";
 
 /// The `previous_tab_id` of each [`Event::TabFocused`] in `emitted_events`:
 /// every tab a client switched away from, each tab once, in event order.
@@ -408,12 +412,13 @@ struct ClientPaneTarget {
 }
 
 /// The pane a command that reads or changes one client's own view acts on:
-/// a tiled pane in the client's active tab, or a pane inside a floating pane.
+/// a tiled pane, or a pane inside a floating pane.
 /// The `Ok` half of [`Server::resolve_focus_target`] ([`Command::FocusPane`]),
 /// [`Server::resolve_fullscreen_target`] ([`Command::TogglePaneFullscreen`])
 /// and [`Server::resolve_move_pane_target`] ([`Command::MovePane`]).
 enum ClientViewPaneTarget {
-    /// A tiled pane in the client's active tab.
+    /// A tiled pane in the tab `tab_id` names: the client's active tab, or,
+    /// for [`Command::FocusPane`] only, any tab of the session.
     Tiled(ClientPaneTarget),
     /// A pane inside a floating pane the client holds a view of.
     Floating(FloatingPaneViewTarget),
@@ -1150,10 +1155,7 @@ impl Server {
             .get_mut(&session_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
         let tab_size = session.get_tab_size(tab_id).ok_or_else(|| {
-            Rejection::from_reason_and_help(
-                RejectReason::InvalidState,
-                "pane's tab is not viewed by any client",
-            )
+            Rejection::from_reason_and_help(RejectReason::InvalidState, TAB_NOT_VIEWED_HELP)
         })?;
         Ok((session, tab_size))
     }

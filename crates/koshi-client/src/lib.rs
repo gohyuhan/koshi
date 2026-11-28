@@ -477,6 +477,10 @@ pub struct Client {
     /// `CSI I`, `Some(false)` after `CSI O`, and `None` before its first
     /// report.
     reported_is_terminal_focused: Option<bool>,
+    /// Whether this viewer's standard output is a terminal. A viewer whose
+    /// output is a pipe or a file writes no attention bell. `false` until
+    /// [`set_output_terminal`](Self::set_output_terminal) sets it.
+    is_output_terminal: bool,
     /// Restores the outer terminal when the client ends or the process
     /// panics. Held to be dropped with the client; nothing reads it.
     _terminal_cleanup_guard: TerminalCleanupGuard,
@@ -535,6 +539,7 @@ impl Client {
             floating_pane_tray: None,
             notification_history: NotificationHistory::from_client_id(client_id),
             reported_is_terminal_focused: None,
+            is_output_terminal: false,
             _terminal_cleanup_guard: terminal_cleanup_guard,
         }
     }
@@ -1501,6 +1506,11 @@ impl Client {
     pub(crate) fn set_session_local(&mut self, is_session_local: bool) {
         self.notification_history
             .set_session_local(is_session_local);
+    }
+
+    /// Record whether this viewer's standard output is a terminal.
+    pub(crate) fn set_output_terminal(&mut self, is_output_terminal: bool) {
+        self.is_output_terminal = is_output_terminal;
     }
 
     /// Whether a placement confirmation awaits the session's answer.

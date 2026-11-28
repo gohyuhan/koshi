@@ -764,6 +764,16 @@ ends the fullscreen view there of the client `--client` names. Outside koshi wit
 ends the fullscreen view of the session's only attached client, as that
 client's own key does. A positive `scroll-pane --lines` moves toward history.
 
+`focus-pane --pane` on a tiled pane in another tab moves the client onto that
+tab, then focuses the pane, in one command. The pane needs room in that tab at
+the size the tab takes with the client on it. If it has no room, the command
+fails with `pane is suppressed; not enough space to show it`, and the client
+stays on its tab. If the client has that tab zoomed, the zoom moves onto the
+pane. Example: terminal `client-1a2b…` views tab `main`, and pane `pane-7f…`
+runs in tab `agents`. `koshi focus-pane --pane pane-7f… --client client-1a2b…`
+moves `client-1a2b…` onto `agents` with `pane-7f…` focused. Every other
+terminal stays on its tab.
+
 `focus-pane --pane` also takes a floating pane, minimized or not. That pane
 then shows above the client's other floating panes and takes the client's keys.
 A client that cannot draw floating panes refuses it with `<pane> cannot be

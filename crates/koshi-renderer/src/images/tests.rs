@@ -1958,6 +1958,7 @@ fn an_image_the_open_notification_center_or_the_drawn_toast_meets_is_left_out() 
     assert_eq!(
         list_sorted_paint_targets(ViewerChrome {
             notification_toast: Some(NotificationToast {
+                has_focus_pane_control: false,
                 toast_position: ToastPosition::TopRight,
                 text_row_count: 2,
                 hidden_per_mille: 0,

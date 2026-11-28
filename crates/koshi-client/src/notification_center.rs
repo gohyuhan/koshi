@@ -5,7 +5,8 @@
 //! toast and of the center's slide.
 //!
 //! The center and the toast are this viewer's alone. Nothing here sends a
-//! request to the session. The open center holds the viewer's keys
+//! request to the session, except the `FocusPane` that a press on a focus
+//! button `↗` returns. The open center holds the viewer's keys
 //! (`LockMode::NotificationCenter`). A press off the open center closes it,
 //! and the press then acts as it does with no center.
 
@@ -30,7 +31,7 @@ use koshi_renderer::snapshot::{
 };
 use koshi_renderer::{resolve_hit_region, HitRegion};
 
-use crate::mouse::{build_frame_layout_without_overlays, MouseAction};
+use crate::mouse::{build_focus_pane_action, build_frame_layout_without_overlays, MouseAction};
 use crate::notification_history::NotificationTakeError;
 use crate::notification_toast::ToastTiming;
 use crate::Client;
@@ -107,11 +108,20 @@ impl Client {
     }
 
     /// Drop every toast preview about the pane `pane_id`, and slide a shown
-    /// one out fast: the pane stopped waiting or closed
+    /// one out fast: the pane stopped waiting
     /// ([`NotificationHistory::withdraw_pane_previews`](crate::notification_history::NotificationHistory::withdraw_pane_previews)).
     /// Its entries stay in the center.
     pub(crate) fn withdraw_pane_toasts(&mut self, pane_id: PaneId) {
         self.notification_history.withdraw_pane_previews(pane_id);
+    }
+
+    /// Take the session's word that the pane `pane_id` is gone: drop its
+    /// toast previews, slide a shown one out fast, and show `pane closed` on
+    /// the cards of its entries
+    /// ([`NotificationHistory::apply_pane_removal`](crate::notification_history::NotificationHistory::apply_pane_removal)).
+    /// Its entries stay in the center.
+    pub(crate) fn apply_notification_pane_removal(&mut self, pane_id: PaneId) {
+        self.notification_history.apply_pane_removal(pane_id);
     }
 
     /// Close the center while it is open, and open it
@@ -361,16 +371,28 @@ impl Client {
         }
     }
 
-    /// Answer a press on the toast's close control ` ✕ ` as `mouse_frame`,
-    /// the frame this viewer last painted, drew it: a left press withdraws the
-    /// toast that frame drew ([`DrawnNotifications::toast_number`]) while it
-    /// still shows, and its entry stays in the center. Any press on the
-    /// control is consumed and sends nothing. Returns `None` for every other
-    /// event, which takes the next mouse path.
+    /// Answer a press on the toast's close control ` ✕ ` or focus control
+    /// ` ↗ ` as `mouse_frame`, the frame this viewer last painted, drew it.
+    /// Each left press acts on the toast that frame drew
+    /// ([`DrawnNotifications::toast_number`]) while it still shows:
+    ///
+    /// - On ` ✕ `, the toast withdraws, and its entry stays in the center.
+    /// - On ` ↗ `, the press returns a `FocusPane` for the pane the toast's
+    ///   entry is about and this viewer
+    ///   ([`NotificationHistory::find_toast_focus_pane_id`](crate::notification_history::NotificationHistory::find_toast_focus_pane_id)),
+    ///   after it closes the floating pane tray while the tray is open. It
+    ///   returns nothing while the session no longer holds the pane, while the
+    ///   viewer is not [`LinkStatus::Linked`], while pane placement mode is on
+    ///   or a submitted placement waits for the session's answer
+    ///   ([`is_pane_placement_visible`](Self::is_pane_placement_visible)), and
+    ///   while the move chooser or floating pane move mode is on.
+    ///
+    /// Any press on either control is consumed. Returns `None` for every
+    /// other event, which takes the next mouse path.
     ///
     /// Example: the frame drew toast `0`, and toast `1` replaced it before
-    /// the next paint. A left press on the drawn ` ✕ ` leaves toast `1` as it
-    /// is.
+    /// the next paint. A left press on the drawn ` ✕ ` or ` ↗ ` leaves toast
+    /// `1` as it is and sends nothing.
     pub(crate) fn handle_notification_toast_mouse(
         &mut self,
         mouse_input: MouseInput,
@@ -379,18 +401,38 @@ impl Client {
         let MouseKind::Press(pressed_button) = mouse_input.mouse_kind else {
             return None;
         };
-        if resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position)
-            != HitRegion::NotificationToastClose
-        {
+        let hit_region = resolve_hit_region(mouse_frame.build_frame_layout(), mouse_input.position);
+        if !matches!(
+            hit_region,
+            HitRegion::NotificationToastClose | HitRegion::NotificationToastFocusPane
+        ) {
             return None;
         }
-        if let (MouseButton::Left, Some(toast_number)) =
+        let (MouseButton::Left, Some(toast_number)) =
             (pressed_button, mouse_frame.drawn_notifications.toast_number)
-        {
+        else {
+            return Some(Vec::new());
+        };
+        if self.notification_history.find_shown_toast_number() != Some(toast_number) {
+            return Some(Vec::new());
+        }
+        if hit_region == HitRegion::NotificationToastClose {
             self.notification_history
                 .request_toast_withdraw(toast_number);
+            return Some(Vec::new());
         }
-        Some(Vec::new())
+        let is_layout_input_mode_on =
+            self.is_pane_placement_visible() || self.pane_move_mode.is_some();
+        if self.link_status != LinkStatus::Linked || is_layout_input_mode_on {
+            return Some(Vec::new());
+        }
+        let Some(focus_pane_id) = self.notification_history.find_toast_focus_pane_id() else {
+            return Some(Vec::new());
+        };
+        if self.floating_pane_tray.is_some() {
+            self.close_floating_pane_tray();
+        }
+        Some(vec![build_focus_pane_action(self.client_id, focus_pane_id)])
     }
 
     /// Answer `mouse_input` against `mouse_frame`, the frame this viewer last
@@ -407,7 +449,9 @@ impl Client {
     ///   ([`clear_notifications`](Self::clear_notifications)).
     /// - A left press on a card's dismiss button removes that card's entry
     ///   ([`NotificationHistory::dismiss_merged_entry`](crate::notification_history::NotificationHistory::dismiss_merged_entry)),
-    ///   and a left press elsewhere on a card selects it. The card is the one
+    ///   a left press on a card's focus button `↗` closes the center and
+    ///   returns a `FocusPane` for the card's pane and this viewer, and a left
+    ///   press elsewhere on a card selects it. The card is the one
     ///   `mouse_frame` drew under the press
     ///   ([`handle_notification_card_press`](Self::handle_notification_card_press)).
     /// - A wheel tick over the center scrolls it by `mouse.scroll-lines`
@@ -422,8 +466,8 @@ impl Client {
     ///
     /// Every other press and wheel tick over the center, and every event over
     /// a center that slides out, does nothing more. Every event the center
-    /// takes sends nothing. A drag and a release return
-    /// `None`, and a gesture under way goes on.
+    /// takes but a press on a focus button sends nothing. A drag and a release
+    /// return `None`, and a gesture under way goes on.
     pub(crate) fn handle_notification_center_mouse(
         &mut self,
         mouse_input: MouseInput,
@@ -446,7 +490,7 @@ impl Client {
                     HitRegion::NotificationCenterClose => self.close_notification_center(),
                     HitRegion::NotificationCenterClearAll => self.clear_notifications(),
                     HitRegion::NotificationCenterBody => {
-                        self.handle_notification_card_press(mouse_input, mouse_frame);
+                        return Some(self.handle_notification_card_press(mouse_input, mouse_frame));
                     }
                     _ => {}
                 }
@@ -480,10 +524,19 @@ impl Client {
 
     /// Answer a left press of `mouse_input` on the body of the open center,
     /// on the card `mouse_frame`, the frame this viewer last painted, drew
-    /// under it ([`DrawnNotifications::center_card_rows`]): a press on that
-    /// card's dismiss button removes its entry, and a press elsewhere on it
-    /// selects it. A press on no drawn card, and on a card whose entry is
-    /// gone, does nothing.
+    /// under it ([`DrawnNotifications::center_card_rows`]), and return the
+    /// actions to send:
+    ///
+    /// - A press on that card's dismiss button removes its entry.
+    /// - A press on that card's focus button `↗` closes the center and
+    ///   returns a `FocusPane` for the pane the card's entry is about and
+    ///   this viewer, while the session still holds that pane
+    ///   ([`NotificationHistory::find_entry_focus_pane_id`](crate::notification_history::NotificationHistory::find_entry_focus_pane_id)).
+    ///   Once the pane is gone, the press does nothing.
+    /// - A press elsewhere on it selects it.
+    ///
+    /// A press on no drawn card, and on a card whose entry is gone, does
+    /// nothing. Only a press on a focus button returns an action.
     ///
     /// Example: the frame drew entry `b` as the newest card, and entry `c`
     /// arrived before the next paint. A press on the drawn `✕` of `b` removes
@@ -492,29 +545,40 @@ impl Client {
         &mut self,
         mouse_input: MouseInput,
         mouse_frame: &MouseFrame,
-    ) {
+    ) -> Vec<MouseAction> {
         let Some(center_layout) =
             find_drawn_notification_center_layout(mouse_frame.build_frame_layout())
         else {
-            return;
+            return Vec::new();
         };
         let Some(resting_point) = center_layout.find_resting_point(mouse_input.position) else {
-            return;
+            return Vec::new();
         };
         let Some(card_hit) = find_notification_card_at(
             &mouse_frame.drawn_notifications.center_card_rows,
             &center_layout,
             resting_point,
         ) else {
-            return;
+            return Vec::new();
         };
         if card_hit.is_on_dismiss_button {
             self.notification_history
                 .dismiss_merged_entry(card_hit.notification_id);
-        } else {
-            self.notification_history
-                .select_entry(card_hit.notification_id);
+            return Vec::new();
         }
+        if card_hit.focus_pane_id.is_some() {
+            let Some(focus_pane_id) = self
+                .notification_history
+                .find_entry_focus_pane_id(card_hit.notification_id)
+            else {
+                return Vec::new();
+            };
+            self.close_notification_center();
+            return vec![build_focus_pane_action(self.client_id, focus_pane_id)];
+        }
+        self.notification_history
+            .select_entry(card_hit.notification_id);
+        Vec::new()
     }
 
     /// Advance the toast's clock to `current_time`, stopped while
@@ -523,19 +587,27 @@ impl Client {
     /// ([`NotificationHistory::advance_notification_clocks`](crate::notification_history::NotificationHistory::advance_notification_clocks)).
     /// A preview about a pane that `is_pane_drawn` names as drawn on the
     /// viewer's screen goes at its turn.
+    ///
+    /// Returns whether one BEL is due on this viewer's terminal for a toast
+    /// about a blocked program. None is due while `attention-bell` is
+    /// `#false`, and while this viewer's output is not a terminal
+    /// ([`set_output_terminal`](Self::set_output_terminal)).
     pub(crate) fn advance_notification_clocks(
         &mut self,
         current_time: Instant,
         is_toast_paused: bool,
         is_pane_drawn: &dyn Fn(PaneId) -> bool,
-    ) {
+    ) -> bool {
         let toast_timing = self.get_toast_timing();
+        let should_ring_attention_bell =
+            self.client_config.notifications.should_ring_attention_bell && self.is_output_terminal;
         self.notification_history.advance_notification_clocks(
             current_time,
             toast_timing,
             is_toast_paused,
             is_pane_drawn,
-        );
+            should_ring_attention_bell,
+        )
     }
 
     /// How long from `current_time` until the toast's clock or the center's
@@ -625,6 +697,10 @@ impl Client {
             toast_position: self.client_config.notifications.toast_position,
             text_row_count,
             hidden_per_mille,
+            has_focus_pane_control: self
+                .notification_history
+                .find_toast_focus_pane_id()
+                .is_some(),
         })
     }
 

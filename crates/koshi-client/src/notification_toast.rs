@@ -579,6 +579,17 @@ impl NotificationToastQueue {
             .map(|shown_toast| (&shown_toast.preview, shown_toast.hidden_per_mille))
     }
 
+    /// The number of the shown toast ([`ShownToast::toast_number`]) and its
+    /// preview, once its appear phase started at an advance of the clock.
+    /// `None` while no toast shows, and before the clock first advanced with
+    /// the shown toast.
+    #[must_use]
+    pub(crate) fn find_started_toast(&self) -> Option<(u64, &ToastPreview)> {
+        let shown_toast = self.shown_toast.as_ref()?;
+        shown_toast.phase_started_at?;
+        Some((shown_toast.toast_number, &shown_toast.preview))
+    }
+
     /// The number of the shown toast ([`ShownToast::toast_number`]), or
     /// `None` while no toast shows.
     #[must_use]

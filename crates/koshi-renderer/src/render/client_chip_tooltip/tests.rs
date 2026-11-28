@@ -501,6 +501,7 @@ fn a_pane_chip_under_a_toast_opens_no_tooltip() {
     }
     let viewer_chrome = ViewerChrome {
         notification_toast: Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count: 3,
             hidden_per_mille: 0,

@@ -170,6 +170,9 @@ pub enum HitRegion {
     /// The close control ` ✕ ` on the top border of the viewer's toast;
     /// clicking it slides the toast out.
     NotificationToastClose,
+    /// The focus control ` ↗ ` on the top border of the viewer's toast about
+    /// a pane; clicking it takes the viewer to that pane.
+    NotificationToastFocusPane,
     /// The tabline row, off any tab ribbon, arrow or tray button (session
     /// name, gap, or mode tag).
     Tabline,
@@ -185,8 +188,9 @@ pub enum HitRegion {
 ///
 /// Reads the frame in the renderer's own paint order so chrome wins over the
 /// pane content beneath it: the committed tabline and statusline regions are
-/// tested first, then the close control of the viewer's toast
-/// ([`find_drawn_notification_toast_layout`]), then the viewer's open
+/// tested first, then the close control and the focus control of the
+/// viewer's toast ([`find_drawn_notification_toast_layout`]), then the
+/// viewer's open
 /// floating pane tray ([`find_drawn_floating_pane_tray_layout`]), then the
 /// viewer's open notification center
 /// ([`find_drawn_notification_center_layout`]), then this viewer's drawn
@@ -223,12 +227,20 @@ pub fn resolve_hit_region(frame_layout: FrameLayout<'_>, screen_point: Point) ->
     }
 
     // The toast draws over every other part of the pane area. Only its close
-    // control is a region.
-    if find_drawn_notification_toast_layout(frame_layout)
-        .and_then(|toast_layout| toast_layout.close_rect)
-        .is_some_and(|close_rect| close_rect.is_point_inside(screen_point))
-    {
-        return HitRegion::NotificationToastClose;
+    // control and its focus control are regions.
+    if let Some(toast_layout) = find_drawn_notification_toast_layout(frame_layout) {
+        if toast_layout
+            .close_rect
+            .is_some_and(|close_rect| close_rect.is_point_inside(screen_point))
+        {
+            return HitRegion::NotificationToastClose;
+        }
+        if toast_layout
+            .focus_pane_rect
+            .is_some_and(|focus_pane_rect| focus_pane_rect.is_point_inside(screen_point))
+        {
+            return HitRegion::NotificationToastFocusPane;
+        }
     }
 
     // The open tray draws over the notification center and the floating panes.

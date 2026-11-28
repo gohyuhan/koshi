@@ -42,7 +42,7 @@ use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant, SystemTime};
 
-use koshi_core::attention::HeldPane;
+use koshi_core::attention::{AttentionReasonKind, HeldPane};
 use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::notification::{
     NotificationEntry, NotificationEpoch, NotificationId, NotificationQueue,
@@ -66,6 +66,9 @@ const MAX_MERGED_NOTIFICATION_COUNT: usize = 256;
 /// The thousandths of the center's width past the pane area's right edge
 /// while it is fully out of view: 1000.
 const FULLY_HIDDEN_PER_MILLE: u16 = 1000;
+
+/// The least time from one attention bell to the next: 1 s.
+const MIN_ATTENTION_BELL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The notification center while it is open or slides out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +254,11 @@ pub(crate) struct NotificationHistory {
     /// Counts each change to what the center, the toast or the tabline's
     /// notification button draws, from `0`.
     revision: u64,
+    /// The number of the newest toast whose appear the attention bell saw
+    /// start, or `None` before it saw one.
+    attention_bell_checked_toast_number: Option<u64>,
+    /// When the attention bell last rang, or `None` before it rang.
+    attention_bell_rung_at: Option<Instant>,
 }
 
 impl NotificationHistory {
@@ -269,6 +277,8 @@ impl NotificationHistory {
             notification_toast: NotificationToastQueue::default(),
             toast_text_row_cache: ToastTextRowCache::default(),
             revision: 0,
+            attention_bell_checked_toast_number: None,
+            attention_bell_rung_at: None,
         }
     }
 
@@ -552,13 +562,27 @@ impl NotificationHistory {
     ///
     /// Example: a center that opens from `1000` and advances 80 ms after its
     /// slide started stands at `125` thousandths past the edge.
+    ///
+    /// Returns whether one BEL is due on the viewer's terminal: the advance
+    /// started the appear of a toast number the bell had not seen
+    /// ([`NotificationToastQueue::find_started_toast`]), its entry is about a
+    /// pane whose attention reason kind is `ProgramBlocked`,
+    /// `should_ring_attention_bell` is `true`, and at least
+    /// [`MIN_ATTENTION_BELL_INTERVAL`] passed since the last BEL was due. A
+    /// toast that starts inside the interval gives none, and no BEL waits for
+    /// the next advance.
+    ///
+    /// Example: two `ProgramBlocked` toasts that start 300 ms apart give
+    /// `true`, then `false`. A third that starts 1 s after the first gives
+    /// `true`.
     pub(crate) fn advance_notification_clocks(
         &mut self,
         current_time: Instant,
         toast_timing: ToastTiming,
         is_toast_paused: bool,
         is_pane_drawn: &dyn Fn(PaneId) -> bool,
-    ) {
+        should_ring_attention_bell: bool,
+    ) -> bool {
         if self.notification_toast.advance(
             current_time,
             toast_timing,
@@ -567,8 +591,33 @@ impl NotificationHistory {
         ) {
             self.revision += 1;
         }
+        let mut is_attention_bell_due = false;
+        if let Some((toast_number, started_preview)) = self.notification_toast.find_started_toast()
+        {
+            if self.attention_bell_checked_toast_number != Some(toast_number) {
+                self.attention_bell_checked_toast_number = Some(toast_number);
+                let is_blocked_program = matches!(
+                    started_preview,
+                    ToastPreview::Entry(NotificationEntry {
+                        subject: Some(NotificationSubject::Pane {
+                            attention_reason_kind: Some(AttentionReasonKind::ProgramBlocked),
+                            ..
+                        }),
+                        ..
+                    })
+                );
+                let is_interval_over = self.attention_bell_rung_at.is_none_or(|rung_at| {
+                    current_time.saturating_duration_since(rung_at) >= MIN_ATTENTION_BELL_INTERVAL
+                });
+                is_attention_bell_due =
+                    should_ring_attention_bell && is_blocked_program && is_interval_over;
+                if is_attention_bell_due {
+                    self.attention_bell_rung_at = Some(current_time);
+                }
+            }
+        }
         let Some(center_state) = &mut self.notification_center else {
-            return;
+            return is_attention_bell_due;
         };
         let slide = &mut center_state.slide;
         let end_hidden_per_mille = slide.get_end_hidden_per_mille();
@@ -590,6 +639,7 @@ impl NotificationHistory {
             self.notification_center = None;
             self.revision += 1;
         }
+        is_attention_bell_due
     }
 
     /// How long from `current_time` until the toast's clock or the center's
@@ -717,7 +767,10 @@ impl NotificationHistory {
     /// `held_panes` lists every pane the session holds, with whether it waits
     /// for a person, as the attach answer or the `Resync` carried them. A
     /// taken queue first drops every entry preview about a pane that does not
-    /// wait there ([`NotificationToastQueue::withdraw_pane_previews`]). With
+    /// wait there ([`NotificationToastQueue::withdraw_pane_previews`]). Once
+    /// the queue is taken, every entry of session `session_id` about a pane
+    /// that `held_panes` leaves out shows `pane closed` on its card
+    /// ([`NotificationCenterEntries::mark_subject_panes_closed`]). With
     /// `should_show_toasts`, each newer entry then queues a toast preview
     /// while the center is closed, except in the first queue taken from its
     /// owner, except an entry about this viewer
@@ -795,6 +848,16 @@ impl NotificationHistory {
                     .find_subject_pane_id()
                     .is_none_or(is_waiting_pane_out_of_view);
             self.take_arrival(received_entry, held_entry_index, should_preview_entry);
+        }
+        let held_pane_ids: HashSet<PaneId> = held_panes
+            .iter()
+            .map(|held_pane| held_pane.pane_id)
+            .collect();
+        let is_pane_gone = |merged_entry: &NotificationEntry, pane_id: PaneId| {
+            merged_entry.notification_id.owner == owner && !held_pane_ids.contains(&pane_id)
+        };
+        if self.merged_entries.mark_subject_panes_closed(is_pane_gone) {
+            self.revision += 1;
         }
         self.session_queue_mark = Some(SessionQueueMark {
             owner,
@@ -887,6 +950,48 @@ impl NotificationHistory {
     pub(crate) fn withdraw_pane_previews(&mut self, pane_id: PaneId) {
         self.notification_toast
             .withdraw_pane_previews(&|previewed_pane_id| previewed_pane_id == pane_id);
+    }
+
+    /// Take the session's word that it no longer holds the pane `pane_id`:
+    /// drop its entry previews and withdraw a shown one fast
+    /// ([`withdraw_pane_previews`](Self::withdraw_pane_previews)), and show
+    /// `pane closed` on the card of every entry about it
+    /// ([`NotificationCenterEntries::mark_subject_panes_closed`]). Its entries
+    /// stay.
+    pub(crate) fn apply_pane_removal(&mut self, pane_id: PaneId) {
+        self.withdraw_pane_previews(pane_id);
+        let is_pane_gone = |_: &NotificationEntry, entry_pane_id: PaneId| entry_pane_id == pane_id;
+        if self.merged_entries.mark_subject_panes_closed(is_pane_gone) {
+            self.revision += 1;
+        }
+    }
+
+    /// The pane the shown toast's focus control names: the pane the shown
+    /// entry is about, while the session holds it
+    /// ([`NotificationCenterEntry::find_focus_pane_id`]). `None` while no
+    /// toast shows, for a summary, and for an entry about no pane or about a
+    /// pane that is gone.
+    #[must_use]
+    pub(crate) fn find_toast_focus_pane_id(&self) -> Option<PaneId> {
+        let (ToastPreview::Entry(shown_entry), _) = self.notification_toast.find_shown_preview()?
+        else {
+            return None;
+        };
+        self.find_entry_focus_pane_id(shown_entry.notification_id)
+    }
+
+    /// The pane the focus button of the entry `notification_id` names: the
+    /// pane the entry is about, while the session holds it
+    /// ([`NotificationCenterEntry::find_focus_pane_id`]). `None` for an
+    /// entry the history does not hold, an entry about no pane, and an entry
+    /// whose card shows `pane closed`.
+    #[must_use]
+    pub(crate) fn find_entry_focus_pane_id(
+        &self,
+        notification_id: NotificationId,
+    ) -> Option<PaneId> {
+        let merged_entry_index = self.find_merged_entry_index(notification_id)?;
+        self.merged_entries[merged_entry_index].find_focus_pane_id()
     }
 
     /// Add the sequences between `next_expected_sequence` and

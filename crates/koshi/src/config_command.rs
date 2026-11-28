@@ -316,6 +316,12 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
          notification either way.",
     ),
     build_config_field_help(
+        "koshi.notifications.attention-bell",
+        "koshi.kdl",
+        "#true",
+        "Ring this terminal's bell once when a toast about a blocked program slides in.",
+    ),
+    build_config_field_help(
         "koshi.notifications.toast-position",
         "koshi.kdl",
         "\"top-right\"",

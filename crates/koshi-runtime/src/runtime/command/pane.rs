@@ -2282,30 +2282,50 @@ impl Server {
     /// Handle [`Command::FocusPane`]: move the target client's focus to the
     /// target pane, which then takes that client's input. The pane comes out
     /// of [`Self::resolve_focus_target`]. A floating pane goes to
-    /// [`Self::handle_focus_floating_pane`]. A tiled pane in the client's
-    /// active tab takes the client's input, and every floating pane the
-    /// client shows is minimized for it ([`apply_tiled_pane_focus`]).
+    /// [`Self::handle_focus_floating_pane`]. A tiled pane takes the client's
+    /// input, and every floating pane the client shows is minimized for it
+    /// ([`apply_tiled_pane_focus`]). A tiled pane in another tab first
+    /// switches the client to that tab, in the same command.
     ///
-    /// A tiled pane must have room in the solve of the client's layout mode
-    /// ([`Session::compute_layout_mode_solve`]): one suppressed for lack of
-    /// space is [`RejectReason::InvalidState`]. A stack member collapsed to its
-    /// header in the client's own view of the tab
-    /// ([`LayoutNode::is_pane_collapsed`] with its focus history) is a valid
+    /// A tiled pane must have room in the solve of the client's layout mode:
+    /// in the client's active tab, the tab's own solve
+    /// ([`Session::compute_layout_mode_solve`]); in another tab, the solve at
+    /// the tab size the tab takes once the client arrives
+    /// ([`compute_tab_size_after_clients_move`], [`solve_layout_with_mode`]).
+    /// One suppressed for lack of space is [`RejectReason::InvalidState`]
+    /// `pane is suppressed; not enough space to show it`. A tab that would
+    /// have no tab size, with no attached client contributing a pane area, is
+    /// [`RejectReason::InvalidState`] `pane's tab is not viewed by any
+    /// client`.
+    ///
+    /// A stack member collapsed to its header in the client's own view of the
+    /// tab ([`LayoutNode::is_pane_collapsed`] with its focus history) is a valid
     /// target: focusing it opens it in that view, the member the client had
     /// open collapses to its header, and the tab's PTYs reflow to what every
     /// viewer now draws. The tab's tree and every other client's view stay as
     /// they are. Zoom follows focus, per client: when the target client has
-    /// this tab zoomed, focusing another pane moves its zoom onto that pane —
-    /// its zoomed view swaps content and stays on, and no other client's view
-    /// moves. Emits [`Event::LayoutChanged`] plus per-pane
-    /// [`Event::PtyResized`] when the focus opened a stack member or
-    /// retargeted the zoom, then one [`Event::FloatingPaneMinimizedChanged`] per
-    /// floating pane minimized, then [`Event::PaneFocused`] when the client's
-    /// input actually moved, naming as `previous_pane_id` the pane that took it
-    /// before, then one [`Event::PtyResized`] per pane whose PTY size the
-    /// minimize moved ([`Self::commit_events`]); focusing the pane that
+    /// the pane's tab zoomed, focusing another pane moves its zoom onto that
+    /// pane — its zoomed view swaps content and stays on, and no other
+    /// client's view moves.
+    ///
+    /// Emits, in this order: [`Event::TabFocused`] when the client switched
+    /// tabs; [`Event::LayoutChanged`] when the focus opened a stack member or
+    /// retargeted the zoom; the events of solving the pane's tab and, after a
+    /// switch, the tab the client left, with one [`Event::PtyResized`] per
+    /// pane resized ([`Self::reflow_tab_if_viewed`]); one
+    /// [`Event::FloatingPaneMinimizedChanged`] per floating pane minimized;
+    /// [`Event::PaneFocused`] when the client's focus in the pane's tab
+    /// moved, naming as `previous_pane_id` the floating pane's input pane
+    /// that took the client's input, else the pane the client focused in that
+    /// tab before; then one [`Event::PtyResized`] per pane whose PTY size
+    /// the minimize moved ([`Self::commit_events`]). Focusing the pane that
     /// already takes the client's input completes with no events. A rejected
     /// focus mutates nothing.
+    ///
+    /// Example: Alice views tab `main` and pane 3 sits in tab `agents`.
+    /// `FocusPane` of pane 3 for Alice emits `TabFocused { tab_id: agents,
+    /// previous_tab_id: main }`, then `PaneFocused { pane_id: 3 }`, and Bob's
+    /// view of either tab stays as it is.
     pub(super) fn handle_focus_pane(
         &mut self,
         command_id: CommandId,
@@ -2323,13 +2343,30 @@ impl Server {
 
         let pty_backend = Arc::clone(self.get_pty_backend());
 
-        // A tab that no attached client contributes a pane area to is refused.
-        let (session, _tab_size) =
-            self.resolve_session_and_tab_size(pane_target.session_id, pane_target.tab_id)?;
+        let session = self
+            .session_by_id
+            .get_mut(&pane_target.session_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?;
+        let client = Self::require_client(session, pane_target.client_id)?;
+        let previous_tab_id = client.get_active_tab_id();
+        let is_tab_switched = previous_tab_id != pane_target.tab_id;
+        let tab_size = if is_tab_switched {
+            compute_tab_size_after_clients_move(
+                session,
+                pane_target.tab_id,
+                None,
+                &[pane_target.client_id],
+                &[],
+            )
+        } else {
+            session.get_tab_size(pane_target.tab_id)
+        }
+        .ok_or_else(|| {
+            Rejection::from_reason_and_help(RejectReason::InvalidState, TAB_NOT_VIEWED_HELP)
+        })?;
         // Zoom follows focus and belongs to this client: a zoomed client that
         // focuses another pane zooms that pane, and every other client's view
         // stays as it was. The mode solved and checked below is this client's.
-        let client = Self::require_client(session, pane_target.client_id)?;
         let previous_focused_pane_id = client.get_active_focused_pane_id();
         let client_layout_mode = client.get_layout_mode(pane_target.tab_id);
         let effective_layout_mode = match client_layout_mode {
@@ -2343,13 +2380,32 @@ impl Server {
             layout_mode => layout_mode,
         };
         let is_layout_mode_retargeted = effective_layout_mode != client_layout_mode;
+        let tab_layout_tree = session
+            .tabs
+            .get(&pane_target.tab_id)
+            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
+            .get_layout_tree();
 
         // A pane suppressed for lack of space cannot take focus.
-        let is_pane_suppressed = session
-            .compute_layout_mode_solve(LayoutAreaId::Tab(pane_target.tab_id), effective_layout_mode)
-            .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
+        let is_pane_suppressed = if is_tab_switched {
+            solve_layout_with_mode(
+                tab_layout_tree,
+                effective_layout_mode,
+                Rect::from_size_at_origin(tab_size),
+                session.get_pane_sizing(),
+            )
             .suppressed_pane_ids
-            .contains(&pane_target.pane_id);
+            .contains(&pane_target.pane_id)
+        } else {
+            session
+                .compute_layout_mode_solve(
+                    LayoutAreaId::Tab(pane_target.tab_id),
+                    effective_layout_mode,
+                )
+                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
+                .suppressed_pane_ids
+                .contains(&pane_target.pane_id)
+        };
         if is_pane_suppressed {
             return Err(Rejection::from_reason_and_help(
                 RejectReason::InvalidState,
@@ -2360,15 +2416,10 @@ impl Server {
         // A stack member collapsed in this client's view opens for this client
         // alone: its focus history decides which member its view shows.
         let is_stack_member_opened = client_layout_mode == LayoutMode::Tiled
-            && session
-                .tabs
-                .get(&pane_target.tab_id)
-                .ok_or_else(|| Rejection::from_reason(RejectReason::TargetNotFound))?
-                .get_layout_tree()
-                .is_pane_collapsed(
-                    pane_target.pane_id,
-                    client.list_focus_history(pane_target.tab_id),
-                );
+            && tab_layout_tree.is_pane_collapsed(
+                pane_target.pane_id,
+                client.list_focus_history(pane_target.tab_id),
+            );
 
         if previous_focused_pane_id == Some(pane_target.pane_id)
             && !is_stack_member_opened
@@ -2377,12 +2428,22 @@ impl Server {
             return Ok(self.commit_events(command_id, Vec::new()));
         }
 
-        // The focus, and this client's zoom with it, moves before the reflow;
-        // the reflow solves PTY sizes from what every client now displays.
+        // The tab switch, the focus, and this client's zoom with it, move
+        // before the reflow; the reflow solves PTY sizes from what every
+        // client now displays.
         let client = session
             .clients
             .get_client_mut_by_id(pane_target.client_id)
             .ok_or_else(|| Rejection::from_reason(RejectReason::SourceClientStale))?;
+        let mut emitted_events = Vec::new();
+        if is_tab_switched {
+            client.update_active_tab_id(pane_target.tab_id);
+            emitted_events.push(Event::TabFocused(TabFocused {
+                client_id: pane_target.client_id,
+                tab_id: pane_target.tab_id,
+                previous_tab_id,
+            }));
+        }
         let focus_events = apply_tiled_pane_focus(
             client,
             &session.floating_set,
@@ -2394,17 +2455,27 @@ impl Server {
         }
 
         // Opening a stack member, the zoom retarget, or both changed what this
-        // client draws: announce the new geometry and resize each live PTY
-        // whose size changed.
-        let mut emitted_events = Vec::new();
+        // client draws: announce the new geometry. A switch, an opened member
+        // or a retargeted zoom solves the pane's tab again and resizes each
+        // live PTY whose size changed; a switch also solves the tab left.
         if is_stack_member_opened || is_layout_mode_retargeted {
             emitted_events.push(Event::LayoutChanged(LayoutChanged {
                 tab_id: pane_target.tab_id,
             }));
+        }
+        if is_tab_switched || is_stack_member_opened || is_layout_mode_retargeted {
             self.reflow_tab_if_viewed(
                 pty_backend.as_ref(),
                 pane_target.session_id,
                 pane_target.tab_id,
+                &mut emitted_events,
+            );
+        }
+        if is_tab_switched {
+            self.reflow_tab_if_viewed(
+                pty_backend.as_ref(),
+                pane_target.session_id,
+                previous_tab_id,
                 &mut emitted_events,
             );
         }

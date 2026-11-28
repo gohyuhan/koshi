@@ -518,6 +518,8 @@ pub struct PartialCopyConfig {
 pub struct PartialNotificationConfig {
     /// Whether a new notification slides in as a toast.
     pub should_show_toasts: Option<bool>,
+    /// Whether a toast about a blocked program rings this viewer's terminal.
+    pub should_ring_attention_bell: Option<bool>,
     /// The corner of the pane area the toast sits in.
     pub toast_position: Option<ToastPosition>,
     /// How long a toast stays in place, in milliseconds.
@@ -529,6 +531,10 @@ impl PartialNotificationConfig {
         merge_override_field(
             &mut notification_config.should_show_toasts,
             self.should_show_toasts,
+        );
+        merge_override_field(
+            &mut notification_config.should_ring_attention_bell,
+            self.should_ring_attention_bell,
         );
         merge_override_field(&mut notification_config.toast_position, self.toast_position);
         merge_override_field(
