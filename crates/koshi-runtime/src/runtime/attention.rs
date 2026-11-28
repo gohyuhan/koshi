@@ -20,6 +20,11 @@
 //! notification that set the reason, or the program status record that
 //! raised the reason leaving the state that raised it.
 //!
+//! A read that makes the pane wait with a new reason posts one entry to the
+//! session's notification queue, once for each reason kind between two
+//! visits. A bell posts no entry
+//! ([`Server::post_pane_attention_notification`]).
+//!
 //! Example: `cargo test` runs for 12 seconds in pane 3 while Alice reads tab
 //! 2, and fails with exit code `101`. Pane 3 waits with
 //! `CommandFinished { exit_code: Some(101), elapsed_secs: Some(12) }`, and
@@ -34,11 +39,13 @@ use koshi_core::event::{
     Event, PaneAttentionCleared, PaneAttentionRaised, PaneCommandFinished, PaneCommandStarted,
 };
 use koshi_core::ids::{ClientId, PaneId};
+use koshi_core::notification::NotificationSubject;
 use koshi_session::client::TerminalFocus;
 use koshi_terminal::engine::TimedProgramFact;
 use koshi_terminal::state::{ProgramFact, ProgramStatusFact};
 
 use crate::runtime::program_status::apply_program_status_fact;
+use crate::runtime::snapshot::resolve_pane_title;
 use crate::server::Server;
 
 impl Server {
@@ -76,7 +83,10 @@ impl Server {
     /// command event: [`Event::PaneAttentionRaised`] when the pane waits with
     /// another reason or another `raised_at` than before, and
     /// [`Event::PaneAttentionCleared`] with `client_id: None` when the pane
-    /// waited before and waits no more.
+    /// waited before and waits no more. A `PaneAttentionRaised` also posts
+    /// its reason to the session's notification queue
+    /// ([`Self::post_pane_attention_notification`]), except for a bell and
+    /// for a reason kind the pane posted since a client last attended it.
     ///
     /// Example: `C` read at 14:00:00 and `D;101` read at 14:00:12.2 give
     /// `PaneCommandStarted`, then `PaneCommandFinished` and
@@ -166,7 +176,11 @@ impl Server {
                 }
             }
         }
-        emitted_events.extend(self.report_pane_attention_change(pane_id, attention_before));
+        let attention_change_event = self.report_pane_attention_change(pane_id, attention_before);
+        if let Some(Event::PaneAttentionRaised(raised_event)) = &attention_change_event {
+            self.post_pane_attention_notification(pane_id, &raised_event.reason);
+        }
+        emitted_events.extend(attention_change_event);
         emitted_events
     }
 
@@ -243,6 +257,88 @@ impl Server {
         if !is_reason_standing {
             session.set_pane_attention(pane_id, None);
         }
+    }
+
+    /// Post `reason`, the reason `pane_id` now waits on, to its session's
+    /// notification queue as one `source: Core` entry with the subject
+    /// `Pane { pane_id, attention_reason_kind: Some(<kind>) }`
+    /// ([`Self::post_session_notification`]), and add the kind to the pane's
+    /// `notified_attention_kinds`.
+    ///
+    /// The entry text reads `<place> › <pane> · <what>`. `<place>` is the name
+    /// of the tab that holds the pane, or `floating` for a floating pane.
+    /// `<pane>` is the pane's border title ([`resolve_pane_title`]), or
+    /// `pane …a1b2` ([`PaneId::format_short_label`]) when the title is
+    /// missing or empty. `<what>` and the severity come from
+    /// [`AttentionReason::format_notification_entry`], and ` · <what>` drops
+    /// out when `<what>` is empty.
+    ///
+    /// Nothing is posted for a bell, for a kind the pane's
+    /// `notified_attention_kinds` already holds, and for a pane that no tab
+    /// and no floating pane holds.
+    ///
+    /// Example: `codex` in pane `…a1b2` on tab `agents` reports `blocked`
+    /// with the kind `question` and the message `Which branch?`. The session
+    /// posts the `Warning` entry
+    /// `agents › pane …a1b2 · codex: blocked (question) — Which branch?`.
+    fn post_pane_attention_notification(&mut self, pane_id: PaneId, reason: &AttentionReason) {
+        let attention_reason_kind = reason.get_reason_kind();
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
+            return;
+        };
+        let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
+            return;
+        };
+        if pane_record
+            .notified_attention_kinds
+            .contains(&attention_reason_kind)
+        {
+            return;
+        }
+        let Some((severity, reason_text)) =
+            reason.format_notification_entry(&pane_record.program_status_records)
+        else {
+            return;
+        };
+        let place = if let Some(tab) = session.find_tab_by_pane_id(pane_id) {
+            tab.get_tab_name().to_owned()
+        } else if session
+            .floating_set
+            .find_floating_pane_by_pane_id(pane_id)
+            .is_some()
+        {
+            "floating".to_owned()
+        } else {
+            return;
+        };
+        let session_id = session.session_id;
+        session
+            .panes
+            .get_pane_record_mut_by_id(pane_id)
+            .expect("the record read above")
+            .notified_attention_kinds
+            .push(attention_reason_kind);
+        let pane_label = self
+            .terminal_engine_by_pane_id
+            .get(&pane_id)
+            .and_then(|terminal_engine| resolve_pane_title(terminal_engine.get_terminal_state()))
+            .filter(|pane_title| !pane_title.is_empty())
+            .unwrap_or_else(|| pane_id.format_short_label());
+        let notification_text = if reason_text.is_empty() {
+            format!("{place} › {pane_label}")
+        } else {
+            format!("{place} › {pane_label} · {reason_text}")
+        };
+        self.post_session_notification(
+            session_id,
+            severity,
+            &notification_text,
+            Some(NotificationSubject::Pane {
+                pane_id,
+                attention_reason_kind: Some(attention_reason_kind),
+            }),
+            None,
+        );
     }
 
     /// What `pane_id` waits for, or `None` for a pane that waits for nobody
@@ -371,10 +467,11 @@ impl Server {
     }
 
     /// Record that `client_id` attended `pane_id`: every program status record
-    /// of the pane reads `is_seen: true` and stays, and the pane's wait ends
-    /// with one published [`Event::PaneAttentionCleared`] naming `client_id`.
-    /// A pane that waits for nobody publishes nothing, and a pane no session
-    /// holds changes nothing.
+    /// of the pane reads `is_seen: true` and stays, the pane's
+    /// `notified_attention_kinds` empties, and the pane's wait ends with one
+    /// published [`Event::PaneAttentionCleared`] naming `client_id`. A pane
+    /// that waits for nobody publishes nothing, and a pane no session holds
+    /// changes nothing.
     pub(crate) fn clear_attended_pane_attention(&mut self, client_id: ClientId, pane_id: PaneId) {
         let Some(session) = self.get_session_for_pane_mut(pane_id) else {
             return;
@@ -383,6 +480,7 @@ impl Server {
             for program_status_record in &mut pane_record.program_status_records {
                 program_status_record.is_seen = true;
             }
+            pane_record.notified_attention_kinds.clear();
         }
         if session.set_pane_attention(pane_id, None).is_none() {
             return;

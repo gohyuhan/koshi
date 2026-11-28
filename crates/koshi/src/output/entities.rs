@@ -282,7 +282,7 @@ struct PaneAttentionReport {
 struct PaneProgramStatusReport {
     /// The state, as [`format_program_status_state`] names it.
     program_status_state: &'static str,
-    /// The blocked kind, as [`format_blocked_kind`] names it, or `None`.
+    /// The blocked kind, as [`BlockedKind::format_protocol_word`] names it, or `None`.
     blocked_kind: Option<&'static str>,
     /// 0 to 100, or `None` when the work is indeterminate.
     progress_percent: Option<u8>,
@@ -473,7 +473,9 @@ fn build_pane_listing_row(pane_row: &PaneRow) -> PaneListingRow {
                 program_status_state: format_program_status_state(
                     program_status.program_status_state,
                 ),
-                blocked_kind: program_status.blocked_kind.map(format_blocked_kind),
+                blocked_kind: program_status
+                    .blocked_kind
+                    .map(BlockedKind::format_protocol_word),
                 progress_percent: program_status.progress_percent,
                 app_name: program_status.app_name.clone(),
             }
@@ -875,16 +877,6 @@ fn format_program_status_state(program_status_state: ProgramStatusState) -> &'st
         ProgramStatusState::Done => "done",
         ProgramStatusState::Blocked => "blocked",
         ProgramStatusState::Error => "error",
-    }
-}
-
-/// A blocked kind, as both formats name it: the OSC 7501 word `permission`,
-/// `question` or `auth`.
-fn format_blocked_kind(blocked_kind: BlockedKind) -> &'static str {
-    match blocked_kind {
-        BlockedKind::Permission => "permission",
-        BlockedKind::Question => "question",
-        BlockedKind::Auth => "auth",
     }
 }
 

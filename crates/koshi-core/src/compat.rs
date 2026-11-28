@@ -150,12 +150,12 @@ pub struct Surface {
 ///   client, with its `client_id`, `color_index`, `typed_pane_id` and
 ///   `recent_input_pane_ids`. A frame without it, or a peer without
 ///   `recent_input_pane_ids`, fails to decode. 5 has no such field.
-/// - A notification entry carries `subject_client_id`: the client a join or
-///   leave notice reports on, or `null` for every other entry. 5 has no such
-///   field.
+/// - A notification entry carries `subject`: `Client` with the client a
+///   join or leave notice reports on, `Pane` with the pane and the reason
+///   kind of an attention raise, or `null` for every other entry. 5 has no
+///   such field.
 /// - A `NotificationPosted` that carries the id of an entry posted before, at
-///   a higher `repeat_count`, can carry another `text` and
-///   `subject_client_id`: a `disconnected` or `reconnected` notice that
+///   a higher `repeat_count`, can carry another `text` and `subject`: a `disconnected` or `reconnected` notice that
 ///   takes the place of the same terminal's opposite notice. The client keeps
 ///   the newest fields under that id.
 /// - The `AttachAnswerReceived` request says that the client read the
@@ -330,8 +330,8 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// `Local` origin carries `is_same_user`, and a format 5 client whose origin
 /// is `Local` takes `is_same_user: false` until its connection comes back and
 /// sets the value it reports. Each queued notification entry holds
-/// `subject_client_id`, the client a join or leave notice reports on, and a
-/// format 5 entry takes `null`. Each client and each saved view holds
+/// `subject`, the client a join or leave notice reports on or the pane an
+/// attention raise reports on, and a format 5 entry takes `null`. Each client and each saved view holds
 /// `unannounced_arrival`, the arrival notice the session has not posted for
 /// that client, and a format 5 client or saved view takes `null`. The saved
 /// view store holds `presented_token_hash_by_client_id`, the presented token
@@ -341,7 +341,10 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// `attention`, what the pane last asked a person to look at and since when,
 /// and a format 5 pane record takes `null`. Each pane record holds
 /// `program_status_records`, the OSC 7501 records its programs reported, and
-/// a format 5 pane record takes `[]`. A pane's terminal state holds no
+/// a format 5 pane record takes `[]`. Each pane record holds
+/// `notified_attention_kinds`, the attention reason kinds the pane posted a
+/// notification entry for since a client last attended it, and a format 5
+/// pane record takes `[]`. A pane's terminal state holds no
 /// device query reply and no shell-integration fact: a pane of format 5 or
 /// older drops the ones it held. A pane's open synchronized-output group holds
 /// `held_chunk_read_times`, the wall time koshi read each chunk among its

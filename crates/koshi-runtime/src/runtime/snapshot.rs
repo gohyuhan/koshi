@@ -422,7 +422,7 @@ fn build_client_snapshot(client: &Client) -> ClientSnapshot {
 ///
 /// A shell in `/home/user/project` with home `/home/user` gives
 /// `~/project`, and `htop` on the alternate screen titled `htop` gives `htop`.
-fn resolve_pane_title(terminal_state: &TerminalState) -> Option<String> {
+pub(crate) fn resolve_pane_title(terminal_state: &TerminalState) -> Option<String> {
     match terminal_state.get_active_screen() {
         Screen::Alternate => terminal_state.get_title().map(str::to_owned),
         Screen::Primary => terminal_state

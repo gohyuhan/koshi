@@ -14,7 +14,8 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::program_status::{BlockedKind, ProgramStatusState};
+use crate::notification::NotificationSeverity;
+use crate::program_status::{BlockedKind, ProgramStatusRecord, ProgramStatusState};
 
 /// The fewest whole seconds a command runs before its finish raises
 /// attention: `5`. A command that finishes after 4 seconds raises nothing.
@@ -151,6 +152,176 @@ impl AttentionReason {
             | AttentionReason::CommandFinished { .. } => None,
         }
     }
+
+    /// The severity and the text of the notification entry this reason
+    /// posts: the `<what>` of the entry text `<place> › <pane> · <what>`.
+    /// `None` for [`AttentionReason::Bell`], which posts no entry.
+    /// `program_status_records` are the records of the pane that waits.
+    ///
+    /// | Reason | Severity | Text |
+    /// | --- | --- | --- |
+    /// | `Notify` | `Info` | `<title>: <body>`, `<title>` for an empty body, `<body>` with no title |
+    /// | `CommandFinished`, exit code `0` or none | `Info` | `finished after <elapsed>` |
+    /// | `CommandFinished`, another exit code | `Warning` | `failed — exit <code> after <elapsed>` |
+    /// | `ProgramBlocked` | `Warning` | `<label>: blocked (<kind>) — <message>` |
+    /// | `ProgramDone` | `Info` | `<label>: done — <message>` |
+    /// | `ProgramFailed` | `Error` | `<label>: failed — <message>` |
+    ///
+    /// ` after <elapsed>` drops out when `elapsed_secs` is `None`, and
+    /// `<elapsed>` reads `45s` under one minute, `2m 14s` under one hour, and
+    /// `1h 3m` from one hour. ` (<kind>)` drops out when the report named no
+    /// kind, and ` — <message>` when the reason holds no message. `<label>` is the record's app name, or the
+    /// app name of its nearest ancestor record that holds one, then ` / ` and
+    /// the record's title when the record holds one. A record with no app name
+    /// and no title gives no `<label>: `.
+    ///
+    /// Example: `CommandFinished { exit_code: Some(101), elapsed_secs: Some(134) }`
+    /// gives `(Warning, "failed — exit 101 after 2m 14s")`. `ProgramBlocked`
+    /// for the record `deploy/eu-west` titled `EU West`, under the record
+    /// `deploy` with the app name `deploy`, with the kind `Permission` and
+    /// the message `Apply?`, gives
+    /// `(Warning, "deploy / EU West: blocked (permission) — Apply?")`.
+    #[must_use]
+    pub fn format_notification_entry(
+        &self,
+        program_status_records: &[ProgramStatusRecord],
+    ) -> Option<(NotificationSeverity, String)> {
+        match self {
+            AttentionReason::Bell => None,
+            AttentionReason::Notify { title, body } => {
+                let notification_text = match title {
+                    Some(title) if body.is_empty() => title.clone(),
+                    Some(title) => format!("{title}: {body}"),
+                    None => body.clone(),
+                };
+                Some((NotificationSeverity::Info, notification_text))
+            }
+            AttentionReason::CommandFinished {
+                exit_code,
+                elapsed_secs,
+            } => {
+                let elapsed_text = match elapsed_secs {
+                    Some(elapsed_secs) => {
+                        format!(" after {}", format_elapsed_seconds(*elapsed_secs))
+                    }
+                    None => String::new(),
+                };
+                match exit_code {
+                    None | Some(0) => Some((
+                        NotificationSeverity::Info,
+                        format!("finished{elapsed_text}"),
+                    )),
+                    Some(exit_code) => Some((
+                        NotificationSeverity::Warning,
+                        format!("failed — exit {exit_code}{elapsed_text}"),
+                    )),
+                }
+            }
+            AttentionReason::ProgramBlocked {
+                record_id,
+                blocked_kind,
+                message,
+            } => {
+                let state_text = match blocked_kind {
+                    Some(blocked_kind) => {
+                        format!("blocked ({})", blocked_kind.format_protocol_word())
+                    }
+                    None => "blocked".to_owned(),
+                };
+                Some((
+                    NotificationSeverity::Warning,
+                    format_program_status_text(
+                        program_status_records,
+                        record_id,
+                        &state_text,
+                        message.as_deref(),
+                    ),
+                ))
+            }
+            AttentionReason::ProgramDone { record_id, message } => Some((
+                NotificationSeverity::Info,
+                format_program_status_text(
+                    program_status_records,
+                    record_id,
+                    "done",
+                    message.as_deref(),
+                ),
+            )),
+            AttentionReason::ProgramFailed { record_id, message } => Some((
+                NotificationSeverity::Error,
+                format_program_status_text(
+                    program_status_records,
+                    record_id,
+                    "failed",
+                    message.as_deref(),
+                ),
+            )),
+        }
+    }
+}
+
+/// `elapsed_secs` as a notification reads it: `45s` under one minute,
+/// `2m 14s` under one hour, and `1h 3m` from one hour, in whole units.
+/// `60` gives `1m 0s` and `3600` gives `1h 0m`.
+fn format_elapsed_seconds(elapsed_secs: u32) -> String {
+    let minute_count = elapsed_secs / 60;
+    let hour_count = minute_count / 60;
+    if hour_count > 0 {
+        return format!("{hour_count}h {}m", minute_count % 60);
+    }
+    if minute_count > 0 {
+        return format!("{minute_count}m {}s", elapsed_secs % 60);
+    }
+    format!("{elapsed_secs}s")
+}
+
+/// `<label>: <state_text> — <message>` for the program status record
+/// `record_id` of `program_status_records`, as
+/// [`AttentionReason::format_notification_entry`] states. The app name is
+/// the record's own, else that of the nearest ancestor record that holds one:
+/// `deploy/eu-west`, then `deploy`, then the root record `""`.
+fn format_program_status_text(
+    program_status_records: &[ProgramStatusRecord],
+    record_id: &str,
+    state_text: &str,
+    message: Option<&str>,
+) -> String {
+    let find_record = |searched_record_id: &str| {
+        program_status_records
+            .iter()
+            .find(|program_status_record| program_status_record.record_id == searched_record_id)
+    };
+    let record_title = find_record(record_id)
+        .and_then(|program_status_record| program_status_record.title.as_deref());
+    let mut ancestor_record_id = record_id;
+    let app_name = loop {
+        let ancestor_app_name = find_record(ancestor_record_id)
+            .and_then(|program_status_record| program_status_record.app_name.as_deref());
+        if ancestor_app_name.is_some() || ancestor_record_id.is_empty() {
+            break ancestor_app_name;
+        }
+        ancestor_record_id = match ancestor_record_id.rsplit_once('/') {
+            Some((parent_record_id, _)) => parent_record_id,
+            None => "",
+        };
+    };
+    let label = match (app_name, record_title) {
+        (Some(app_name), Some(record_title)) => Some(format!("{app_name} / {record_title}")),
+        (Some(app_name), None) => Some(app_name.to_owned()),
+        (None, Some(record_title)) => Some(record_title.to_owned()),
+        (None, None) => None,
+    };
+    let mut program_status_text = String::new();
+    if let Some(label) = label {
+        program_status_text.push_str(&label);
+        program_status_text.push_str(": ");
+    }
+    program_status_text.push_str(state_text);
+    if let Some(message) = message {
+        program_status_text.push_str(" — ");
+        program_status_text.push_str(message);
+    }
+    program_status_text
 }
 
 #[cfg(test)]

@@ -41,6 +41,18 @@ pub enum BlockedKind {
     Auth,
 }
 
+impl BlockedKind {
+    /// The OSC 7501 word for this kind: `permission`, `question` or `auth`.
+    #[must_use]
+    pub fn format_protocol_word(self) -> &'static str {
+        match self {
+            BlockedKind::Permission => "permission",
+            BlockedKind::Question => "question",
+            BlockedKind::Auth => "auth",
+        }
+    }
+}
+
 /// One program status record of a pane: what the newest report for one
 /// record id said. Example: `state=working:id=deploy:progress=40:app=cargo`
 /// gives `{ record_id: "deploy", program_status_state: Working,

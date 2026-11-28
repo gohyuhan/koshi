@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use koshi_core::client::{is_same_shown_label, resolve_client_label};
 use koshi_core::geometry::PixelCellSize;
+use koshi_core::notification::NotificationSubject;
 use koshi_ipc::placement::PanePlacementPreviewTarget;
 use koshi_ipc::protocol::{ConnectionToken, PaintedInputView};
 
@@ -835,7 +836,7 @@ impl Server {
             session_id,
             NotificationSeverity::Info,
             &arrival_text,
-            Some(client_id),
+            Some(NotificationSubject::Client(client_id)),
             replaced_text.as_deref(),
         );
     }
@@ -1030,7 +1031,7 @@ impl Server {
                 session_id,
                 NotificationSeverity::Info,
                 &departure_text,
-                Some(client_id),
+                Some(NotificationSubject::Client(client_id)),
                 replaced_text.as_deref(),
             );
         }

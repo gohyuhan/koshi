@@ -5,6 +5,8 @@
 
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_core::attention::AttentionReasonKind;
+use koshi_core::ids::PaneId;
 use koshi_core::notification::{NotificationSource, MAX_QUEUED_NOTIFICATION_COUNT};
 
 use super::*;
@@ -26,22 +28,21 @@ fn create_session_queue() -> (SessionId, NotificationQueue) {
 /// Post `text` as an `Error` that reports on no client to `session_queue`
 /// and return what the session sends for it: the revision and the entry.
 fn post_to_session(session_queue: &mut NotificationQueue, text: &str) -> (u64, NotificationEntry) {
-    post_to_session_about_client(session_queue, text, None)
+    post_to_session_about_subject(session_queue, text, None)
 }
 
-/// Post `text` as an `Error` that reports on `subject_client_id` to
-/// `session_queue` and return what the session sends for it: the revision and
-/// the entry.
-fn post_to_session_about_client(
+/// Post `text` as an `Error` that reports on `subject` to `session_queue`
+/// and return what the session sends for it: the revision and the entry.
+fn post_to_session_about_subject(
     session_queue: &mut NotificationQueue,
     text: &str,
-    subject_client_id: Option<ClientId>,
+    subject: Option<NotificationSubject>,
 ) -> (u64, NotificationEntry) {
     let posted_entry = session_queue
         .post_core_entry(
             NotificationSeverity::Error,
             text,
-            subject_client_id,
+            subject,
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(1),
         )
@@ -649,7 +650,7 @@ fn a_post_that_takes_the_place_of_a_held_entry_replaces_its_text_in_one_card() {
         .post_core_entry(
             NotificationSeverity::Info,
             "bob (2) disconnected",
-            Some(ClientId::new()),
+            Some(NotificationSubject::Client(ClientId::new())),
             NonZeroU32::MIN,
             compute_time_after_unix_epoch(2),
         )
@@ -662,7 +663,7 @@ fn a_post_that_takes_the_place_of_a_held_entry_replaces_its_text_in_one_card() {
         .post_core_entry_replacing(
             NotificationSeverity::Info,
             "bob (2) reconnected",
-            Some(returning_client_id),
+            Some(NotificationSubject::Client(returning_client_id)),
             "bob (2) disconnected",
             compute_time_after_unix_epoch(3),
         )
@@ -1454,10 +1455,18 @@ fn the_first_queue_of_a_session_previews_nothing_and_a_later_queue_previews_its_
 fn a_session_entry_about_this_viewer_or_its_previous_client_shows_no_toast_and_counts_as_unread() {
     let previous_client_id = ClientId::new();
     let client_id = ClientId::new();
-    for (subject_client_id, should_preview) in [
-        (Some(previous_client_id), false),
-        (Some(client_id), false),
-        (Some(ClientId::new()), true),
+    let pane_id = PaneId::new();
+    for (subject, should_preview) in [
+        (Some(NotificationSubject::Client(previous_client_id)), false),
+        (Some(NotificationSubject::Client(client_id)), false),
+        (Some(NotificationSubject::Client(ClientId::new())), true),
+        (
+            Some(NotificationSubject::Pane {
+                pane_id,
+                attention_reason_kind: Some(AttentionReasonKind::ProgramBlocked),
+            }),
+            true,
+        ),
         (None, true),
     ] {
         for is_taken_as_post in [false, true] {
@@ -1468,11 +1477,8 @@ fn a_session_entry_about_this_viewer_or_its_previous_client_shows_no_toast_and_c
                 .expect("take the attach queue");
             notification_history.set_client_id(client_id);
 
-            let (revision, posted_entry) = post_to_session_about_client(
-                &mut session_queue,
-                "bob (2) reconnected",
-                subject_client_id,
-            );
+            let (revision, posted_entry) =
+                post_to_session_about_subject(&mut session_queue, "bob (2) reconnected", subject);
             if is_taken_as_post {
                 notification_history
                     .take_session_post(revision, posted_entry, true)
@@ -1487,7 +1493,7 @@ fn a_session_entry_about_this_viewer_or_its_previous_client_shows_no_toast_and_c
             assert_eq!(
                 find_shown_toast_content(&notification_history),
                 should_preview.then_some((NotificationToastContent::Entry(&newest_entry), 1000)),
-                "subject {subject_client_id:?}, taken as a post: {is_taken_as_post}"
+                "subject {subject:?}, taken as a post: {is_taken_as_post}"
             );
             assert_eq!(notification_history.get_unread_entry_count(), 1);
         }

@@ -149,7 +149,7 @@ pub(crate) fn build_test_notification_entry(
         text: text.to_string(),
         created_at: SystemTime::UNIX_EPOCH,
         repeat_count,
-        subject_client_id: None,
+        subject: None,
     }
 }
 

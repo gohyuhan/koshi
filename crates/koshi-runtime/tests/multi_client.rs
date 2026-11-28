@@ -57,7 +57,9 @@ use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, Ta
 use koshi_core::key::{BindingModifierFlags, Key, KeyChord, NamedKey};
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseKind};
-use koshi_core::notification::{NotificationEntry, NotificationSeverity, NotificationSource};
+use koshi_core::notification::{
+    NotificationEntry, NotificationSeverity, NotificationSource, NotificationSubject,
+};
 use koshi_core::process::{PtySize, SpawnSpec};
 use koshi_core::selection::{GridPosition, Selection, SelectionKind};
 use koshi_ipc::event::SessionEvent;
@@ -1630,14 +1632,14 @@ fn describe_presence_notice(
     NotificationSource,
     NotificationSeverity,
     &str,
-    Option<ClientId>,
+    Option<NotificationSubject>,
     u32,
 ) {
     (
         notice_entry.source,
         notice_entry.severity,
         notice_entry.text.as_str(),
-        notice_entry.subject_client_id,
+        notice_entry.subject,
         notice_entry.repeat_count,
     )
 }
@@ -1669,7 +1671,7 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
                     NotificationSource::Core,
                     NotificationSeverity::Info,
                     "bob (2) joined remotely",
-                    Some(bob_attachment.client_id),
+                    Some(NotificationSubject::Client(bob_attachment.client_id)),
                     1,
                 ),
             );
@@ -1684,7 +1686,7 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
                     NotificationSource::Core,
                     NotificationSeverity::Info,
                     "bob (2) disconnected",
-                    Some(bob_attachment.client_id),
+                    Some(NotificationSubject::Client(bob_attachment.client_id)),
                     1,
                 ),
             );
@@ -1708,7 +1710,9 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
                     NotificationSource::Core,
                     NotificationSeverity::Info,
                     "bob (2) reconnected",
-                    Some(redialed_bob_attachment.client_id),
+                    Some(NotificationSubject::Client(
+                        redialed_bob_attachment.client_id
+                    )),
                     2,
                 ),
             );
@@ -1725,7 +1729,9 @@ fn a_remote_person_who_joins_drops_dials_again_and_leaves_is_announced_once_for_
                     NotificationSource::Core,
                     NotificationSeverity::Info,
                     "bob (2) left",
-                    Some(redialed_bob_attachment.client_id),
+                    Some(NotificationSubject::Client(
+                        redialed_bob_attachment.client_id
+                    )),
                     1,
                 ),
             );
@@ -1776,7 +1782,7 @@ fn a_second_terminal_of_the_host_account_beside_a_remote_person_posts_no_notice(
                     NotificationSource::Core,
                     NotificationSeverity::Info,
                     "bob (2) left",
-                    Some(bob_client_id),
+                    Some(NotificationSubject::Client(bob_client_id)),
                     1,
                 ),
             );

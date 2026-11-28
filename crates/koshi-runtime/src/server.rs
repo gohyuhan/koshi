@@ -30,7 +30,7 @@ use koshi_core::constant::compute_frame_interval;
 use koshi_core::event::{Event, QuitCause, RejectReason};
 use koshi_core::geometry::Size;
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, SubscriberId, TabId};
-use koshi_core::notification::NotificationSeverity;
+use koshi_core::notification::{NotificationSeverity, NotificationSubject};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize};
 use koshi_ipc::protocol::PaintedInputView;
 use koshi_layout::solver::{PaneSizing, MIN_PANE_SIZE};
@@ -1241,8 +1241,8 @@ impl Server {
     }
 
     /// Post `text` from koshi itself at `severity` to session `session_id`'s
-    /// notification queue, at the current wall-clock time, with
-    /// `subject_client_id` as the client it reports on
+    /// notification queue, at the current wall-clock time, with `subject` as
+    /// what it reports on
     /// ([`NotificationQueue::post_core_entry`](koshi_core::notification::NotificationQueue::post_core_entry)),
     /// and deliver the post to every client subscribed at that moment as one
     /// `NotificationPosted`. With `replaced_text`, the post takes the place
@@ -1260,7 +1260,7 @@ impl Server {
         session_id: SessionId,
         severity: NotificationSeverity,
         text: &str,
-        subject_client_id: Option<ClientId>,
+        subject: Option<NotificationSubject>,
         replaced_text: Option<&str>,
     ) {
         let Some(session) = self.session_by_id.get_mut(&session_id) else {
@@ -1271,14 +1271,14 @@ impl Server {
             Some(replaced_text) => notification_queue.post_core_entry_replacing(
                 severity,
                 text,
-                subject_client_id,
+                subject,
                 replaced_text,
                 SystemTime::now(),
             ),
             None => notification_queue.post_core_entry(
                 severity,
                 text,
-                subject_client_id,
+                subject,
                 NonZeroU32::MIN,
                 SystemTime::now(),
             ),

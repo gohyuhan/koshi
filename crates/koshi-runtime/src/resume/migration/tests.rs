@@ -1153,19 +1153,20 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                             "spawn_spec": null,
                             "working_directory": null,
                             "attention": null,
-                            "program_status_records": []
+                            "program_status_records": [],
+                            "notified_attention_kinds": []
                         }
                     }},
                     "notification_queue": {"queued_entries": [
                         {
                             "severity": "Error",
                             "text": "pane …a1b2 killed by signal 9",
-                            "subject_client_id": null
+                            "subject": null
                         },
                         {
                             "severity": "Warning",
                             "text": "koshi.kdl: unknown key `tab-bar`",
-                            "subject_client_id": null
+                            "subject": null
                         }
                     ]}
                 }

@@ -1349,15 +1349,16 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 /// 6. Each client record's `origin` of `"Local"` becomes
 ///    `{"Local": {"is_same_user": false}}`, and `"Remote"` stays `"Remote"`.
 /// 7. Each entry of each session's `notification_queue.queued_entries` gains
-///    `subject_client_id: null`.
+///    `subject: null`.
 /// 8. Each client record and each saved view gains `unannounced_arrival:
 ///    null`.
 /// 9. The saved-view store gains an empty `presented_token_hash_by_client_id`,
 ///    and each saved-view record's `connection_token_hash` `<h>` becomes
 ///    `connection_token_hashes: [<h>]`.
 /// 10. Each pane record of each session's `panes.pane_record_by_id` gains
-///     `attention: null`, no pane waits for a person, and
-///     `program_status_records: []`, no pane holds a program status record.
+///     `attention: null`, no pane waits for a person,
+///     `program_status_records: []`, no pane holds a program status record,
+///     and `notified_attention_kinds: []`, no pane posted an attention entry.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
@@ -1421,6 +1422,10 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
                     "program_status_records".to_string(),
                     Value::Array(Vec::new()),
                 );
+                pane_record_fields.insert(
+                    "notified_attention_kinds".to_string(),
+                    Value::Array(Vec::new()),
+                );
                 Ok(())
             },
         )?;
@@ -1437,7 +1442,7 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             &format!("{notification_queue_path}.queued_entries"),
             |queued_entry, entry_path| {
                 get_json_object(queued_entry, entry_path)?
-                    .insert("subject_client_id".to_string(), Value::Null);
+                    .insert("subject".to_string(), Value::Null);
                 Ok(())
             },
         )

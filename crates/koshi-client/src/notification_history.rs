@@ -36,7 +36,7 @@ use koshi_core::ids::{ClientId, SessionId};
 use koshi_core::notification::{
     NotificationEntry, NotificationEpoch, NotificationId, NotificationQueue,
     NotificationQueueError, NotificationQueueOwner, NotificationSeverity, NotificationSource,
-    MAX_NOTIFICATION_TEXT_BYTE_COUNT, MAX_QUEUED_NOTIFICATION_COUNT,
+    NotificationSubject, MAX_NOTIFICATION_TEXT_BYTE_COUNT, MAX_QUEUED_NOTIFICATION_COUNT,
 };
 use koshi_core::text::sanitize_text_to_byte_count;
 use koshi_renderer::notification::{
@@ -284,10 +284,11 @@ impl NotificationHistory {
     }
 
     /// Whether `notification_entry` reports on this viewer: its subject is
-    /// the client that owns the viewer's own queue, or the client that owned
-    /// the queue before it.
+    /// `Client` with the client that owns the viewer's own queue, or the
+    /// client that owned the queue before it.
     fn is_about_this_viewer(&self, notification_entry: &NotificationEntry) -> bool {
-        let Some(subject_client_id) = notification_entry.subject_client_id else {
+        let Some(NotificationSubject::Client(subject_client_id)) = notification_entry.subject
+        else {
             return false;
         };
         let subject_queue_owner = NotificationQueueOwner::Client(subject_client_id);

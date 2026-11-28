@@ -5,8 +5,8 @@
 //! whose entries only that client shows, or a session, whose entries every
 //! client attached to it shows. The queue assigns each entry its
 //! [`NotificationId`], its [`NotificationSource`] and its `created_at`; the
-//! caller supplies its [`NotificationSeverity`], its text and the client it
-//! reports on, if any. Example: the session posts
+//! caller supplies its [`NotificationSeverity`], its text and its
+//! [`NotificationSubject`], if any. Example: the session posts
 //! `pane …a1b2 killed by signal 9` as an `Error`, and every attached client
 //! shows `[Koshi] pane …a1b2 killed by signal 9`.
 
@@ -17,7 +17,8 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::ids::{ClientId, SessionId};
+use crate::attention::AttentionReasonKind;
+use crate::ids::{ClientId, PaneId, SessionId};
 use crate::text::sanitize_text_to_byte_count;
 
 /// The longest text one entry holds, in bytes: 4096. A longer text is cut at
@@ -54,6 +55,21 @@ pub enum NotificationQueueOwner {
     /// A session's queue: every client attached to the session shows its
     /// entries.
     Session(SessionId),
+}
+
+/// What one entry reports on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NotificationSubject {
+    /// A join or leave notice about this client.
+    Client(ClientId),
+    /// An entry about this pane.
+    Pane {
+        /// The pane the entry is about.
+        pane_id: PaneId,
+        /// The reason kind of the attention raise that posted the entry.
+        /// `None` for an entry about the pane that no attention raise posted.
+        attention_reason_kind: Option<AttentionReasonKind>,
+    },
 }
 
 /// One run of a queue owner: a new value each time an owner starts a queue
@@ -110,9 +126,10 @@ pub struct NotificationEntry {
     /// How many posts merged into this entry, from 1. Saturates at
     /// [`u32::MAX`].
     pub repeat_count: u32,
-    /// The client the entry reports on: `Some` for a join or leave notice,
-    /// which names that client, and `None` for every other entry.
-    pub subject_client_id: Option<ClientId>,
+    /// What the entry reports on: `Client` for a join or leave notice,
+    /// `Pane` for an attention raise of a pane, and `None` for every other
+    /// entry.
+    pub subject: Option<NotificationSubject>,
 }
 
 /// A bounded queue of entries, oldest first, kept by one owner for one epoch.
@@ -206,8 +223,8 @@ impl NotificationQueue {
 
     /// Post `text` from koshi itself at `severity` `post_count` times in a
     /// row, the last post arriving at `created_at`, and return the entry the
-    /// posts made or changed. `subject_client_id` is the client the entry
-    /// reports on, or `None`.
+    /// posts made or changed. `subject` is what the entry reports on, or
+    /// `None`.
     ///
     /// `text` loses every character [`sanitize_text_to_byte_count`] removes
     /// and is cut to [`MAX_NOTIFICATION_TEXT_BYTE_COUNT`] bytes. When the
@@ -224,7 +241,7 @@ impl NotificationQueue {
         &mut self,
         severity: NotificationSeverity,
         text: &str,
-        subject_client_id: Option<ClientId>,
+        subject: Option<NotificationSubject>,
         post_count: NonZeroU32,
         created_at: SystemTime,
     ) -> &NotificationEntry {
@@ -234,7 +251,7 @@ impl NotificationQueue {
             newest_entry.source == NotificationSource::Core
                 && newest_entry.severity == severity
                 && newest_entry.text == sanitized_text
-                && newest_entry.subject_client_id == subject_client_id
+                && newest_entry.subject == subject
         });
         if is_repeat {
             let newest_entry = self
@@ -263,7 +280,7 @@ impl NotificationQueue {
             text: sanitized_text,
             created_at,
             repeat_count: post_count.get(),
-            subject_client_id,
+            subject,
         });
         self.queued_entries.back().expect("the entry pushed above")
     }
@@ -271,14 +288,14 @@ impl NotificationQueue {
     /// Post `text` from koshi at `severity` once, the post arriving at
     /// `created_at`, in the place of the newest entry when that entry is from
     /// koshi at `severity` and holds the text `replaced_text`, and return
-    /// the entry the post made or changed. `subject_client_id` is the client
-    /// the entry reports on, or `None`.
+    /// the entry the post made or changed. `subject` is what the entry
+    /// reports on, or `None`.
     ///
     /// `text` and `replaced_text` lose every character
     /// [`sanitize_text_to_byte_count`] removes and are cut to
     /// [`MAX_NOTIFICATION_TEXT_BYTE_COUNT`] bytes. A post in the place of the
-    /// newest entry gives that entry `text` and `subject_client_id`, raises
-    /// its `repeat_count` by 1, and sets its `created_at` to `created_at`. No
+    /// newest entry gives that entry `text` and `subject`, raises its
+    /// `repeat_count` by 1, and sets its `created_at` to `created_at`. No
     /// entry is added, and the revision rises by 1. Every other post is
     /// [`post_core_entry`](Self::post_core_entry) of `text` once.
     ///
@@ -291,7 +308,7 @@ impl NotificationQueue {
         &mut self,
         severity: NotificationSeverity,
         text: &str,
-        subject_client_id: Option<ClientId>,
+        subject: Option<NotificationSubject>,
         replaced_text: &str,
         created_at: SystemTime,
     ) -> &NotificationEntry {
@@ -303,13 +320,7 @@ impl NotificationQueue {
                 && newest_entry.text == sanitized_replaced_text
         });
         if !is_replacing {
-            return self.post_core_entry(
-                severity,
-                text,
-                subject_client_id,
-                NonZeroU32::MIN,
-                created_at,
-            );
+            return self.post_core_entry(severity, text, subject, NonZeroU32::MIN, created_at);
         }
         self.revision += 1;
         let newest_entry = self
@@ -317,7 +328,7 @@ impl NotificationQueue {
             .back_mut()
             .expect("the entry read above");
         newest_entry.text = sanitize_text_to_byte_count(text, MAX_NOTIFICATION_TEXT_BYTE_COUNT);
-        newest_entry.subject_client_id = subject_client_id;
+        newest_entry.subject = subject;
         newest_entry.repeat_count = newest_entry.repeat_count.saturating_add(1);
         newest_entry.created_at = created_at;
         newest_entry
