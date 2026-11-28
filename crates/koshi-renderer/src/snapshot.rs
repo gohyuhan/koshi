@@ -570,6 +570,10 @@ pub struct NotificationToast {
     /// How much of the toast's width lies past its side edge, in thousandths:
     /// `0` in place, `1000` fully past the edge, and `500` half past it.
     pub hidden_per_mille: u16,
+    /// Whether the toast's top border holds the focus control ` ↗ ` left of
+    /// its close control: the toast shows an entry about a pane the session
+    /// holds.
+    pub has_focus_pane_control: bool,
 }
 
 /// One viewer's open floating pane tray: the tile its keys act on, and the

@@ -289,6 +289,9 @@ const MAX_QUIT_WRITE_WAIT_DURATION: Duration = Duration::from_secs(1);
 /// The number the first connection of one attachment carries. Coming back after
 /// the session replaces its own process image counts up from here.
 const INITIAL_CONNECTION_INDEX: u64 = 0;
+
+/// The attention bell: one BEL (`0x07`).
+const ATTENTION_BELL_BYTES: &[u8] = b"\x07";
 /// The wait before the first retry of a native image frame that failed to
 /// paint: 1 ms. Each further failure doubles it.
 const FIRST_IMAGE_OUTPUT_RETRY_DELAY_DURATION: Duration = Duration::from_millis(1);
@@ -1273,7 +1276,9 @@ impl<B: Backend> Screen<B> {
     ///
     /// Each refresh first advances the toast's clock and the notification
     /// center's slide ([`Client::advance_notification_clocks`]), with
-    /// [`Self::is_pane_content_drawn`] saying which panes this viewer draws. The toast's
+    /// [`Self::is_pane_content_drawn`] saying which panes this viewer draws.
+    /// When that advance makes an attention bell due, the refresh writes
+    /// [`ATTENTION_BELL_BYTES`] to the terminal and flushes, before it draws. The toast's
     /// clock stops while no frame shows, while the viewport differs from the
     /// one the shown frame was committed for, and while the shown frame has
     /// no room for the toast ([`has_notification_toast_room`]): a viewport
@@ -1302,9 +1307,19 @@ impl<B: Backend> Screen<B> {
                     &self.committed_regions,
                 ))
             });
-        client.advance_notification_clocks(current_time, is_toast_paused, &|pane_id| {
-            self.is_pane_content_drawn(pane_id)
-        });
+        let is_attention_bell_due =
+            client.advance_notification_clocks(current_time, is_toast_paused, &|pane_id| {
+                self.is_pane_content_drawn(pane_id)
+            });
+        if is_attention_bell_due {
+            if let Err(io_error) = self
+                .frame_output
+                .write_all(ATTENTION_BELL_BYTES)
+                .and_then(|()| self.frame_output.flush())
+            {
+                tracing::warn!(%io_error, "could not ring the attention bell");
+            }
+        }
         if self.pending_snapshot.is_some() {
             return self.commit_pending_snapshot(client, current_time);
         }
@@ -3462,6 +3477,7 @@ fn attach_once(
     );
     client.set_session_id(session_id);
     client.set_session_local(matches!(home, Home::Local { .. }));
+    client.set_output_terminal(terminal_owner.is_output_terminal());
     apply_session_notification_queue(
         &mut client,
         session_id,
@@ -3918,13 +3934,15 @@ fn run_attachment<B: Backend, W: Write>(
                                 refusal,
                             });
                         }
-                        // A pane that stopped waiting or closed takes its
-                        // toasts down; its entries stay in the center.
-                        Ok(
-                            SessionEvent::PaneAttentionCleared { pane_id, .. }
-                            | SessionEvent::PaneRemoved { pane_id },
-                        ) => {
+                        // A pane that stopped waiting takes its toasts
+                        // down; its entries stay in the center.
+                        Ok(SessionEvent::PaneAttentionCleared { pane_id, .. }) => {
                             client.withdraw_pane_toasts(pane_id);
+                        }
+                        // A pane that closed takes its toasts down, and its
+                        // entries' cards show `pane closed`.
+                        Ok(SessionEvent::PaneRemoved { pane_id }) => {
+                            client.apply_notification_pane_removal(pane_id);
                         }
                         // A `PaneAttentionRaised` frame changes nothing in this
                         // client. Every other frame is a `Pong`, which carries

@@ -469,7 +469,8 @@ fn every_cell_classifies_as_what_was_painted() {
                 | HitRegion::NotificationCenterClearAll
                 | HitRegion::NotificationCenterBody
                 | HitRegion::NotificationCenter
-                | HitRegion::NotificationToastClose => {
+                | HitRegion::NotificationToastClose
+                | HitRegion::NotificationToastFocusPane => {
                     panic!(
                         "notification region at ({column_index}, {row_index}) in a frame with no notification"
                     );
@@ -842,6 +843,7 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
             unread_entry_count: 3,
         },
         notification_toast: Some(NotificationToast {
+            has_focus_pane_control: true,
             toast_position: ToastPosition::BottomLeft,
             text_row_count: 1,
             hidden_per_mille: 0,
@@ -943,10 +945,11 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         }
     }
 
-    // The toast is 24x4 at (0, 9): its close control at columns 19 to 21 of
-    // row 9. Every other toast cell hits what lies under the toast.
+    // The toast is 24x4 at (0, 9): its focus control at columns 16 to 18 of
+    // row 9, and its close control at columns 19 to 21. Every other toast
+    // cell hits what lies under the toast.
     let expected_toast_rows = vec![
-        format!("┌{} ✕ ─┐", "─".repeat(18)),
+        format!("┌{} ↗  ✕ ─┐", "─".repeat(15)),
         format!("│ [Koshi] Error{}│", " ".repeat(8)),
         format!("│ pane exited{}│", " ".repeat(10)),
         format!("└{}┘", "─".repeat(22)),
@@ -955,6 +958,7 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
         .map(|row_index| get_row_text(&screen_buffer, row_index, 0, 24))
         .collect();
     assert_eq!(painted_toast_rows, expected_toast_rows);
+    let toast_focus_pane_rect = build_cell_rect(16, 9, 3, 1);
     let toast_close_rect = build_cell_rect(19, 9, 3, 1);
     for row_index in 9..13 {
         for column_index in 0..24 {
@@ -969,10 +973,21 @@ fn every_notification_center_toast_and_button_cell_classifies_as_what_was_painte
                     HitRegion::NotificationToastClose,
                     "({column_index}, {row_index})"
                 );
+            } else if toast_focus_pane_rect.is_point_inside(screen_point) {
+                assert_eq!(
+                    hit_region,
+                    HitRegion::NotificationToastFocusPane,
+                    "({column_index}, {row_index})"
+                );
             } else {
                 assert_ne!(
                     hit_region,
                     HitRegion::NotificationToastClose,
+                    "({column_index}, {row_index})"
+                );
+                assert_ne!(
+                    hit_region,
+                    HitRegion::NotificationToastFocusPane,
                     "({column_index}, {row_index})"
                 );
             }

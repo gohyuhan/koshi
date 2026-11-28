@@ -75,6 +75,7 @@ fn default_server_and_client_configs_match_expected_settings() {
         client_config.notifications,
         NotificationConfig {
             should_show_toasts: true,
+            should_ring_attention_bell: true,
             toast_position: ToastPosition::TopRight,
             toast_duration_ms: 3_000,
         }

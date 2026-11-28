@@ -659,6 +659,13 @@ fn parse_notification_config(
                 field_node,
                 parse_problems,
             ),
+            "attention-bell" => set_parsed_field(
+                &mut partial_notification_config.should_ring_attention_bell,
+                parse_boolean_kdl_value(field_node),
+                "notifications",
+                field_node,
+                parse_problems,
+            ),
             "toast-position" => set_parsed_field(
                 &mut partial_notification_config.toast_position,
                 parse_toast_position(field_node),
@@ -684,6 +691,7 @@ fn parse_notification_config(
                         &format!("notifications.{unknown_field_name}"),
                         &[
                             "notifications.toast",
+                            "notifications.attention-bell",
                             "notifications.toast-position",
                             "notifications.toast-duration-ms",
                         ],

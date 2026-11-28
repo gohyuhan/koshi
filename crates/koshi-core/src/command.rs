@@ -389,8 +389,9 @@ pub struct ResizePaneArgs {
 /// The pane a [`Command::FocusPane`] moves focus to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FocusTarget {
-    /// A pane named by id: a tiled pane in the client's active tab, or a
-    /// floating pane of the client's session.
+    /// A pane named by id: a tiled pane in any tab of the client's session,
+    /// or a floating pane of that session. A tiled pane in another tab moves
+    /// the client onto that tab, then focuses the pane.
     Pane(PaneId),
     /// The nearest pane in a direction from the client's focused pane,
     /// resolved geometrically against the solved layout. While a floating

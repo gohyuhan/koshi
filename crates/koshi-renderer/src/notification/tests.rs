@@ -9,7 +9,9 @@ use super::*;
 use std::time::SystemTime;
 
 use koshi_core::ids::SessionId;
-use koshi_core::notification::{NotificationEpoch, NotificationId, NotificationQueueOwner};
+use koshi_core::notification::{
+    NotificationEpoch, NotificationId, NotificationQueueOwner, NotificationSubject,
+};
 
 use crate::floating_pane_tray::tests::build_tray_test_render_snapshot;
 use crate::snapshot::{
@@ -56,6 +58,7 @@ fn build_toast_viewer_chrome(
 ) -> ViewerChrome {
     ViewerChrome {
         notification_toast: Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position,
             text_row_count,
             hidden_per_mille,
@@ -150,6 +153,26 @@ pub(crate) fn build_test_notification_entry(
         created_at: SystemTime::UNIX_EPOCH,
         repeat_count,
         subject: None,
+    }
+}
+
+/// A session `Info` entry at `sequence` about `pane_id`, with the text
+/// `codex needs approval`, that no attention raise posted.
+pub(crate) fn build_test_pane_notification_entry(
+    sequence: u64,
+    pane_id: PaneId,
+) -> NotificationEntry {
+    NotificationEntry {
+        subject: Some(NotificationSubject::Pane {
+            pane_id,
+            attention_reason_kind: None,
+        }),
+        ..build_test_notification_entry(
+            sequence,
+            NotificationSeverity::Info,
+            "codex needs approval",
+            1,
+        )
     }
 }
 
@@ -344,6 +367,7 @@ fn a_toast_in_place_sits_in_each_corner_of_the_pane_area() {
                 build_toast_viewer_chrome(toast_position, 2, 0)
             ),
             Some(NotificationToastLayout {
+                focus_pane_rect: None,
                 toast_rect,
                 drawn_rect: toast_rect,
                 first_drawn_box_column: 0,
@@ -364,6 +388,7 @@ fn a_half_hidden_right_toast_draws_its_left_columns_and_no_close_control() {
             build_toast_viewer_chrome(ToastPosition::TopRight, 0, 500)
         ),
         Some(NotificationToastLayout {
+            focus_pane_rect: None,
             toast_rect: build_test_rect(56, 1, 24, 3),
             drawn_rect: build_test_rect(68, 1, 12, 3),
             first_drawn_box_column: 0,
@@ -382,6 +407,7 @@ fn a_half_hidden_left_toast_draws_its_right_columns_and_its_close_control() {
             build_toast_viewer_chrome(ToastPosition::BottomLeft, 0, 500)
         ),
         Some(NotificationToastLayout {
+            focus_pane_rect: None,
             toast_rect: build_test_rect(0, 20, 24, 3),
             drawn_rect: build_test_rect(0, 20, 12, 3),
             first_drawn_box_column: 12,
@@ -401,6 +427,7 @@ fn a_toast_hidden_by_one_column_keeps_its_close_control_at_the_moved_columns() {
             build_toast_viewer_chrome(ToastPosition::TopRight, 0, 39)
         ),
         Some(NotificationToastLayout {
+            focus_pane_rect: None,
             toast_rect: build_test_rect(56, 1, 24, 3),
             drawn_rect: build_test_rect(57, 1, 23, 3),
             first_drawn_box_column: 0,
@@ -812,14 +839,14 @@ fn center_rows_list_one_card_per_entry_newest_first_then_the_dropped_count() {
         )
         .collect::<Vec<_>>(),
         [
-            NotificationCenterRow::CardTopBorder(&notification_entries[1]),
+            NotificationCenterRow::CardTopBorder(&center_entries[1]),
             NotificationCenterRow::CardHeader(&notification_entries[1]),
             NotificationCenterRow::CardText {
                 center_entry: &center_entries[1],
                 text_row_index: 0,
             },
             NotificationCenterRow::CardBottomBorder(&notification_entries[1]),
-            NotificationCenterRow::CardTopBorder(&notification_entries[0]),
+            NotificationCenterRow::CardTopBorder(&center_entries[0]),
             NotificationCenterRow::CardHeader(&notification_entries[0]),
             NotificationCenterRow::CardText {
                 center_entry: &center_entries[0],
@@ -837,7 +864,7 @@ fn center_rows_list_one_card_per_entry_newest_first_then_the_dropped_count() {
         )
         .collect::<Vec<_>>(),
         [
-            NotificationCenterRow::CardTopBorder(&notification_entries[1]),
+            NotificationCenterRow::CardTopBorder(&center_entries[1]),
             NotificationCenterRow::CardHeader(&notification_entries[1]),
             NotificationCenterRow::CardText {
                 center_entry: &center_entries[1],
@@ -848,7 +875,7 @@ fn center_rows_list_one_card_per_entry_newest_first_then_the_dropped_count() {
                 text_row_index: 1,
             },
             NotificationCenterRow::CardBottomBorder(&notification_entries[1]),
-            NotificationCenterRow::CardTopBorder(&notification_entries[0]),
+            NotificationCenterRow::CardTopBorder(&center_entries[0]),
             NotificationCenterRow::CardHeader(&notification_entries[0]),
             NotificationCenterRow::CardText {
                 center_entry: &center_entries[0],
@@ -889,7 +916,7 @@ fn center_rows_from_a_row_skip_whole_cards_then_the_rows_before_it() {
                 text_row_index: 1,
             },
             NotificationCenterRow::CardBottomBorder(&notification_entries[1]),
-            NotificationCenterRow::CardTopBorder(&notification_entries[0]),
+            NotificationCenterRow::CardTopBorder(&center_entries[0]),
             NotificationCenterRow::CardHeader(&notification_entries[0]),
             NotificationCenterRow::CardText {
                 center_entry: &center_entries[0],
@@ -901,7 +928,7 @@ fn center_rows_from_a_row_skip_whole_cards_then_the_rows_before_it() {
     assert_eq!(
         list_rows_from(0, 5),
         [
-            NotificationCenterRow::CardTopBorder(&notification_entries[0]),
+            NotificationCenterRow::CardTopBorder(&center_entries[0]),
             NotificationCenterRow::CardHeader(&notification_entries[0]),
             NotificationCenterRow::CardText {
                 center_entry: &center_entries[0],
@@ -1078,6 +1105,7 @@ fn the_card_rows_name_the_drawn_card_of_each_body_row_and_none_on_the_center_tex
     };
     let build_card_row = |entry_index: usize, is_top_border| {
         Some(NotificationCardRow {
+            focus_pane_id: None,
             notification_id: notification_entries[entry_index].notification_id,
             is_top_border,
         })
@@ -1317,6 +1345,7 @@ fn center_body_rows_are_reused_until_the_body_size_scroll_dropped_count_or_entri
             .flat_map(|&entry_index| {
                 [true, false, false, false].map(|is_top_border| {
                     Some(NotificationCardRow {
+                        focus_pane_id: None,
                         notification_id: notification_entries[entry_index].notification_id,
                         is_top_border,
                     })
@@ -1405,6 +1434,7 @@ fn the_drawn_card_under_a_body_cell_names_its_entry_and_its_dismiss_button() {
     ]
     .map(|(notification_id, is_top_border)| {
         Some(NotificationCardRow {
+            focus_pane_id: None,
             notification_id,
             is_top_border,
         })
@@ -1419,6 +1449,7 @@ fn the_drawn_card_under_a_body_cell_names_its_entry_and_its_dismiss_button() {
     assert_eq!(
         find_card_at(75, 4),
         Some(NotificationCardHit {
+            focus_pane_id: None,
             notification_id: newer_notification_id,
             is_on_dismiss_button: true,
         })
@@ -1426,6 +1457,7 @@ fn the_drawn_card_under_a_body_cell_names_its_entry_and_its_dismiss_button() {
     assert_eq!(
         find_card_at(74, 4),
         Some(NotificationCardHit {
+            focus_pane_id: None,
             notification_id: newer_notification_id,
             is_on_dismiss_button: false,
         })
@@ -1433,6 +1465,7 @@ fn the_drawn_card_under_a_body_cell_names_its_entry_and_its_dismiss_button() {
     assert_eq!(
         find_card_at(75, 5),
         Some(NotificationCardHit {
+            focus_pane_id: None,
             notification_id: newer_notification_id,
             is_on_dismiss_button: false,
         })
@@ -1440,6 +1473,7 @@ fn the_drawn_card_under_a_body_cell_names_its_entry_and_its_dismiss_button() {
     assert_eq!(
         find_card_at(75, 8),
         Some(NotificationCardHit {
+            focus_pane_id: None,
             notification_id: older_notification_id,
             is_on_dismiss_button: true,
         })
@@ -1485,4 +1519,191 @@ fn the_drawn_center_scroll_stops_at_the_row_that_puts_the_last_row_on_the_last_b
     assert_eq!(thirty_entries, 103);
     assert_eq!(thirty_entries_and_a_dropped_count, 106);
     assert_eq!(two_entries, 0);
+}
+
+#[test]
+fn a_toast_about_a_held_pane_puts_its_focus_control_left_of_its_close_control_while_both_are_drawn()
+{
+    let render_snapshot = build_notification_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE);
+    let find_control_rects = |toast_position, hidden_per_mille| {
+        let toast_layout = find_test_toast_layout(
+            &render_snapshot,
+            ViewerChrome {
+                notification_toast: Some(NotificationToast {
+                    has_focus_pane_control: true,
+                    toast_position,
+                    text_row_count: 2,
+                    hidden_per_mille,
+                }),
+                ..ViewerChrome::default()
+            },
+        )
+        .expect("the toast is drawn");
+        (toast_layout.focus_pane_rect, toast_layout.close_rect)
+    };
+
+    assert_eq!(
+        find_control_rects(ToastPosition::TopRight, 0),
+        (
+            Some(build_test_row_rect(72, 1, 3)),
+            Some(build_test_row_rect(75, 1, 3))
+        )
+    );
+    assert_eq!(
+        find_control_rects(ToastPosition::TopRight, 39),
+        (
+            Some(build_test_row_rect(73, 1, 3)),
+            Some(build_test_row_rect(76, 1, 3))
+        ),
+        "a toast hidden by one column moves both controls one column right"
+    );
+    assert_eq!(
+        find_control_rects(ToastPosition::TopRight, 500),
+        (None, None),
+        "a half-hidden right toast draws neither control"
+    );
+    assert_eq!(
+        find_control_rects(ToastPosition::BottomLeft, 500),
+        (
+            Some(build_test_row_rect(4, 18, 3)),
+            Some(build_test_row_rect(7, 18, 3))
+        ),
+        "a half-hidden left toast draws both controls at the moved columns"
+    );
+}
+
+#[test]
+fn the_toast_focus_control_ends_where_the_close_control_starts() {
+    assert_eq!(
+        compute_toast_focus_pane_rect(build_test_rect(56, 1, 24, 5)),
+        build_test_row_rect(72, 1, 3)
+    );
+    assert_eq!(
+        compute_toast_focus_pane_rect(build_test_rect(0, 0, 10, 3)),
+        build_test_row_rect(2, 0, 3)
+    );
+}
+
+#[test]
+fn a_card_about_a_held_pane_names_its_pane_on_its_top_border_until_the_pane_is_marked_closed() {
+    let render_snapshot = build_notification_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE);
+    let body_rect = find_test_center_layout(&render_snapshot, build_open_center_viewer_chrome())
+        .expect("an open center is drawn")
+        .body_rect;
+    let pane_id = PaneId::new();
+    let notification_entries = VecDeque::from([
+        build_test_notification_entry(0, NotificationSeverity::Warning, "a", 1),
+        build_test_pane_notification_entry(1, pane_id),
+    ]);
+    let mut center_entries = build_center_entries(&notification_entries);
+    let list_top_border_focus_pane_ids = |center_entries: &NotificationCenterEntries| {
+        NotificationView {
+            center_entries,
+            dropped_entry_count: 0,
+            shown_toast: None,
+        }
+        .compute_center_body_rows(body_rect, 0)
+        .card_rows
+        .iter()
+        .flatten()
+        .filter(|card_row| card_row.is_top_border)
+        .map(|card_row| card_row.focus_pane_id)
+        .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        list_top_border_focus_pane_ids(&center_entries),
+        [Some(pane_id), None]
+    );
+    assert_eq!(
+        center_entries[1].find_card_pane_control(),
+        Some(CardPaneControl::FocusPane(pane_id))
+    );
+    assert_eq!(center_entries[0].find_card_pane_control(), None);
+    assert_eq!(center_entries[1].find_focus_pane_id(), Some(pane_id));
+    assert_eq!(center_entries[0].find_focus_pane_id(), None);
+
+    assert!(
+        !center_entries.mark_subject_panes_closed(|_, gone_pane_id| gone_pane_id != pane_id),
+        "a closure that names no pane of an entry changes nothing"
+    );
+    assert_eq!(
+        list_top_border_focus_pane_ids(&center_entries),
+        [Some(pane_id), None]
+    );
+
+    assert!(center_entries.mark_subject_panes_closed(|_, gone_pane_id| gone_pane_id == pane_id));
+    assert_eq!(
+        list_top_border_focus_pane_ids(&center_entries),
+        [None, None],
+        "the kept body rows are dropped and the marked card names no pane"
+    );
+    assert_eq!(
+        center_entries[1].find_card_pane_control(),
+        Some(CardPaneControl::PaneClosed)
+    );
+    assert_eq!(center_entries[1].find_focus_pane_id(), None);
+
+    assert!(
+        !center_entries.mark_subject_panes_closed(|_, _| true),
+        "an entry already marked stays marked and changes nothing"
+    );
+}
+
+#[test]
+fn the_drawn_card_under_its_focus_button_names_its_pane() {
+    let render_snapshot = build_notification_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE);
+    let center_layout =
+        find_test_center_layout(&render_snapshot, build_open_center_viewer_chrome())
+            .expect("an open center is drawn");
+    let pane_id = PaneId::new();
+    let notification_id = build_test_pane_notification_entry(1, pane_id).notification_id;
+    let card_rows = [true, false].map(|is_top_border| {
+        Some(NotificationCardRow {
+            focus_pane_id: is_top_border.then_some(pane_id),
+            notification_id,
+            is_top_border,
+        })
+    });
+    let find_card_at =
+        |column, row| find_notification_card_at(&card_rows, &center_layout, Point { column, row });
+
+    assert_eq!(
+        compute_card_focus_pane_button_column(center_layout.body_rect),
+        73
+    );
+    assert_eq!(
+        find_card_at(73, 4),
+        Some(NotificationCardHit {
+            focus_pane_id: Some(pane_id),
+            notification_id,
+            is_on_dismiss_button: false,
+        })
+    );
+    assert_eq!(
+        find_card_at(75, 4),
+        Some(NotificationCardHit {
+            focus_pane_id: None,
+            notification_id,
+            is_on_dismiss_button: true,
+        })
+    );
+    assert_eq!(
+        find_card_at(72, 4),
+        Some(NotificationCardHit {
+            focus_pane_id: None,
+            notification_id,
+            is_on_dismiss_button: false,
+        }),
+        "the space left of `↗` is the card, not the button"
+    );
+    assert_eq!(
+        find_card_at(73, 5),
+        Some(NotificationCardHit {
+            focus_pane_id: None,
+            notification_id,
+            is_on_dismiss_button: false,
+        }),
+        "the header row under `↗` is the card, not the button"
+    );
 }

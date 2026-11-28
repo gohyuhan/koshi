@@ -2491,6 +2491,7 @@ fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_un
     let committed_regions = CommittedRegions::build_core(EIGHTY_BY_TWENTY_FOUR_SIZE, 0);
     let build_toast_viewer_chrome = |hidden_per_mille: u16| ViewerChrome {
         notification_toast: Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count: 2,
             hidden_per_mille,
@@ -2520,6 +2521,44 @@ fn a_toast_hits_only_its_drawn_close_control_and_leaves_its_body_to_what_lies_un
     ] {
         assert_eq!(
             resolve_hit_region(in_place_frame_layout, screen_point),
+            expected_hit_region,
+            "{screen_point:?}"
+        );
+    }
+
+    let focus_toast_frame_layout = render_snapshot.build_painted_frame_layout(
+        ViewerChrome {
+            notification_toast: Some(NotificationToast {
+                has_focus_pane_control: true,
+                toast_position: ToastPosition::TopRight,
+                text_row_count: 2,
+                hidden_per_mille: 0,
+            }),
+            ..ViewerChrome::default()
+        },
+        &committed_regions,
+    );
+    for (screen_point, expected_hit_region) in [
+        (
+            build_screen_point(72, 1),
+            HitRegion::NotificationToastFocusPane,
+        ),
+        (
+            build_screen_point(74, 1),
+            HitRegion::NotificationToastFocusPane,
+        ),
+        (build_screen_point(75, 1), HitRegion::NotificationToastClose),
+        (
+            build_screen_point(71, 1),
+            HitRegion::PaneBorder {
+                pane_id: tiled_pane_id,
+                side: Direction::Up,
+                corner_horizontal_side: None,
+            },
+        ),
+    ] {
+        assert_eq!(
+            resolve_hit_region(focus_toast_frame_layout, screen_point),
             expected_hit_region,
             "{screen_point:?}"
         );

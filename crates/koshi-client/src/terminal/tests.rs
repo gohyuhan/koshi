@@ -1652,10 +1652,11 @@ fn assert_partial_native_frame_write_recovers(
 
 /// A terminal sink that keeps the bytes of each write apart.
 #[derive(Clone, Default)]
-struct FrameWriteRecorder(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
+pub(crate) struct FrameWriteRecorder(Arc<std::sync::Mutex<Vec<Vec<u8>>>>);
 
 impl FrameWriteRecorder {
-    fn take_frame_writes(&self) -> Vec<Vec<u8>> {
+    /// The bytes of each write since the last take, oldest first.
+    pub(crate) fn take_frame_writes(&self) -> Vec<Vec<u8>> {
         std::mem::take(&mut *self.0.lock().expect("the frame write lock"))
     }
 }

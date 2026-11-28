@@ -15,14 +15,17 @@ use std::time::SystemTime;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ClientActionKind;
+use koshi_core::attention::AttentionReasonKind;
+use koshi_core::geometry::Direction;
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::PaneId;
+use koshi_core::ids::TabId;
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey, PendingKeySequence,
 };
 use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseKind, ScrollDirection};
-use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity};
+use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity, NotificationSubject};
 use koshi_renderer::snapshot::{NotificationButton, NotificationToast, Reconnecting};
 
 use super::*;
@@ -34,7 +37,7 @@ use crate::mouse::tests::{
     build_render_snapshot_from_mouse_frame,
 };
 use crate::tests::{build_core_fired_action, build_input_read_stamp, TEST_VIEWPORT_SIZE};
-use crate::{LinkStatus, PaneMoveMode, PlacementInputAction};
+use crate::{LinkStatus, PaneMoveMode, PlacementInputAction, PlacementMode};
 
 /// A cell of the open center's body below its cards.
 const CENTER_BODY_CELL: Point = Point {
@@ -71,6 +74,15 @@ const SECOND_CARD_DISMISS_BUTTON_CELL: Point = Point { column: 75, row: 8 };
 
 /// A cell of a top-right toast's close control ` ✕ `.
 const TOAST_CLOSE_CONTROL_CELL: Point = Point { column: 76, row: 1 };
+
+/// The cell of `↗` in a top-right toast's focus control ` ↗ `.
+const TOAST_FOCUS_PANE_CONTROL_CELL: Point = Point { column: 73, row: 1 };
+
+/// The focus button `↗` of the newest card, on body row `0`.
+const NEWEST_CARD_FOCUS_PANE_BUTTON_CELL: Point = Point { column: 73, row: 4 };
+
+/// The text of the entry [`take_blocked_pane_post`] posts.
+const BLOCKED_PANE_TEXT: &str = "agents › pane …a1b2 · codex: blocked";
 
 /// A client that applied an `80x24` frame of one focused tiled pane, with
 /// `reduced-motion` on, and that frame with no viewer chrome painted. The
@@ -1170,6 +1182,7 @@ fn the_toast_takes_the_text_rows_of_its_preview_at_the_panel_width() {
     assert_eq!(
         client.build_notification_toast(&mouse_frame.committed_regions),
         Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count: 2,
             hidden_per_mille: 1000,
@@ -1195,6 +1208,7 @@ fn the_toast_clock_slides_the_toast_in_and_names_its_next_wakeup() {
     assert_eq!(
         client.build_notification_toast(&mouse_frame.committed_regions),
         Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count: 1,
             hidden_per_mille: 500,
@@ -1228,6 +1242,7 @@ fn reduced_motion_and_a_longer_toast_duration_set_the_toast_clock() {
     );
 
     let shown_toast = Some(NotificationToast {
+        has_focus_pane_control: false,
         toast_position: ToastPosition::TopRight,
         text_row_count: 1,
         hidden_per_mille: 0,
@@ -1353,6 +1368,7 @@ fn a_press_on_a_drawn_toast_close_control_leaves_the_toast_that_replaced_it() {
     assert_eq!(
         client.build_notification_toast(&mouse_frame.committed_regions),
         Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count: 1,
             hidden_per_mille: 0,
@@ -1387,6 +1403,7 @@ fn a_right_press_on_the_toast_close_control_is_taken_and_keeps_the_toast() {
     assert_eq!(
         client.build_notification_toast(&mouse_frame.committed_regions),
         Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count: 1,
             hidden_per_mille: 0,
@@ -1471,4 +1488,236 @@ fn two_viewers_of_one_session_keep_their_own_toast_setting_and_clear_state() {
         list_merged_entry_texts(&toasting_client),
         Vec::<String>::new()
     );
+}
+
+/// Take the first queue of a new session into `client`, then that
+/// session's post of [`BLOCKED_PANE_TEXT`] from a `ProgramBlocked` raise of
+/// `pane_id`, a pane the frame does not draw.
+fn take_blocked_pane_post(client: &mut Client, pane_id: PaneId) {
+    let session_id = SessionId::new();
+    let mut session_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+    client
+        .take_session_notification_queue(session_id, &session_queue, &[], &|_| false)
+        .expect("take the attach queue");
+    let posted_entry = session_queue
+        .post_core_entry(
+            NotificationSeverity::Info,
+            BLOCKED_PANE_TEXT,
+            Some(NotificationSubject::Pane {
+                pane_id,
+                attention_reason_kind: Some(AttentionReasonKind::ProgramBlocked),
+            }),
+            NonZeroU32::MIN,
+            SystemTime::UNIX_EPOCH,
+        )
+        .clone();
+    client
+        .take_session_notification_post(session_queue.get_revision(), posted_entry, &|_| false)
+        .expect("take the post");
+}
+
+/// A client of [`build_center_client`] that shows the toast of
+/// [`take_blocked_pane_post`] in place, the frame it painted with that
+/// toast, and the toast's pane.
+fn build_blocked_pane_toast_client() -> (Client, MouseFrame, PaneId) {
+    let (mut client, mouse_frame) = build_center_client();
+    let pane_id = PaneId::new();
+    take_blocked_pane_post(&mut client, pane_id);
+    client.advance_notification_clocks(Instant::now(), false, &|_| false);
+    let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
+    (client, painted_mouse_frame, pane_id)
+}
+
+#[test]
+fn a_left_press_on_the_toast_focus_control_returns_a_focus_pane_for_its_pane() {
+    let (mut client, painted_mouse_frame, pane_id) = build_blocked_pane_toast_client();
+
+    let press_answer = client.handle_notification_toast_mouse(
+        build_left_mouse_press(TOAST_FOCUS_PANE_CONTROL_CELL),
+        &painted_mouse_frame,
+    );
+
+    assert_eq!(
+        painted_mouse_frame
+            .viewer_chrome
+            .notification_toast
+            .map(|notification_toast| notification_toast.has_focus_pane_control),
+        Some(true)
+    );
+    assert_eq!(
+        press_answer,
+        Some(vec![build_focus_pane_action(client.client_id, pane_id)])
+    );
+}
+
+#[test]
+fn a_press_on_the_toast_focus_control_sends_nothing_without_a_link_or_while_a_layout_mode_is_on() {
+    let set_ups: [fn(&mut Client); 3] = [
+        |client| {
+            client.set_link_status(LinkStatus::Redialing(Reconnecting {
+                attempt: 1,
+                retry_in_seconds: Some(2),
+            }));
+        },
+        |client| client.pane_move_mode = Some(PaneMoveMode::Choice),
+        |client| {
+            client.placement_state.placement_mode = Some(PlacementMode {
+                source_pane_id: PaneId::new(),
+                source_tab_id: None,
+                destination_tab_id: TabId::new(),
+                placement_direction: Direction::Right,
+                placement_target: None,
+                pending_placement_command_id: None,
+            });
+        },
+    ];
+    for (set_up_index, set_up) in set_ups.into_iter().enumerate() {
+        let (mut client, painted_mouse_frame, _) = build_blocked_pane_toast_client();
+        set_up(&mut client);
+        assert_eq!(
+            client.get_notification_history().find_shown_toast_number(),
+            painted_mouse_frame.drawn_notifications.toast_number,
+            "set-up {set_up_index} keeps the drawn toast"
+        );
+
+        let press_answer = client.handle_notification_toast_mouse(
+            build_left_mouse_press(TOAST_FOCUS_PANE_CONTROL_CELL),
+            &painted_mouse_frame,
+        );
+
+        assert_eq!(press_answer, Some(Vec::new()), "set-up {set_up_index}");
+    }
+}
+
+#[test]
+fn a_press_on_the_toast_focus_control_of_a_pane_closed_since_the_paint_sends_nothing() {
+    let (mut client, painted_mouse_frame, pane_id) = build_blocked_pane_toast_client();
+    client.apply_notification_pane_removal(pane_id);
+
+    let press_answer = client.handle_notification_toast_mouse(
+        build_left_mouse_press(TOAST_FOCUS_PANE_CONTROL_CELL),
+        &painted_mouse_frame,
+    );
+
+    assert_eq!(press_answer, Some(Vec::new()));
+}
+
+#[test]
+fn a_right_press_on_the_toast_focus_control_is_taken_and_sends_nothing() {
+    let (mut client, painted_mouse_frame, _) = build_blocked_pane_toast_client();
+
+    let press_answer = client.handle_notification_toast_mouse(
+        build_right_mouse_press(TOAST_FOCUS_PANE_CONTROL_CELL),
+        &painted_mouse_frame,
+    );
+
+    assert_eq!(press_answer, Some(Vec::new()));
+}
+
+#[test]
+fn a_press_on_the_toast_focus_control_closes_the_open_tray() {
+    let (mouse_frame, _floating_slot_pane_ids) = build_tray_mouse_frame(&[true]);
+    let mut client = build_client_viewing(&mouse_frame);
+    client.client_config.should_reduce_motion = true;
+    client.apply_client_action(ClientActionKind::ToggleFloatingPaneTray, Some(&mouse_frame));
+    assert!(client.floating_pane_tray.is_some());
+    let pane_id = PaneId::new();
+    take_blocked_pane_post(&mut client, pane_id);
+    client.advance_notification_clocks(Instant::now(), false, &|_| false);
+    let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
+
+    let press_answer = client.handle_notification_toast_mouse(
+        build_left_mouse_press(TOAST_FOCUS_PANE_CONTROL_CELL),
+        &painted_mouse_frame,
+    );
+
+    assert_eq!(
+        press_answer,
+        Some(vec![build_focus_pane_action(client.client_id, pane_id)])
+    );
+    assert_eq!(client.floating_pane_tray, None);
+}
+
+#[test]
+fn a_left_press_on_a_cards_focus_button_closes_the_center_and_returns_a_focus_pane() {
+    let (mut client, mouse_frame) = build_center_client();
+    let pane_id = PaneId::new();
+    take_blocked_pane_post(&mut client, pane_id);
+    open_center(&mut client, &mouse_frame);
+    let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
+
+    let press_answer = client.handle_notification_center_mouse(
+        build_left_mouse_press(NEWEST_CARD_FOCUS_PANE_BUTTON_CELL),
+        &painted_mouse_frame,
+    );
+
+    assert_eq!(
+        press_answer,
+        Some(vec![build_focus_pane_action(client.client_id, pane_id)])
+    );
+    assert!(!client
+        .get_notification_history()
+        .is_notification_center_open());
+    assert_eq!(list_merged_entry_texts(&client), vec![BLOCKED_PANE_TEXT]);
+}
+
+#[test]
+fn a_press_on_the_focus_button_of_a_card_whose_pane_closed_since_the_paint_keeps_the_center_open() {
+    let (mut client, mouse_frame) = build_center_client();
+    let pane_id = PaneId::new();
+    take_blocked_pane_post(&mut client, pane_id);
+    open_center(&mut client, &mouse_frame);
+    let painted_mouse_frame = paint_mouse_frame(&client, &mouse_frame);
+    client.apply_notification_pane_removal(pane_id);
+
+    let press_answer = client.handle_notification_center_mouse(
+        build_left_mouse_press(NEWEST_CARD_FOCUS_PANE_BUTTON_CELL),
+        &painted_mouse_frame,
+    );
+
+    assert_eq!(press_answer, Some(Vec::new()));
+    assert!(client
+        .get_notification_history()
+        .is_notification_center_open());
+}
+
+#[test]
+fn a_blocked_program_toast_rings_only_with_the_bell_on_and_a_terminal_output() {
+    for (should_ring_attention_bell, is_output_terminal, is_bell_due) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+    ] {
+        let (mut client, _) = build_center_client();
+        client
+            .client_config
+            .notifications
+            .should_ring_attention_bell = should_ring_attention_bell;
+        client.set_output_terminal(is_output_terminal);
+        take_blocked_pane_post(&mut client, PaneId::new());
+
+        assert_eq!(
+            client.advance_notification_clocks(Instant::now(), false, &|_| false),
+            is_bell_due,
+            "attention-bell {should_ring_attention_bell}, terminal output {is_output_terminal}"
+        );
+    }
+}
+
+#[test]
+fn a_blocked_program_toast_rings_whatever_keyboard_focus_the_terminal_reported() {
+    for reported_is_terminal_focused in [None, Some(true), Some(false)] {
+        let (mut client, _) = build_center_client();
+        client.set_output_terminal(true);
+        if let Some(is_terminal_focused) = reported_is_terminal_focused {
+            client.handle_outer_terminal_focus_change(is_terminal_focused);
+        }
+        take_blocked_pane_post(&mut client, PaneId::new());
+
+        assert!(
+            client.advance_notification_clocks(Instant::now(), false, &|_| false),
+            "reported terminal focus {reported_is_terminal_focused:?}"
+        );
+    }
 }

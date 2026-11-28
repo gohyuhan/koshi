@@ -2248,12 +2248,13 @@ fn a_repeated_image_support_line_keeps_the_first_and_warns() {
 #[test]
 fn the_notifications_section_records_each_key() {
     let (app_config_layer, parse_warnings) = parse_with_warnings(
-        "notifications {\n    toast #false\n    toast-position \"bottom-left\"\n    toast-duration-ms 5000\n}",
+        "notifications {\n    toast #false\n    attention-bell #false\n    toast-position \"bottom-left\"\n    toast-duration-ms 5000\n}",
     );
     assert_eq!(
         app_config_layer.notifications,
         Some(PartialNotificationConfig {
             should_show_toasts: Some(false),
+            should_ring_attention_bell: Some(false),
             toast_position: Some(ToastPosition::BottomLeft),
             toast_duration_ms: Some(5_000),
         })
@@ -2297,7 +2298,7 @@ fn a_toast_duration_at_each_end_of_its_range_is_taken() {
 #[test]
 fn an_invalid_notifications_value_is_skipped_with_a_warning_and_the_others_apply() {
     let (app_config_layer, parse_warnings) = parse_with_warnings(
-        "notifications {\n    toast \"yes\"\n    toast-position \"middle\"\n    toast-duration-ms 999\n    toast-durations 5000\n}\nnotifications {\n    toast-duration-ms 60001\n}",
+        "notifications {\n    toast \"yes\"\n    toast-position \"middle\"\n    toast-duration-ms 999\n    toast-durations 5000\n    attention-bell 1\n}\nnotifications {\n    toast-duration-ms 60001\n}",
     );
     assert_eq!(
         app_config_layer.notifications,
@@ -2317,7 +2318,10 @@ fn an_invalid_notifications_value_is_skipped_with_a_warning_and_the_others_apply
             "line 6, column 5: ignored unknown key `notifications.toast-durations`; did you mean \
              `notifications.toast-duration-ms`?"
                 .to_string(),
-            "line 8, column 1: ignored duplicate `notifications` section".to_string(),
+            "line 7, column 5: ignored `notifications.attention-bell`: expected a boolean (#true \
+             or #false)"
+                .to_string(),
+            "line 9, column 1: ignored duplicate `notifications` section".to_string(),
         ]
     );
 }
@@ -2349,6 +2353,7 @@ fn a_file_without_the_notifications_section_reads_the_defaults() {
         ClientConfig::default().notifications,
         NotificationConfig {
             should_show_toasts: true,
+            should_ring_attention_bell: true,
             toast_position: ToastPosition::TopRight,
             toast_duration_ms: 3_000,
         }

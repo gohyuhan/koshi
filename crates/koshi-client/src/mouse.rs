@@ -551,6 +551,7 @@ impl Client {
                 | HitRegion::NotificationCenterBody
                 | HitRegion::NotificationCenter
                 | HitRegion::NotificationToastClose
+                | HitRegion::NotificationToastFocusPane
                 | HitRegion::Statusline
                 | HitRegion::None => PlacementInputAction::Consumed,
             },
@@ -1409,6 +1410,7 @@ impl Client {
             | HitRegion::NotificationCenterBody
             | HitRegion::NotificationCenter
             | HitRegion::NotificationToastClose
+            | HitRegion::NotificationToastFocusPane
             | HitRegion::Statusline
             | HitRegion::None => Vec::new(),
         }
@@ -2387,7 +2389,7 @@ pub(crate) fn build_frame_layout_without_overlays(mouse_frame: &MouseFrame) -> F
 
 /// A `FocusPane` for `pane_id`, naming `client_id` so the switch moves that viewer's
 /// focus and no other's.
-fn build_focus_pane_action(client_id: ClientId, pane_id: PaneId) -> MouseAction {
+pub(crate) fn build_focus_pane_action(client_id: ClientId, pane_id: PaneId) -> MouseAction {
     MouseAction::Command(Box::new(Command::FocusPane(FocusPaneArgs {
         focus_target: FocusTarget::Pane(pane_id),
         client_id: Some(client_id),

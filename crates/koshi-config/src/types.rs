@@ -410,6 +410,9 @@ impl Default for ScrollbackView {
 pub struct NotificationConfig {
     /// Whether a new notification slides in as a toast. `false` shows no toast.
     pub should_show_toasts: bool,
+    /// Whether a toast about a blocked program writes one BEL (`0x07`) to
+    /// this viewer's terminal as it starts to show. `false` writes none.
+    pub should_ring_attention_bell: bool,
     /// The corner of the pane area the toast sits in.
     pub toast_position: ToastPosition,
     /// How long a toast stays in place between sliding in and sliding out,
@@ -423,6 +426,7 @@ impl Default for NotificationConfig {
     fn default() -> Self {
         Self {
             should_show_toasts: true,
+            should_ring_attention_bell: true,
             toast_position: ToastPosition::TopRight,
             toast_duration_ms: 3_000,
         }

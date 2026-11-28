@@ -35,7 +35,7 @@ mod tests;
 /// button. While another client is attached, the client chips sit left of the
 /// buttons: each chip is ` 3 ` in its client's colors from `client_colors`,
 /// the colors of the viewing client and then of each peer in list order
-/// ([`list_client_colors`](super::list_client_colors)). The viewing client's
+/// ([`list_client_colors`]). The viewing client's
 /// own chip comes first with its number bold and underlined, then `+N` in the
 /// scroll arrows' style when N clients have no chip.
 /// Only the tab list between them carries block backgrounds — each tab is a

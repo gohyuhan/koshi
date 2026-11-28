@@ -8,8 +8,8 @@ use std::time::Duration;
 use koshi_config::types::AttentionConfig;
 use koshi_core::attention::AttentionReasonKind;
 use koshi_core::command::{
-    ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, FocusTabArgs, TabTarget,
-    ToggleLockModeArgs, WriteToPaneArgs,
+    ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs,
+    FocusTabArgs, FocusTarget, TabTarget, ToggleLockModeArgs, WriteToPaneArgs,
 };
 use koshi_core::event::PaneRemoved;
 use koshi_core::geometry::Point;
@@ -1052,6 +1052,51 @@ fn a_key_binding_or_mouse_command_that_lands_the_input_on_a_waiting_pane_clears_
             )]
         );
         assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+    }
+}
+
+#[test]
+fn a_focus_pane_on_a_waiting_pane_in_another_tab_clears_it_from_a_mouse_and_not_from_the_cli() {
+    let first_read_at = build_wall_time(1_000);
+    for is_mouse_source in [true, false] {
+        let mut fixture = build_fixture_with_waiting_build_pane(first_read_at);
+        let alice_client_id = fixture.alice_client_id;
+        let command_source = if is_mouse_source {
+            CommandSource::from_mouse(alice_client_id)
+        } else {
+            CommandSource::from_external_cli(Some(fixture.session_id), None)
+        };
+
+        fixture.dispatch_command(
+            command_source,
+            Command::FocusPane(FocusPaneArgs {
+                focus_target: FocusTarget::Pane(fixture.build_pane_id),
+                client_id: Some(alice_client_id),
+            }),
+        );
+
+        assert_eq!(
+            fixture.find_input_pane_id(alice_client_id),
+            Some(fixture.build_pane_id),
+            "mouse source: {is_mouse_source}"
+        );
+        if is_mouse_source {
+            assert_eq!(
+                fixture.take_alice_deliveries(),
+                [build_cleared_delivery(
+                    fixture.build_pane_id,
+                    fixture.code_tab_id,
+                    Some(alice_client_id)
+                )]
+            );
+            assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+        } else {
+            assert_eq!(fixture.take_alice_deliveries(), Vec::new());
+            assert_eq!(
+                fixture.find_pane_attention(fixture.build_pane_id),
+                Some(build_bell_attention(first_read_at))
+            );
+        }
     }
 }
 

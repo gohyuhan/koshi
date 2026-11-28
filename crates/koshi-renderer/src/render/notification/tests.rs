@@ -13,11 +13,14 @@ use ratatui::style::{Color, Modifier};
 
 use koshi_config::types::ToastPosition;
 use koshi_core::geometry::Size;
+use koshi_core::ids::PaneId;
 use koshi_core::notification::{NotificationEntry, NotificationId, NotificationSeverity};
 
 use crate::floating_pane_tray::tests::build_tray_test_render_snapshot;
 use crate::images::ImageRenderMode;
-use crate::notification::tests::{build_center_entries, build_test_notification_entry};
+use crate::notification::tests::{
+    build_center_entries, build_test_notification_entry, build_test_pane_notification_entry,
+};
 use crate::notification::{NotificationToastContent, ToastTextRowCache};
 use crate::render::tests::{build_viewport_area, format_rendered_cells};
 use crate::render::{build_frame_geometry, render_frame};
@@ -93,6 +96,7 @@ fn build_open_center_viewer_chrome(scroll_row_offset: usize) -> ViewerChrome {
 fn build_top_right_toast_viewer_chrome(text_row_count: u16, hidden_per_mille: u16) -> ViewerChrome {
     ViewerChrome {
         notification_toast: Some(NotificationToast {
+            has_focus_pane_control: false,
             toast_position: ToastPosition::TopRight,
             text_row_count,
             hidden_per_mille,
@@ -729,5 +733,107 @@ fn the_cursor_under_the_open_center_or_the_drawn_toast_is_hidden() {
     assert_eq!(
         find_cursor_position(ViewerChrome::default()),
         Some(Position::new(61, 2))
+    );
+}
+
+#[test]
+fn a_card_about_a_held_pane_draws_its_focus_button_left_of_its_dismiss_button() {
+    let pane_id = PaneId::new();
+    let notification_entries = VecDeque::from([
+        build_test_notification_entry(0, NotificationSeverity::Warning, "a", 1),
+        build_test_pane_notification_entry(1, pane_id),
+    ]);
+    let render_buffer = render_notification_frame(
+        &build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]),
+        build_open_center_viewer_chrome(0),
+        NotificationView {
+            center_entries: &build_center_entries(&notification_entries),
+            dropped_entry_count: 0,
+            shown_toast: None,
+        },
+    );
+
+    assert_eq!(
+        format_right_box_rows(&render_buffer, 4..5),
+        ["│┌────────────── ↗ ✕ ─┐│"]
+    );
+    assert_eq!(
+        format_right_box_rows(&render_buffer, 9..10),
+        ["│┌──────────────── ✕ ─┐│"],
+        "the card of an entry about no pane draws no focus button"
+    );
+}
+
+#[test]
+fn a_card_about_a_closed_pane_draws_pane_closed_left_of_its_dismiss_button() {
+    let notification_entries =
+        VecDeque::from([build_test_pane_notification_entry(0, PaneId::new())]);
+    let mut center_entries = build_center_entries(&notification_entries);
+    center_entries.mark_subject_panes_closed(|_, _| true);
+    let render_buffer = render_notification_frame(
+        &build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]),
+        build_open_center_viewer_chrome(0),
+        NotificationView {
+            center_entries: &center_entries,
+            dropped_entry_count: 0,
+            shown_toast: None,
+        },
+    );
+
+    assert_eq!(
+        format_right_box_rows(&render_buffer, 4..5),
+        ["│┌──── pane closed ✕ ─┐│"]
+    );
+}
+
+#[test]
+fn a_card_narrower_than_19_columns_draws_no_pane_closed_text() {
+    let twenty_column_size = Size {
+        column_count: 20,
+        row_count: 24,
+    };
+    let notification_entries =
+        VecDeque::from([build_test_pane_notification_entry(0, PaneId::new())]);
+    let mut center_entries = build_center_entries(&notification_entries);
+    center_entries.mark_subject_panes_closed(|_, _| true);
+    let render_buffer = render_notification_frame(
+        &build_tray_test_render_snapshot(twenty_column_size, &[]),
+        build_open_center_viewer_chrome(0),
+        NotificationView {
+            center_entries: &center_entries,
+            dropped_entry_count: 0,
+            shown_toast: None,
+        },
+    );
+
+    assert_eq!(
+        format_rendered_cells(&render_buffer, 4, 0..20),
+        "│┌──────────── ✕ ─┐│"
+    );
+}
+
+#[test]
+fn a_toast_with_a_focus_control_draws_it_left_of_its_close_control() {
+    let notification_entries = build_two_test_entries();
+    let mut viewer_chrome = build_top_right_toast_viewer_chrome(2, 0);
+    if let Some(notification_toast) = viewer_chrome.notification_toast.as_mut() {
+        notification_toast.has_focus_pane_control = true;
+    }
+    let render_buffer = render_notification_frame(
+        &build_tray_test_render_snapshot(EIGHTY_BY_TWENTY_FOUR_SIZE, &[]),
+        viewer_chrome,
+        NotificationView {
+            center_entries: &build_center_entries(&notification_entries),
+            dropped_entry_count: 0,
+            shown_toast: Some(NotificationToastView {
+                toast_content: NotificationToastContent::Entry(&notification_entries[1]),
+                toast_text_row_cache: &ToastTextRowCache::default(),
+            }),
+        },
+    );
+
+    assert_eq!(
+        format_right_box_rows(&render_buffer, 1..2),
+        ["┌─────────────── ↗  ✕ ─┐"]
     );
 }

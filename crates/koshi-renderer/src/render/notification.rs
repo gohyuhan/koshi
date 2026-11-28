@@ -8,11 +8,13 @@ use ratatui::style::Style;
 use koshi_core::geometry::Rect;
 
 use crate::notification::{
-    build_row_rect, compute_card_dismiss_button_column, compute_card_text_column_count,
-    compute_toast_close_rect, format_notification_header, list_notification_center_rows,
+    build_row_rect, compute_card_dismiss_button_column, compute_card_focus_pane_button_column,
+    compute_card_text_column_count, compute_toast_close_rect, compute_toast_focus_pane_rect,
+    format_notification_header, list_notification_center_rows, CardPaneControl,
     NotificationCenterLayout, NotificationCenterRow, NotificationToastLayout,
-    NotificationToastView, NotificationView, NOTIFICATION_CENTER_TITLE_TEXT,
-    NOTIFICATION_CLEAR_ALL_LABEL_TEXT, NOTIFICATION_TOAST_CLOSE_CONTROL_TEXT,
+    NotificationToastView, NotificationView, CARD_PANE_CLOSED_COLUMN_COUNT, CARD_PANE_CLOSED_TEXT,
+    NOTIFICATION_CENTER_TITLE_TEXT, NOTIFICATION_CLEAR_ALL_LABEL_TEXT,
+    NOTIFICATION_TOAST_CLOSE_CONTROL_TEXT, NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_TEXT,
 };
 use crate::snapshot::NotificationCenter;
 use crate::theme::Theme;
@@ -155,6 +157,11 @@ fn draw_notification_center_box(
 ///
 /// - A card's top border reads `┌──── ✕ ─┐` with its dismiss button at
 ///   [`compute_card_dismiss_button_column`], and its bottom border `└──────┘`.
+///   The card of an entry about a pane the session holds reads
+///   `┌── ↗ ✕ ─┐`, with its focus button at
+///   [`compute_card_focus_pane_button_column`]. The card of an entry about a
+///   pane that is gone reads `┌ pane closed ✕ ─┐` when `pane closed` fits
+///   after the corner and one `─`, and `┌──── ✕ ─┐` when it does not fit.
 /// - A card's header and text rows read `│ <text> │`: the header
 ///   ([`format_notification_header`]) fitted to the card's text cells
 ///   ([`compute_card_text_column_count`]) in its severity's style
@@ -187,8 +194,9 @@ fn draw_notification_center_row(
         }
     };
     match center_row {
-        NotificationCenterRow::CardTopBorder(notification_entry) => {
-            let border_style = compute_card_border_style(notification_entry.notification_id);
+        NotificationCenterRow::CardTopBorder(center_entry) => {
+            let border_style =
+                compute_card_border_style(center_entry.get_notification_entry().notification_id);
             let dash_text = "─".repeat(usize::from(card_column_count - 2));
             write_text_clipped(
                 screen_buffer,
@@ -196,13 +204,39 @@ fn draw_notification_center_row(
                 &format!("┌{dash_text}┐"),
                 border_style,
             );
+            let dismiss_button_column = compute_card_dismiss_button_column(row_rect);
+            match center_entry.find_card_pane_control() {
+                Some(CardPaneControl::FocusPane(_)) => write_text_clipped(
+                    screen_buffer,
+                    build_row_rect(
+                        compute_card_focus_pane_button_column(row_rect) - 1,
+                        row_rect.origin.row,
+                        3,
+                    ),
+                    NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_TEXT,
+                    border_style,
+                ),
+                Some(CardPaneControl::PaneClosed) => {
+                    let pane_closed_start_column =
+                        (dismiss_button_column - 1).saturating_sub(CARD_PANE_CLOSED_COLUMN_COUNT);
+                    if pane_closed_start_column >= row_rect.origin.column + 2 {
+                        write_text_clipped(
+                            screen_buffer,
+                            build_row_rect(
+                                pane_closed_start_column,
+                                row_rect.origin.row,
+                                CARD_PANE_CLOSED_COLUMN_COUNT,
+                            ),
+                            CARD_PANE_CLOSED_TEXT,
+                            border_style,
+                        );
+                    }
+                }
+                None => {}
+            }
             write_text_clipped(
                 screen_buffer,
-                build_row_rect(
-                    compute_card_dismiss_button_column(row_rect) - 1,
-                    row_rect.origin.row,
-                    3,
-                ),
+                build_row_rect(dismiss_button_column - 1, row_rect.origin.row, 3),
                 &format!(" {CLOSE_BUTTON_TEXT} "),
                 border_style,
             );
@@ -315,7 +349,9 @@ fn copy_slid_box(
 /// column `toast_layout.first_drawn_box_column`.
 ///
 /// The box has a border ring in the focused border style, and its top border
-/// holds ` ✕ ` in the close control's cells. Its first body row holds the
+/// holds ` ✕ ` in the close control's cells, and ` ↗ ` in the focus
+/// control's cells ([`compute_toast_focus_pane_rect`]) while
+/// `has_focus_pane_control` is `true`. Its first body row holds the
 /// header ([`NotificationToastContent::format_header`](crate::notification::NotificationToastContent::format_header)) in the header's
 /// severity style ([`compute_notification_severity_style`]), fitted to the
 /// body's columns ([`write_text_fitted`]). The rows under it hold the rows
@@ -334,6 +370,7 @@ fn copy_slid_box(
 pub(super) fn draw_notification_toast(
     toast_layout: &NotificationToastLayout,
     shown_toast: NotificationToastView<'_>,
+    has_focus_pane_control: bool,
     theme: &Theme,
     drawn_rows: DrawnRows<'_>,
     screen_buffer: &mut Buffer,
@@ -354,6 +391,14 @@ pub(super) fn draw_notification_toast(
         NOTIFICATION_TOAST_CLOSE_CONTROL_TEXT,
         border_style,
     );
+    if has_focus_pane_control {
+        write_text_clipped(
+            &mut box_buffer,
+            compute_toast_focus_pane_rect(box_rect),
+            NOTIFICATION_TOAST_FOCUS_PANE_CONTROL_TEXT,
+            border_style,
+        );
+    }
     let body_column_count = box_size.column_count - 4;
     let toast_content = shown_toast.toast_content;
     write_text_fitted(

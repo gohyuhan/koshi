@@ -234,6 +234,7 @@ copy {
 }
 notifications {
     toast #false
+    attention-bell #false
     toast-position "bottom-left"
     toast-duration-ms 5000
 }
@@ -299,6 +300,7 @@ update {
                 }),
                 notifications: Some(PartialNotificationConfig {
                     should_show_toasts: Some(false),
+                    should_ring_attention_bell: Some(false),
                     toast_position: Some(ToastPosition::BottomLeft),
                     toast_duration_ms: Some(5000),
                 }),

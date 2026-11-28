@@ -1166,6 +1166,7 @@ fn a_skipped_notifications_value_keeps_the_lower_layers_value() {
     let user_layer = PartialKoshiConfig {
         notifications: Some(PartialNotificationConfig {
             should_show_toasts: Some(false),
+            should_ring_attention_bell: Some(false),
             toast_position: Some(ToastPosition::BottomRight),
             toast_duration_ms: Some(5_000),
         }),
@@ -1174,6 +1175,7 @@ fn a_skipped_notifications_value_keeps_the_lower_layers_value() {
     let session_layer = PartialKoshiConfig {
         notifications: Some(PartialNotificationConfig {
             should_show_toasts: None,
+            should_ring_attention_bell: None,
             toast_position: Some(ToastPosition::TopLeft),
             toast_duration_ms: None,
         }),
@@ -1186,6 +1188,7 @@ fn a_skipped_notifications_value_keeps_the_lower_layers_value() {
         merged_client_config.notifications,
         NotificationConfig {
             should_show_toasts: false,
+            should_ring_attention_bell: false,
             toast_position: ToastPosition::TopLeft,
             toast_duration_ms: 5_000,
         }
@@ -1195,6 +1198,7 @@ fn a_skipped_notifications_value_keeps_the_lower_layers_value() {
         vec![PartialKoshiConfig {
             notifications: Some(PartialNotificationConfig {
                 should_show_toasts: Some(false),
+                should_ring_attention_bell: Some(false),
                 toast_position: None,
                 toast_duration_ms: None,
             }),

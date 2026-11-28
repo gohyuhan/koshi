@@ -1607,6 +1607,7 @@ fn forty_posts_end_in_a_summary_of_thirty_six_at_the_loudest_severity() {
             DEFAULT_TOAST_TIMING,
             false,
             &|_| false,
+            false,
         );
     }
 
@@ -1641,6 +1642,7 @@ fn an_evicted_entry_loses_its_preview() {
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
 
     let second_entry = notification_history
@@ -1915,6 +1917,7 @@ fn an_opened_center_slides_in_over_160_ms_from_its_first_advance() {
             DEFAULT_TOAST_TIMING,
             false,
             &|_| false,
+            false,
         );
         hidden_per_mille_steps.push(find_center_hidden_per_mille(&notification_history));
     }
@@ -1944,6 +1947,7 @@ fn a_closed_center_slides_out_takes_no_input_and_goes_when_the_slide_ends() {
             DEFAULT_TOAST_TIMING,
             false,
             &|_| false,
+            false,
         );
         hidden_per_mille_steps.push(find_center_hidden_per_mille(&notification_history));
     }
@@ -1960,13 +1964,19 @@ fn a_center_reopened_while_it_slides_out_slides_in_from_where_it_stands() {
     notification_history.open_notification_center(true);
     let start = Instant::now();
     notification_history.close_notification_center(false);
-    notification_history
-        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start,
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    );
     notification_history.advance_notification_clocks(
         start + Duration::from_millis(80),
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
 
     notification_history.open_notification_center(false);
@@ -1979,6 +1989,7 @@ fn a_center_reopened_while_it_slides_out_slides_in_from_where_it_stands() {
             DEFAULT_TOAST_TIMING,
             false,
             &|_| false,
+            false,
         );
         hidden_per_mille_steps.push(find_center_hidden_per_mille(&notification_history));
     }
@@ -2020,12 +2031,14 @@ fn a_sliding_center_advanced_with_reduced_motion_ends_its_slide_at_once() {
         reduced_motion_timing,
         false,
         &|_| false,
+        false,
     );
     closing_history.advance_notification_clocks(
         Instant::now(),
         reduced_motion_timing,
         false,
         &|_| false,
+        false,
     );
 
     assert_eq!(find_center_hidden_per_mille(&opening_history), Some(0));
@@ -2064,8 +2077,13 @@ fn a_sliding_center_wakes_at_once_before_its_first_advance_then_once_per_frame_u
 
     notification_history.open_notification_center(false);
     let unstarted_wakeup = find_wakeup(&notification_history, 0);
-    notification_history
-        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start,
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    );
     let early_wakeup = find_wakeup(&notification_history, 10);
     let late_wakeup = find_wakeup(&notification_history, 150);
     notification_history.advance_notification_clocks(
@@ -2073,6 +2091,7 @@ fn a_sliding_center_wakes_at_once_before_its_first_advance_then_once_per_frame_u
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
     let in_place_wakeup = find_wakeup(&notification_history, 160);
 
@@ -2174,14 +2193,20 @@ fn a_waiting_preview_goes_at_its_turn_when_the_viewer_switched_to_its_pane() {
             .expect("take the post");
     }
     let start = Instant::now();
-    notification_history
-        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start,
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    );
 
     notification_history.advance_notification_clocks(
         start + Duration::from_millis(1500),
         DEFAULT_TOAST_TIMING,
         false,
         &|drawn_pane_id| drawn_pane_id == pane_id,
+        false,
     );
 
     assert_eq!(find_shown_toast_content(&notification_history), None);
@@ -2207,13 +2232,19 @@ fn a_pane_that_stops_waiting_or_closes_withdraws_its_toast_and_keeps_its_entry()
         .take_session_post(revision, posted_entry, &|_| false, true)
         .expect("take the post");
     let start = Instant::now();
-    notification_history
-        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start,
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    );
     notification_history.advance_notification_clocks(
         start + Duration::from_millis(2000),
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
 
     notification_history.withdraw_pane_previews(pane_id);
@@ -2222,12 +2253,14 @@ fn a_pane_that_stops_waiting_or_closes_withdraws_its_toast_and_keeps_its_entry()
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
     notification_history.advance_notification_clocks(
         start + Duration::from_millis(2250),
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
     let newest_entry = get_newest_entry(&notification_history);
     assert_eq!(
@@ -2239,6 +2272,7 @@ fn a_pane_that_stops_waiting_or_closes_withdraws_its_toast_and_keeps_its_entry()
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
 
     assert_eq!(find_shown_toast_content(&notification_history), None);
@@ -2270,6 +2304,7 @@ fn a_pane_that_waits_again_while_its_toast_withdraws_turns_the_toast_back_unless
                 DEFAULT_TOAST_TIMING,
                 false,
                 &|_| false,
+                false,
             );
         }
         notification_history.withdraw_pane_previews(pane_id);
@@ -2279,6 +2314,7 @@ fn a_pane_that_waits_again_while_its_toast_withdraws_turns_the_toast_back_unless
                 DEFAULT_TOAST_TIMING,
                 false,
                 &|_| false,
+                false,
             );
         }
         let (repeat_revision, repeated_entry) = post_to_session_about_subject(
@@ -2300,6 +2336,7 @@ fn a_pane_that_waits_again_while_its_toast_withdraws_turns_the_toast_back_unless
             DEFAULT_TOAST_TIMING,
             false,
             &|_| false,
+            false,
         );
 
         let newest_entry = get_newest_entry(&notification_history);
@@ -2332,8 +2369,13 @@ fn a_queue_withdraws_toasts_of_panes_that_wait_no_more_and_previews_only_hidden_
         .take_session_post(revision, attended_entry, &|_| false, true)
         .expect("take the post");
     let start = Instant::now();
-    notification_history
-        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start,
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    );
     for (text, pane_id) in [
         (
             "build › cargo test · failed — exit 101 after 2m 14s",
@@ -2373,8 +2415,13 @@ fn a_queue_withdraws_toasts_of_panes_that_wait_no_more_and_previews_only_hidden_
             true,
         )
         .expect("take the resync queue");
-    notification_history
-        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start,
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    );
     let waiting_entry_id = get_entry_id_by_text(
         &notification_history,
         "build › cargo test · failed — exit 101 after 2m 14s",
@@ -2395,6 +2442,7 @@ fn a_queue_withdraws_toasts_of_panes_that_wait_no_more_and_previews_only_hidden_
         DEFAULT_TOAST_TIMING,
         false,
         &|_| false,
+        false,
     );
 
     assert_eq!(shown_entry_id, Some((waiting_entry_id, 1000)));
@@ -2418,4 +2466,363 @@ fn a_queue_previews_no_entry_about_a_pane_it_does_not_list() {
 
     assert_eq!(find_shown_toast_content(&notification_history), None);
     assert_eq!(notification_history.get_unread_entry_count(), 1);
+}
+
+/// The phase lengths of a viewer that reduces motion: a 3 s stay, and an
+/// appear and a withdraw of no length.
+const REDUCED_MOTION_TOAST_TIMING: ToastTiming = ToastTiming {
+    stay_duration: Duration::from_secs(3),
+    should_reduce_motion: true,
+};
+
+/// Post `text` about `subject` to `session_queue`, and take the post into
+/// `notification_history` with toasts on, while the frame draws no pane.
+fn post_and_take_about_subject(
+    notification_history: &mut NotificationHistory,
+    session_queue: &mut NotificationQueue,
+    text: &str,
+    subject: Option<NotificationSubject>,
+) {
+    let (revision, posted_entry) = post_to_session_about_subject(session_queue, text, subject);
+    notification_history
+        .take_session_post(revision, posted_entry, &|_| false, true)
+        .expect("take the post");
+}
+
+/// Advance the clocks of `notification_history` to `current_time`, with
+/// reduced motion, unpaused, while the frame draws no pane and the bell is
+/// on, and return whether a BEL is due.
+fn advance_with_attention_bell(
+    notification_history: &mut NotificationHistory,
+    current_time: Instant,
+) -> bool {
+    notification_history.advance_notification_clocks(
+        current_time,
+        REDUCED_MOTION_TOAST_TIMING,
+        false,
+        &|_| false,
+        true,
+    )
+}
+
+#[test]
+fn a_blocked_program_toast_rings_once_as_it_starts_and_not_again_inside_one_second() {
+    let (first_pane_id, second_pane_id, third_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    post_and_take_about_subject(
+        &mut notification_history,
+        &mut session_queue,
+        "agents › pane …a1b2 · codex: blocked",
+        build_blocked_pane_subject(first_pane_id),
+    );
+    let start = Instant::now();
+
+    assert!(advance_with_attention_bell(
+        &mut notification_history,
+        start
+    ));
+    assert!(
+        !advance_with_attention_bell(&mut notification_history, start + Duration::from_millis(50)),
+        "the same toast rings once"
+    );
+
+    post_and_take_about_subject(
+        &mut notification_history,
+        &mut session_queue,
+        "build › pane …09f3 · claude: blocked",
+        build_blocked_pane_subject(second_pane_id),
+    );
+    notification_history.withdraw_pane_previews(first_pane_id);
+    assert!(
+        !advance_with_attention_bell(
+            &mut notification_history,
+            start + Duration::from_millis(300)
+        ),
+        "a toast that starts 300 ms after the last BEL rings none"
+    );
+    assert_eq!(
+        notification_history.find_toast_focus_pane_id(),
+        Some(second_pane_id)
+    );
+
+    post_and_take_about_subject(
+        &mut notification_history,
+        &mut session_queue,
+        "docs › pane …77c0 · aider: blocked",
+        build_blocked_pane_subject(third_pane_id),
+    );
+    notification_history.withdraw_pane_previews(second_pane_id);
+    assert!(
+        advance_with_attention_bell(&mut notification_history, start + Duration::from_secs(1)),
+        "a toast that starts 1 s after the last BEL rings"
+    );
+    assert_eq!(
+        notification_history.find_toast_focus_pane_id(),
+        Some(third_pane_id)
+    );
+}
+
+#[test]
+fn a_toast_about_no_blocked_program_or_with_the_bell_off_rings_none() {
+    let pane_id = PaneId::new();
+    let subjects = [
+        None,
+        Some(NotificationSubject::Pane {
+            pane_id,
+            attention_reason_kind: Some(AttentionReasonKind::ProgramDone),
+        }),
+        Some(NotificationSubject::Pane {
+            pane_id,
+            attention_reason_kind: None,
+        }),
+    ];
+    for subject in subjects {
+        let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+        post_and_take_about_subject(
+            &mut notification_history,
+            &mut session_queue,
+            "agents › pane …a1b2 · codex: done",
+            subject,
+        );
+
+        assert!(
+            !advance_with_attention_bell(&mut notification_history, Instant::now()),
+            "{subject:?}"
+        );
+    }
+
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    post_and_take_about_subject(
+        &mut notification_history,
+        &mut session_queue,
+        "agents › pane …a1b2 · codex: blocked",
+        build_blocked_pane_subject(pane_id),
+    );
+    let start = Instant::now();
+    assert!(!notification_history.advance_notification_clocks(
+        start,
+        REDUCED_MOTION_TOAST_TIMING,
+        false,
+        &|_| false,
+        false,
+    ));
+    assert!(
+        !advance_with_attention_bell(&mut notification_history, start + Duration::from_secs(2)),
+        "a toast checked while the bell was off rings none once the bell is on"
+    );
+}
+
+#[test]
+fn a_paused_toast_rings_when_its_appear_starts() {
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    post_and_take_about_subject(
+        &mut notification_history,
+        &mut session_queue,
+        "agents › pane …a1b2 · codex: blocked",
+        build_blocked_pane_subject(PaneId::new()),
+    );
+    let start = Instant::now();
+
+    assert!(!notification_history.advance_notification_clocks(
+        start,
+        REDUCED_MOTION_TOAST_TIMING,
+        true,
+        &|_| false,
+        true,
+    ));
+    assert!(advance_with_attention_bell(
+        &mut notification_history,
+        start + Duration::from_millis(500)
+    ));
+}
+
+#[test]
+fn a_turned_back_blocked_program_toast_rings_again_once_one_second_passed() {
+    for (turn_back_after, is_bell_due) in [
+        (Duration::from_millis(300), false),
+        (Duration::from_secs(1), true),
+    ] {
+        let pane_id = PaneId::new();
+        let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+        post_and_take_about_subject(
+            &mut notification_history,
+            &mut session_queue,
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(pane_id),
+        );
+        let start = Instant::now();
+        assert!(advance_with_attention_bell(
+            &mut notification_history,
+            start
+        ));
+        notification_history.withdraw_pane_previews(pane_id);
+
+        post_and_take_about_subject(
+            &mut notification_history,
+            &mut session_queue,
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(pane_id),
+        );
+
+        assert_eq!(
+            advance_with_attention_bell(&mut notification_history, start + turn_back_after),
+            is_bell_due,
+            "turned back after {turn_back_after:?}"
+        );
+        assert_eq!(
+            find_shown_toast_content(&notification_history).map(|(toast_content, _)| {
+                match toast_content {
+                    NotificationToastContent::Entry(shown_entry) => shown_entry.repeat_count,
+                    NotificationToastContent::Summary { .. } => 0,
+                }
+            }),
+            Some(2),
+            "the turned-back toast shows the repeat"
+        );
+    }
+}
+
+#[test]
+fn a_queue_marks_closed_every_entry_of_its_session_about_a_pane_it_does_not_hold() {
+    let (held_pane_id, gone_pane_id) = (PaneId::new(), PaneId::new());
+    let (mut notification_history, session_id, mut session_queue) =
+        build_history_with_session_queue();
+    for (text, pane_id) in [
+        ("agents › pane …a1b2 · codex: blocked", held_pane_id),
+        ("build › pane …09f3 · claude: blocked", gone_pane_id),
+    ] {
+        post_and_take_about_subject(
+            &mut notification_history,
+            &mut session_queue,
+            text,
+            build_blocked_pane_subject(pane_id),
+        );
+    }
+    let held_entry_id = get_entry_id_by_text(
+        &notification_history,
+        "agents › pane …a1b2 · codex: blocked",
+    );
+    let gone_entry_id = get_entry_id_by_text(
+        &notification_history,
+        "build › pane …09f3 · claude: blocked",
+    );
+    let held_panes = [HeldPane {
+        pane_id: held_pane_id,
+        is_waiting: false,
+    }];
+    let revision_before = notification_history.get_revision();
+
+    notification_history
+        .take_session_queue(session_id, &session_queue, &held_panes, &|_| false, true)
+        .expect("take the resync queue");
+
+    assert_eq!(
+        notification_history.find_entry_focus_pane_id(held_entry_id),
+        Some(held_pane_id)
+    );
+    assert_eq!(
+        notification_history.find_entry_focus_pane_id(gone_entry_id),
+        None
+    );
+    let revision_after_mark = notification_history.get_revision();
+    assert!(revision_after_mark > revision_before);
+
+    notification_history
+        .take_session_queue(session_id, &session_queue, &held_panes, &|_| false, true)
+        .expect("take the same queue again");
+    assert_eq!(
+        notification_history.get_revision(),
+        revision_after_mark,
+        "a queue that marks nothing new counts no revision"
+    );
+
+    let (other_session_id, other_session_queue) = create_session_queue();
+    notification_history
+        .take_session_queue(
+            other_session_id,
+            &other_session_queue,
+            &[],
+            &|_| false,
+            true,
+        )
+        .expect("take the first queue of another session");
+    assert_eq!(
+        notification_history.find_entry_focus_pane_id(held_entry_id),
+        Some(held_pane_id),
+        "a queue of another session marks no entry of this session"
+    );
+}
+
+#[test]
+fn a_removed_pane_marks_its_entries_closed_and_its_toast_loses_the_focus_control() {
+    let (removed_pane_id, other_pane_id) = (PaneId::new(), PaneId::new());
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    for (text, pane_id) in [
+        ("agents › pane …a1b2 · codex: blocked", removed_pane_id),
+        ("build › pane …09f3 · claude: blocked", other_pane_id),
+    ] {
+        post_and_take_about_subject(
+            &mut notification_history,
+            &mut session_queue,
+            text,
+            build_blocked_pane_subject(pane_id),
+        );
+    }
+    let removed_entry_id = get_entry_id_by_text(
+        &notification_history,
+        "agents › pane …a1b2 · codex: blocked",
+    );
+    let other_entry_id = get_entry_id_by_text(
+        &notification_history,
+        "build › pane …09f3 · claude: blocked",
+    );
+    assert_eq!(
+        notification_history.find_toast_focus_pane_id(),
+        Some(removed_pane_id)
+    );
+    let revision_before = notification_history.get_revision();
+
+    notification_history.apply_pane_removal(removed_pane_id);
+
+    assert_eq!(notification_history.get_revision(), revision_before + 1);
+    assert_eq!(notification_history.find_toast_focus_pane_id(), None);
+    assert_eq!(
+        notification_history.find_entry_focus_pane_id(removed_entry_id),
+        None
+    );
+    assert_eq!(
+        notification_history.find_entry_focus_pane_id(other_entry_id),
+        Some(other_pane_id)
+    );
+
+    notification_history.apply_pane_removal(removed_pane_id);
+    assert_eq!(
+        notification_history.get_revision(),
+        revision_before + 1,
+        "a second removal of the same pane counts no revision"
+    );
+}
+
+#[test]
+fn a_toast_about_no_pane_and_an_entry_the_history_does_not_hold_name_no_focus_pane() {
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    assert_eq!(notification_history.find_toast_focus_pane_id(), None);
+
+    post_and_take_about_subject(
+        &mut notification_history,
+        &mut session_queue,
+        "pane …77c0 killed by signal 9",
+        None,
+    );
+    assert_eq!(notification_history.find_toast_focus_pane_id(), None);
+
+    let missing_entry_id = NotificationId {
+        sequence: 99,
+        ..get_newest_entry(&notification_history).notification_id
+    };
+    assert_eq!(
+        notification_history.find_entry_focus_pane_id(missing_entry_id),
+        None
+    );
 }

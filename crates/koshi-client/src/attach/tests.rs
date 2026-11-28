@@ -17314,6 +17314,7 @@ fn find_shown_toast_paint(
 /// the right edge.
 fn build_one_row_toast(hidden_per_mille: u16) -> Option<NotificationToast> {
     Some(NotificationToast {
+        has_focus_pane_control: false,
         toast_position: ToastPosition::TopRight,
         text_row_count: 1,
         hidden_per_mille,
@@ -18244,13 +18245,14 @@ fn a_mouse_event_while_reconnecting_closes_the_chip_tooltip() {
 }
 
 #[test]
-fn a_pane_that_stops_waiting_or_closes_takes_its_toast_down_and_its_entry_stays() {
+fn a_pane_that_stops_waiting_or_closes_takes_its_toast_down_and_a_closed_pane_marks_its_entry_closed(
+) {
     let session_id = SessionId::new();
     let session_owner = NotificationQueueOwner::Session(session_id);
     let attached_notification_queue = NotificationQueue::from_owner(session_owner);
     let pane_id = PaneId::new();
     let other_pane_id = PaneId::new();
-    for (ending_event, is_toast_withdrawn) in [
+    for (ending_event, is_toast_withdrawn, is_pane_closed) in [
         (
             SessionEvent::PaneAttentionCleared {
                 pane_id,
@@ -18258,12 +18260,14 @@ fn a_pane_that_stops_waiting_or_closes_takes_its_toast_down_and_its_entry_stays(
                 client_id: Some(ClientId::new()),
             },
             true,
+            false,
         ),
-        (SessionEvent::PaneRemoved { pane_id }, true),
+        (SessionEvent::PaneRemoved { pane_id }, true, true),
         (
             SessionEvent::PaneRemoved {
                 pane_id: other_pane_id,
             },
+            false,
             false,
         ),
     ] {
@@ -18277,6 +18281,7 @@ fn a_pane_that_stops_waiting_or_closes_takes_its_toast_down_and_its_entry_stays(
                 SystemTime::UNIX_EPOCH,
             )
             .clone();
+        let posted_entry_id = posted_entry.notification_id;
 
         let mut client = run_attachment_over_notification_events(
             session_id,
@@ -18294,6 +18299,13 @@ fn a_pane_that_stops_waiting_or_closes_takes_its_toast_down_and_its_entry_stays(
         assert_eq!(
             client.get_notification_history().find_shown_toast_number(),
             (!is_toast_withdrawn).then_some(0),
+            "{ending_event:?}"
+        );
+        assert_eq!(
+            client
+                .get_notification_history()
+                .find_entry_focus_pane_id(posted_entry_id),
+            (!is_pane_closed).then_some(pane_id),
             "{ending_event:?}"
         );
         assert_eq!(
@@ -18446,5 +18458,68 @@ fn a_resync_takes_down_the_toast_of_a_pane_that_waits_no_more_and_shows_one_that
     assert_eq!(
         client.get_notification_history().find_shown_toast_number(),
         Some(1)
+    );
+}
+
+#[test]
+fn a_refresh_that_starts_a_blocked_program_toast_writes_one_bel_before_the_frame() {
+    let frame_write_recorder = crate::terminal::tests::FrameWriteRecorder::default();
+    let mut screen = Screen::with_graphics_support(
+        terminal::PaintDriver::from_backend(
+            TestBackend::new(
+                TEST_VIEWPORT_SIZE.column_count,
+                TEST_VIEWPORT_SIZE.row_count,
+            ),
+            TEST_VIEWPORT_SIZE,
+        ),
+        terminal::TerminalOutput::from_terminal_sink(Box::new(frame_write_recorder.clone())),
+        TEST_VIEWPORT_SIZE,
+        terminal::GraphicsSupport::Unsupported,
+        None,
+        Arc::new(|| {}),
+    );
+    let mut client = build_test_client();
+    client.set_output_terminal(true);
+    let painted_frame = build_test_painted_frame();
+    let active_tab_id = painted_frame.client_snapshot.active_tab_id;
+    screen
+        .draw_painted_frame(&mut client, Box::new(painted_frame))
+        .expect("paint");
+    let session_id = SessionId::new();
+    let mut session_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
+    client
+        .take_session_notification_queue(session_id, &session_queue, &[], &|_| false)
+        .expect("take the attach queue");
+    let posted_entry = session_queue
+        .post_core_entry(
+            NotificationSeverity::Warning,
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(PaneId::new()),
+            NonZeroU32::MIN,
+            SystemTime::UNIX_EPOCH,
+        )
+        .clone();
+    client
+        .take_session_notification_post(session_queue.get_revision(), posted_entry, &|_| false)
+        .expect("take the post");
+    let bell_write = ATTENTION_BELL_BYTES.to_vec();
+    frame_write_recorder.take_frame_writes();
+    let start = Instant::now();
+
+    screen.refresh_at(&mut client, Some(active_tab_id), start);
+    let starting_writes = frame_write_recorder.take_frame_writes();
+    screen.refresh_at(
+        &mut client,
+        Some(active_tab_id),
+        start + Duration::from_millis(500),
+    );
+    let sliding_writes = frame_write_recorder.take_frame_writes();
+
+    assert_eq!(starting_writes, vec![bell_write]);
+    assert_eq!(
+        sliding_writes,
+        Vec::<Vec<u8>>::new(),
+        "the next step of the same toast writes no BEL"
     );
 }
