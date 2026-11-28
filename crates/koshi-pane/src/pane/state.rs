@@ -2,11 +2,14 @@
 //!
 //! A layout tree holds only a `PaneId` at each leaf. [`PaneRecord`] holds
 //! everything else about that pane: its spawn specification, its working
-//! directory, and what its program asked a person to look at.
+//! directory, what its program asked a person to look at, and what its
+//! programs reported about themselves.
 
 use std::path::PathBuf;
 
-use koshi_core::{attention::Attention, ids::PaneId, process::SpawnSpec};
+use koshi_core::{
+    attention::Attention, ids::PaneId, process::SpawnSpec, program_status::ProgramStatusRecord,
+};
 use serde::{Deserialize, Serialize};
 
 /// Runtime metadata for a single terminal pane. The registry keys the record
@@ -25,17 +28,24 @@ pub struct PaneRecord {
     /// it since. A record without `attention` is refused.
     #[serde(deserialize_with = "Option::deserialize")]
     pub attention: Option<Attention>,
+    /// The program status records the pane's programs reported through
+    /// OSC 7501, in the order they were written, oldest first. At most
+    /// [`PROGRAM_STATUS_RECORDS_MAX`](koshi_core::program_status::PROGRAM_STATUS_RECORDS_MAX),
+    /// one for each record id. A record without `program_status_records` is
+    /// refused.
+    pub program_status_records: Vec<ProgramStatusRecord>,
 }
 
 impl PaneRecord {
     /// A record for the terminal pane `pane_id` with no spawn specification,
-    /// no working directory, and no attention.
+    /// no working directory, no attention, and no program status record.
     pub fn from_terminal_pane(pane_id: PaneId) -> Self {
         Self {
             pane_id,
             spawn_spec: None,
             working_directory: None,
             attention: None,
+            program_status_records: Vec::new(),
         }
     }
 

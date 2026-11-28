@@ -1152,7 +1152,8 @@ fn step_five_converts_every_session_client_queued_entry_and_saved_view_record_to
                             "pane_id": "P0",
                             "spawn_spec": null,
                             "working_directory": null,
-                            "attention": null
+                            "attention": null,
+                            "program_status_records": []
                         }
                     }},
                     "notification_queue": {"queued_entries": [

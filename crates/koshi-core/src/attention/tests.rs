@@ -24,6 +24,91 @@ fn each_reason_gives_its_kind() {
         .get_reason_kind(),
         AttentionReasonKind::CommandFinished
     );
+    assert_eq!(
+        AttentionReason::ProgramBlocked {
+            record_id: String::new(),
+            blocked_kind: Some(BlockedKind::Question),
+            message: Some("Which branch?".to_string()),
+        }
+        .get_reason_kind(),
+        AttentionReasonKind::ProgramBlocked
+    );
+    assert_eq!(
+        AttentionReason::ProgramDone {
+            record_id: "deploy".to_string(),
+            message: None,
+        }
+        .get_reason_kind(),
+        AttentionReasonKind::ProgramDone
+    );
+    assert_eq!(
+        AttentionReason::ProgramFailed {
+            record_id: "deploy/us-east".to_string(),
+            message: Some("timeout".to_string()),
+        }
+        .get_reason_kind(),
+        AttentionReasonKind::ProgramFailed
+    );
+}
+
+#[test]
+fn only_a_program_status_reason_names_its_record_and_state() {
+    assert_eq!(
+        AttentionReason::Bell.find_raising_program_status_record(),
+        None
+    );
+    assert_eq!(
+        AttentionReason::Notify {
+            title: None,
+            body: "done".to_string(),
+        }
+        .find_raising_program_status_record(),
+        None
+    );
+    assert_eq!(
+        AttentionReason::CommandFinished {
+            exit_code: Some(0),
+            elapsed_secs: Some(6),
+        }
+        .find_raising_program_status_record(),
+        None
+    );
+    assert_eq!(
+        AttentionReason::ProgramBlocked {
+            record_id: String::new(),
+            blocked_kind: None,
+            message: None,
+        }
+        .find_raising_program_status_record(),
+        Some(("", ProgramStatusState::Blocked))
+    );
+    assert_eq!(
+        AttentionReason::ProgramDone {
+            record_id: "deploy".to_string(),
+            message: None,
+        }
+        .find_raising_program_status_record(),
+        Some(("deploy", ProgramStatusState::Done))
+    );
+    assert_eq!(
+        AttentionReason::ProgramFailed {
+            record_id: "deploy/us-east".to_string(),
+            message: None,
+        }
+        .find_raising_program_status_record(),
+        Some(("deploy/us-east", ProgramStatusState::Error))
+    );
+}
+
+#[test]
+fn a_program_blocked_reason_missing_its_kind_is_refused() {
+    let reason_json = r#"{"ProgramBlocked":{"record_id":"","message":null}}"#;
+    let parse_error = serde_json::from_str::<AttentionReason>(reason_json)
+        .expect_err("a reason without blocked_kind is refused");
+    assert_eq!(
+        parse_error.to_string(),
+        "missing field `blocked_kind` at line 1 column 49"
+    );
 }
 
 #[test]

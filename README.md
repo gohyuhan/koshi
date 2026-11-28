@@ -32,34 +32,20 @@ Koshi keeps the core focused on terminal work. Panes, tabs, layouts,
 keybindings, themes, and saved layouts are built in. App settings stay in
 small KDL files, and shell commands can control a running session.
 
-Three parts of the design are worth knowing before you start.
-
-**Your keybindings stay on your machine.** The terminal you sit at reads your
-own `keybinding.kdl`. It decides what each key means. It then sends the action
-name and its arguments to the session. Press `<C-p> l`, and the session
-receives `core:new-pane-right`. It never receives the key itself. A session on
-another machine works the same way, so your own shortcuts follow you there.
-You never edit a keybinding file on the other machine.
-
-**Each attached terminal keeps its own view.** The focused pane, the active
-tab, the zoomed pane, the scroll position, the text selection and the lock
-mode belong to the terminal, not to the session. Two people attach to one
-session at the same time. One switches to tab 2, and the other stays on tab 1.
-Each one types into the pane they focused. Neither moves the other's screen.
-
-**A session outlives the terminals that view it.** The session runs as its own
-program. Close your terminal, and its panes keep running. Reattach from the
-same machine or another one, and the panes are where you left them.
+- **Your keybindings stay on your machine.** Your terminal reads your own
+  `keybinding.kdl` and sends the session only the action: `<C-p> l` sends
+  `core:new-pane-right`. Your shortcuts work the same on a session on another
+  machine.
+- **Each attached terminal keeps its own view.** Focus, active tab, zoom,
+  scroll position, selection and lock mode belong to the terminal. Two people
+  on one session never move each other's screen.
+- **A session outlives its terminals.** Close the terminal, and the panes keep
+  running. Reattach from this machine or another one.
 
 > [!IMPORTANT]
-> One setting controls this. `auto-close-session` in `koshi.kdl` is `#false` by
-> default, which keeps the session running after its last terminal leaves. Set
-> it to `#true`, and the session ends instead: it asks every program in it to
-> stop, waits up to three seconds, then kills what has not exited.
->
-> The session reads this setting once, from the `koshi.kdl` on the machine it
-> starts on. Another attached terminal cannot change it from its own file.
-> See [config-docs/koshi.md](config-docs/koshi.md#auto-close-session).
+> `auto-close-session #true` in `koshi.kdl` ends the session when its last
+> terminal leaves. The default `#false` keeps it running. See
+> [config-docs/koshi.md](config-docs/koshi.md#auto-close-session).
 
 ## Features
 
@@ -118,10 +104,9 @@ Install with Homebrew:
 brew install gohyuhan/koshi/koshi
 ```
 
-`install.sh` does not install on macOS: it prints this Homebrew command and
-stops. A Koshi that `install.sh` installed before stays in `/usr/local/bin`
-and updates with `koshi update`. To move it to Homebrew, delete it with
-`sudo rm -f /usr/local/bin/koshi`, then run the Homebrew command.
+`install.sh` does not install on macOS; it prints the Homebrew command. An
+older script install keeps updating with `koshi update`. To move it to
+Homebrew, run `sudo rm -f /usr/local/bin/koshi` first.
 
 Homebrew adds the Koshi tap during installation. Upgrade Koshi with the other
 outdated packages:
@@ -137,12 +122,8 @@ Or upgrade only Koshi:
 brew upgrade koshi
 ```
 
-`koshi update` also upgrades a Homebrew install. It runs
-`brew upgrade gohyuhan/koshi/koshi`, then restarts each running session that
-does not run the new koshi, and then the router. A pinned formula, such as
-`koshi@0.5.0`, stays on its version: `koshi update` says so and names
-`brew install gohyuhan/koshi/koshi`. After a plain `brew upgrade`, each running
-session restarts into the new koshi at the next koshi command that reaches it.
+`koshi update` also upgrades a Homebrew install and restarts the running
+sessions into it. See [config-docs/cli.md](config-docs/cli.md).
 
 ### Windows
 
@@ -152,21 +133,9 @@ Install with PowerShell:
 powershell -c "irm https://github.com/gohyuhan/koshi/releases/latest/download/install.ps1 | iex"
 ```
 
-Run the same command to upgrade, also while Koshi runs. The script first moves
-the new `koshi.exe` beside the installed one, as
-`koshi-staged-<process id>.exe`, and runs it with `--version`. If it does not
-print the version of the release, the script deletes it and stops, and the
-installed `koshi.exe` stays as it was. The script then renames the installed
-`koshi.exe` to `koshi.old`, or to `koshi.1.old` and onward while a Koshi still
-runs from an older backup, and moves the new one into place. Each interactive
-launch, such as `koshi` with no command, removes the backups that no Koshi runs
-from. `koshi update` of Koshi 0.5.0 or older stops with `Access is denied` while
-a Koshi still runs from `koshi.old`. Rename that file to the next free backup
-name, such as `koshi.1.old`, and run the update again. The script, and
-`koshi update` of a Koshi newer than 0.5.0, hold a lock on the file `koshi.lock`
-beside `koshi.exe` while they replace it. A second install waits for that lock.
-While an install holds it, a launch of a Koshi newer than 0.5.0 leaves the
-backups in place.
+Run the same command to upgrade, also while Koshi runs. The script checks the
+new `koshi.exe` before it replaces the installed one, and keeps the old one as
+`koshi.old`. See [config-docs/cli.md](config-docs/cli.md).
 
 Or install with Scoop:
 
@@ -182,9 +151,8 @@ scoop update
 scoop update koshi
 ```
 
-`scoop update koshi` skips Koshi while any Koshi from that install runs. In that
-case, run `koshi update`. It replaces the installed Koshi in place and restarts
-each running session into it. Scoop then still lists the version it installed.
+`scoop update koshi` skips Koshi while it runs. Then run `koshi update`,
+which replaces Koshi in place.
 
 ### Build from source
 
@@ -329,47 +297,24 @@ The default leader is Ctrl.
 | `<C-q>` | Quit |
 
 The arrows under `<C-p>` and `<C-s>`, and `Tab` / `Shift+Tab` under `<C-p>`,
-repeat: after one fires, its prefix stays open. For example, `<C-p> ← ← ↓`
-focuses left, left again, then down. The prefix stays open until a key fires
-an action that does not repeat, or you press `Esc`. Until then, no key reaches
-the program, and a key bound to nothing is discarded. See
-[config-docs/keybinding.md](config-docs/keybinding.md#repeating-keys).
+repeat: `<C-p> ← ← ↓` focuses left, left again, then down. `Esc` closes the
+prefix. See [repeating keys](config-docs/keybinding.md#repeating-keys).
 
 In locked mode, `<C-l>`, `<C-g>`, and `<C-q>` keep their actions, and every
 other key goes to the program in the focused pane.
 
-Hover a pane's top border to show its handle `⠿⠿⠿` beside the top-left
-corner. Drag the handle in normal or locked mode to swap the pane with another
-pane.
-After the drop, the client stays in normal or locked mode, and the keys you
-type go where they went before the drag. In pane placement mode, dragging a
-pane onto another also swaps them. To insert,
-press `<C-p> m` in normal mode, wait for `PLACE PANE` in the tabline, then hold
-Shift when you start the drag. Koshi asks compatible terminals to send Shift
-mouse events during this mode. A terminal that honors the request sends Shift
-with the drag. Other terminals can keep Shift for their own text selection.
-Outside pane placement mode, Shift+drag over pane content keeps its text
-selection behavior, and a Shift press on a handle does not start placement.
-Shift+Arrow also selects an insertion edge without a mouse.
-
-The preview dims visible affected panes. The moving pane and destination use
-different tints. Centered messages name the moving pane and explain what
-happens to the affected pane or group. Messages sit inside visible pane content;
-collapsed stack headers keep their title and position with the role tint. A
-group shows its message in an uncovered area of one destination pane when one
-is visible. Messages stay clear of every visible stack header. When panes
-overlap during a slide, the moving pane's tint takes priority.
+Drag a pane's grab handle `⠿⠿⠿`, shown when the pointer is over its top
+border, onto another pane to swap the two. In pane placement mode (`<C-p> m`),
+hold Shift when the drag starts to insert the pane instead. See
+[pane placement mode](config-docs/keybinding.md#pane-placement-mode).
 
 `koshi keys list` prints the active keymap. `koshi actions list` prints actions
 that can be bound. `koshi actions run <ACTION>` runs one from a shell.
 
 ## Configuration
 
-Koshi uses four optional KDL file types. Each present file must declare a
-supported version. New files use `version 2`; `version 1` files migrate
-to version 2 before an updated session server or router reads them. For example, a
-`keybinding.kdl` with `version 1` becomes `version 2` without a command from
-the user.
+Koshi uses four optional KDL files. Each file declares `version 2`. A
+`version 1` file migrates to version 2 when koshi reads it.
 
 | File | Contents |
 |---|---|
@@ -395,9 +340,7 @@ Available config commands:
 | `koshi config check` | Validate every known config file |
 | `koshi config migrate` | Validate files and apply registered schema updates |
 
-Current schema version is `2`. Migration upgrades version `1` files to version
-`2`, keeps an unknown key or a bad value as written, and leaves version `2`
-files unchanged. `koshi config check` still reports those keys and values.
+`koshi config check` reports every unknown key and bad value.
 
 Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 [themes-example/](themes-example/).
@@ -415,12 +358,8 @@ Full config reference: [config-docs/](config-docs/README.md). Ready-made themes:
 
 ### Sessions and discovery
 
-List and inspect commands accept `--format table` or `--format json`. Both
-print ids, times, and states as the same text: `pane-0192f0c1-…`,
-`2025-01-01T00:00:00Z`, `running`.
-`NAME_OR_ID` takes the target's generated name or its printed id; an id is
-never treated as a name, and a name several targets share is refused with
-every matching id listed.
+List and inspect commands accept `--format table` or `--format json`.
+`NAME_OR_ID` takes a generated name or a printed id.
 
 | Command | Result |
 |---|---|
@@ -501,17 +440,10 @@ holding a `fail` row exits 1, and a run of only `ok` and `warn` rows exits 0.
 
 ### Sharing and remote access
 
-The global `--remote <SERVER>` flag runs one invocation against the machine
-`SERVER` names instead of this one. It works with `attach`, with
-`list-sessions`, and with the verbs that act on panes, tabs, and input.
-Every other verb refuses it. A server this machine has not saved also needs
-the global `--certificate-fingerprint <FINGERPRINT>` flag, with the
-fingerprint `koshi share grant` prints on that machine: `sha256:` followed by
-64 lowercase hex characters. A saved server
-takes that flag when it gives the fingerprint the server was saved with, and
-refuses any other fingerprint. A saved server presents the secret it saved,
-and refuses a `KOSHI_REMOTE_SECRET` that holds a secret no saved server holds;
-`koshi remote set-secret <SERVER>` saves that secret in place of the old one.
+The global `--remote <SERVER>` flag runs one command against another machine.
+It works with `attach`, `list-sessions`, and the pane, tab and input commands.
+A server this machine has not saved also needs `--certificate-fingerprint`,
+which `koshi share grant` prints on that machine.
 
 | Command | Result |
 |---|---|
@@ -530,13 +462,8 @@ and refuses a `KOSHI_REMOTE_SECRET` that holds a secret no saved server holds;
 The `share` commands run on the machine holding the sessions; the rest run on
 the machine connecting to it.
 
-After an update, the router converts the remote listener's certificate,
-access mark, and token grants. The first read of saved servers converts their
-file. For example, a saved server keeps its secret and certificate
-fingerprint, and a grant keeps its scope and expiry; no re-enrollment is
-needed. A saved server that holds no fingerprint, such as one an older koshi
-saved before it ever connected, is not dialled until `koshi remote edit` gives
-it one.
+An update keeps saved servers, certificates and grants; no re-enrollment is
+needed.
 
 ### Debugging
 
@@ -555,68 +482,19 @@ it one.
 | `koshi update` | Install a newer release the way koshi was installed, then restart the running servers |
 | `koshi restart-servers` | Restart every running session, then the router, into the koshi program on disk |
 
-`koshi update` installs the release the way Koshi was installed: through
-`brew` for a Homebrew install, and by replacing the program file for a Scoop
-install or a release script install. A Koshi built from source downloads
-nothing. After every update, whether or not it installed a release, the
-running sessions restart into the installed koshi, and then the background
-process that tracks sessions (the router) restarts. A release install leaves a
-session that already runs the installed version alone; a build from source
-restarts every session. A session keeps its panes, the programs running in them
-and their scrollback. A client from the installed build can reattach to that
-session. A session that refuses the restart is named on standard error and
-keeps the old build. `koshi server-version` prints one row per running server,
-so a session still on the old build shows beside the ones that moved.
+`koshi update` installs the new release the way koshi was installed, then
+restarts each running session and the router into it. Each session keeps its
+panes, their programs and their scrollback. `koshi restart-servers` does the
+same restart and installs nothing, for example after a package manager
+upgrade. `koshi server-version` shows any session still on the old build.
 
-`koshi restart-servers` restarts every running session, then the router, into
-the koshi program on disk, and installs nothing. Use it after koshi is installed
-another way, such as by a package manager.
+A client attached during the update reattaches by itself. An older client, or
+a client of another machine, prints the `koshi attach` command to run.
+Sessions from koshi 0.3.0 and newer move in place, and saved state converts by
+itself, also when an update skips a release.
 
-Sessions started by koshi 0.3.0, 0.4.0, 0.5.0-pr.1, 0.5.0-pr.2, 0.5.0,
-0.6.0-pr.1, 0.6.0-pr.2, 0.6.0, 0.7.0-pr.1, 0.7.0-pr.2, or 0.7.0-pr.3 support
-this live handoff. A session or router of koshi 0.3.0 or 0.4.0 does not restart
-by itself after a package manager installs a new koshi: run `koshi
-restart-servers` once. A session started by koshi 0.2.0 or one of its
-pre-releases cannot move to a new build. `koshi update` and `koshi
-restart-servers` name each such session and ask once whether to end it and the
-programs in its panes. If you answer in a pane of one of these sessions, that
-session ends last, and the terminal of that pane closes with it. A koshi 0.1.0
-window keeps its build until its terminal closes.
-
-A client attached while the update runs comes back to its session by itself. If
-the restarted session does not speak that client's protocol version, the client
-waits for the router to restart too: up to 30 seconds, and longer while
-`koshi update` is still restarting servers. Then it runs
-`koshi attach <session id>` in the same terminal, with the koshi at the path the
-client was started from. That attach comes back as the same client, on the same
-tab with the same focus, zoom, scroll positions, selections, lock mode and
-floating panes, while the session still holds the client's record and its tab.
-The session holds the record of a client that has not come back until 60 seconds
-after it restarts. While `koshi update` or `koshi restart-servers` holds
-`update.lock`, the 60 seconds start when that command releases the lock. A
-client from koshi 0.5.0-pr.2 or 0.5.0 comes back as a new client. The restarted
-session holds no record of a client from koshi 0.5.0 or older. A client from
-koshi 0.5.0-pr.1 or earlier, and a client of a session on another machine,
-prints the attach command instead: start the installed build and run
-`koshi attach workspace` to reattach to a session named `workspace`.
-
-Saved state carries a format number. Koshi applies the required conversion
-steps in order as the updated build opens it. This also works when an update
-skips a release. For example, a resume file at format `2` passes through `3`
-and `4` before Koshi loads it as format `5`. No migration command is needed.
-
-If a session cannot read its restart record, it opens one new shell and the
-previous panes are unavailable. The session posts the error `the session could
-not be restored after the restart; a new shell started` to every client that
-attaches. If the new shell clears its screen at startup, the notification still
-reports the failed restore.
-
-An update that koshi 0.4.0 or 0.5.0-pr.1 runs cannot confirm the restarts.
-Koshi 0.4.0 cannot read the files the installed build writes, and 0.5.0-pr.1
-does not speak its protocol versions. Each reports every session and the router
-as not confirmed, or as still on its own version. Those sessions and the router
-did restart into the installed build, and `koshi server-version` shows the
-build each one runs.
+If a session cannot read its restart record, it opens one new shell, and every
+client that attaches gets an error notification.
 
 Full flags and output rules: [config-docs/cli.md](config-docs/cli.md).
 

@@ -22,8 +22,8 @@ use koshi_core::command::{
     ToggleLockModeArgs,
 };
 use koshi_core::discovery::{
-    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery,
-    TabDiscovery,
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle,
+    PaneProgramStatusDiscovery, SessionDiscovery, TabDiscovery,
 };
 use koshi_core::event::RejectReason;
 use koshi_core::geometry::{
@@ -37,6 +37,7 @@ use koshi_core::lock::LockMode;
 use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::notification::{NotificationEntry, NotificationQueue};
 use koshi_core::process::{ShellKind, SpawnSpec};
+use koshi_core::program_status::{BlockedKind, ProgramStatusState};
 use koshi_layout::mode::LayoutMode;
 use koshi_layout::tree::LayoutNode;
 use serde::de::DeserializeOwned;
@@ -221,6 +222,12 @@ fn build_populated_test_session_overview() -> SessionOverview {
             attention: Some(PaneAttentionDiscovery {
                 reason_kind: AttentionReasonKind::Notify,
                 raised_at: event_timestamp,
+            }),
+            program_status: Some(PaneProgramStatusDiscovery {
+                program_status_state: ProgramStatusState::Blocked,
+                blocked_kind: Some(BlockedKind::Question),
+                progress_percent: Some(40),
+                app_name: Some("codex".to_string()),
             }),
         }],
         clients: vec![ClientDiscovery {
@@ -672,6 +679,12 @@ fn the_overview_wire_shape_belongs_to_this_protocol_version() {
                 "attention": {
                     "reason_kind": "Notify",
                     "raised_at": { "secs_since_epoch": 1_700_000_000, "nanos_since_epoch": 0 }
+                },
+                "program_status": {
+                    "program_status_state": "Blocked",
+                    "blocked_kind": "Question",
+                    "progress_percent": 40,
+                    "app_name": "codex"
                 }
             }],
             "clients": [{

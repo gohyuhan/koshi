@@ -18,7 +18,9 @@ use koshi_core::key::{
 };
 use koshi_core::mouse::{MouseButton, MouseKind};
 use koshi_core::process::{ExitStatus, PtySize};
-use koshi_core::program_status::{BlockedKind, ProgramStatusState};
+use koshi_core::program_status::{
+    BlockedKind, ProgramStatusRecord, ProgramStatusState, PROGRAM_STATUS_RECORDS_MAX,
+};
 use koshi_layout::tree::LayoutNode;
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
@@ -162,6 +164,32 @@ impl AttentionFixture {
             .clone()
     }
 
+    /// The program status records that `pane_id`'s record holds.
+    fn list_program_status_records(&self, pane_id: PaneId) -> Vec<ProgramStatusRecord> {
+        self.server.session_by_id[&self.session_id]
+            .panes
+            .get_pane_record_by_id(pane_id)
+            .expect("the pane has a record")
+            .program_status_records
+            .clone()
+    }
+
+    /// Apply `program_facts` to `build_pane_id` as one read at `read_at`, and
+    /// return their events.
+    fn apply_build_pane_facts(
+        &mut self,
+        program_facts: Vec<ProgramFact>,
+        read_at: SystemTime,
+    ) -> Vec<Event> {
+        let read_instant = Instant::now();
+        self.server.apply_program_facts(
+            self.build_pane_id,
+            build_timed_program_facts(program_facts, read_instant),
+            read_at,
+            read_instant,
+        )
+    }
+
     /// The pane that takes `client_id`'s input.
     fn find_input_pane_id(&self, client_id: ClientId) -> Option<PaneId> {
         self.server.find_active_focused_pane_id(client_id)
@@ -204,6 +232,24 @@ fn build_timed_program_facts(
             read_instant,
         })
         .collect()
+}
+
+/// An OSC 7501 report for `record_id` in `program_status_state` with
+/// `message`, and no kind, progress, app name or title.
+fn build_report_fact(
+    record_id: &str,
+    program_status_state: ProgramStatusState,
+    message: Option<&str>,
+) -> ProgramFact {
+    ProgramFact::ProgramStatus(ProgramStatusFact::Reported {
+        record_id: record_id.to_string(),
+        program_status_state,
+        blocked_kind: None,
+        progress_percent: None,
+        app_name: None,
+        title: None,
+        message: message.map(str::to_string),
+    })
 }
 
 /// `seconds` after the Unix epoch.
@@ -279,6 +325,13 @@ fn switch_off_attention_kind(
         AttentionReasonKind::Notify => attention_config.should_raise_for_notify = false,
         AttentionReasonKind::CommandFinished => {
             attention_config.should_raise_for_command_finished = false;
+        }
+        AttentionReasonKind::ProgramBlocked => {
+            attention_config.should_raise_for_program_blocked = false;
+        }
+        AttentionReasonKind::ProgramDone => attention_config.should_raise_for_program_done = false,
+        AttentionReasonKind::ProgramFailed => {
+            attention_config.should_raise_for_program_failed = false;
         }
     }
 }
@@ -387,6 +440,18 @@ fn a_signal_whose_kind_koshi_kdl_switches_off_is_dropped() {
             AttentionReasonKind::CommandFinished,
             ProgramFact::CommandFinished { exit_code: Some(1) },
         ),
+        (
+            AttentionReasonKind::ProgramBlocked,
+            build_report_fact("", ProgramStatusState::Blocked, None),
+        ),
+        (
+            AttentionReasonKind::ProgramDone,
+            build_report_fact("", ProgramStatusState::Done, None),
+        ),
+        (
+            AttentionReasonKind::ProgramFailed,
+            build_report_fact("", ProgramStatusState::Error, None),
+        ),
     ] {
         let mut fixture = build_attention_fixture();
         switch_off_attention_kind(&mut fixture.server.config.attention, attention_reason_kind);
@@ -394,7 +459,11 @@ fn a_signal_whose_kind_koshi_kdl_switches_off_is_dropped() {
             AttentionReasonKind::CommandFinished => {
                 build_command_finished_events(fixture.build_pane_id)
             }
-            AttentionReasonKind::Bell | AttentionReasonKind::Notify => Vec::new(),
+            AttentionReasonKind::Bell
+            | AttentionReasonKind::Notify
+            | AttentionReasonKind::ProgramBlocked
+            | AttentionReasonKind::ProgramDone
+            | AttentionReasonKind::ProgramFailed => Vec::new(),
         };
 
         let read_instant = Instant::now();
@@ -415,7 +484,7 @@ fn a_signal_whose_kind_koshi_kdl_switches_off_is_dropped() {
 }
 
 #[test]
-fn program_status_facts_raise_nothing_and_give_no_event() {
+fn a_blocked_report_that_a_clear_removes_in_the_same_read_gives_no_event() {
     let mut fixture = build_attention_fixture();
     let read_instant = Instant::now();
 
@@ -446,6 +515,10 @@ fn program_status_facts_raise_nothing_and_give_no_event() {
 
     assert_eq!(emitted_events, Vec::new());
     assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+    assert_eq!(
+        fixture.list_program_status_records(fixture.build_pane_id),
+        Vec::new()
+    );
 }
 
 #[test]
@@ -1394,5 +1467,602 @@ fn a_raise_and_a_clear_in_a_tab_the_client_does_not_view_repaint_its_frame() {
             vec![("code".to_string(), false), ("docs".to_string(), false)],
             0
         )]
+    );
+}
+
+// ------------------------------------------------------ program status ----
+
+/// The `PaneAttentionRaised` event of `build_pane_id` in tab `code`.
+fn build_build_pane_raised_event(
+    fixture: &AttentionFixture,
+    reason: AttentionReason,
+    raised_at: SystemTime,
+) -> Event {
+    Event::PaneAttentionRaised(PaneAttentionRaised {
+        pane_id: fixture.build_pane_id,
+        tab_id: Some(fixture.code_tab_id),
+        reason,
+        raised_at,
+    })
+}
+
+/// The `PaneAttentionCleared` event of `build_pane_id` in tab `code` that
+/// names `client_id`.
+fn build_build_pane_cleared_event(
+    fixture: &AttentionFixture,
+    client_id: Option<ClientId>,
+) -> Event {
+    Event::PaneAttentionCleared(PaneAttentionCleared {
+        pane_id: fixture.build_pane_id,
+        tab_id: Some(fixture.code_tab_id),
+        client_id,
+    })
+}
+
+/// `ProgramBlocked` for the root record, with no kind and `message`.
+fn build_root_blocked_reason(message: Option<&str>) -> AttentionReason {
+    AttentionReason::ProgramBlocked {
+        record_id: String::new(),
+        blocked_kind: None,
+        message: message.map(str::to_string),
+    }
+}
+
+/// A fixture whose `build_pane_id` waits on its root record's `blocked`
+/// report, read at `raised_at`.
+fn build_fixture_with_blocked_build_pane(raised_at: SystemTime) -> AttentionFixture {
+    let mut fixture = build_attention_fixture();
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Blocked, None)],
+        raised_at,
+    );
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_raised_event(
+            &fixture,
+            build_root_blocked_reason(None),
+            raised_at
+        )]
+    );
+    fixture
+}
+
+#[test]
+fn a_blocked_report_in_a_pane_nobody_watches_raises_and_keeps_the_record() {
+    let mut fixture = build_attention_fixture();
+    let read_at = build_wall_time(1_000);
+
+    fixture.write_build_pane_output(
+        b"\x1b]7501;state=blocked:kind=question:app=codex\x1b\\",
+        read_at,
+    );
+
+    let expected_reason = AttentionReason::ProgramBlocked {
+        record_id: String::new(),
+        blocked_kind: Some(BlockedKind::Question),
+        message: None,
+    };
+    assert_eq!(
+        fixture.take_alice_deliveries(),
+        [build_raised_delivery(
+            fixture.build_pane_id,
+            fixture.code_tab_id,
+            expected_reason.clone(),
+            read_at
+        )]
+    );
+    assert_eq!(
+        fixture.find_pane_attention(fixture.build_pane_id),
+        Some(Attention {
+            raised_at: read_at,
+            reason: expected_reason,
+            withdrawable_notification_id: None,
+        })
+    );
+    assert_eq!(
+        fixture.list_program_status_records(fixture.build_pane_id),
+        [ProgramStatusRecord {
+            record_id: String::new(),
+            program_status_state: ProgramStatusState::Blocked,
+            blocked_kind: Some(BlockedKind::Question),
+            progress_percent: None,
+            app_name: Some("codex".to_string()),
+            title: None,
+            message: None,
+            is_seen: false,
+            updated_at: read_at,
+        }]
+    );
+}
+
+#[test]
+fn a_working_report_after_blocked_ends_the_wait_with_no_client() {
+    let mut fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Working, None)],
+        build_wall_time(1_010),
+    );
+
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_cleared_event(&fixture, None)]
+    );
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+}
+
+#[test]
+fn a_blocked_report_in_the_focused_input_pane_is_seen_and_raises_nothing() {
+    let mut fixture = build_attention_fixture();
+    fixture.attach_bob_to_build_pane(TerminalFocus::Focused);
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Blocked, None)],
+        build_wall_time(1_000),
+    );
+
+    assert_eq!(emitted_events, Vec::new());
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+    let program_status_records = fixture.list_program_status_records(fixture.build_pane_id);
+    assert_eq!(
+        program_status_records
+            .iter()
+            .map(|program_status_record| program_status_record.is_seen)
+            .collect::<Vec<_>>(),
+        [true]
+    );
+}
+
+#[test]
+fn done_and_error_reports_raise_their_reasons() {
+    for (program_status_state, expected_reason) in [
+        (
+            ProgramStatusState::Done,
+            AttentionReason::ProgramDone {
+                record_id: "deploy".to_string(),
+                message: Some("shipped".to_string()),
+            },
+        ),
+        (
+            ProgramStatusState::Error,
+            AttentionReason::ProgramFailed {
+                record_id: "deploy".to_string(),
+                message: Some("shipped".to_string()),
+            },
+        ),
+    ] {
+        let mut fixture = build_attention_fixture();
+        let read_at = build_wall_time(1_000);
+
+        let emitted_events = fixture.apply_build_pane_facts(
+            vec![build_report_fact(
+                "deploy",
+                program_status_state,
+                Some("shipped"),
+            )],
+            read_at,
+        );
+
+        assert_eq!(
+            emitted_events,
+            [build_build_pane_raised_event(
+                &fixture,
+                expected_reason,
+                read_at
+            )],
+            "{program_status_state:?}"
+        );
+    }
+}
+
+#[test]
+fn blocked_then_done_replaces_the_reason_and_keeps_the_start_of_the_wait() {
+    let raised_at = build_wall_time(1_000);
+    let mut fixture = build_fixture_with_blocked_build_pane(raised_at);
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Done, None)],
+        build_wall_time(1_240),
+    );
+
+    let expected_reason = AttentionReason::ProgramDone {
+        record_id: String::new(),
+        message: None,
+    };
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_raised_event(
+            &fixture,
+            expected_reason,
+            raised_at
+        )]
+    );
+}
+
+#[test]
+fn blocked_then_done_in_one_read_gives_one_raise_with_the_newest_reason() {
+    let mut fixture = build_attention_fixture();
+    let read_at = build_wall_time(1_000);
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![
+            build_report_fact("", ProgramStatusState::Blocked, None),
+            build_report_fact("", ProgramStatusState::Done, None),
+        ],
+        read_at,
+    );
+
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_raised_event(
+            &fixture,
+            AttentionReason::ProgramDone {
+                record_id: String::new(),
+                message: None,
+            },
+            read_at
+        )]
+    );
+}
+
+#[test]
+fn a_rewrite_of_the_waiting_record_with_a_new_message_updates_the_reason() {
+    let raised_at = build_wall_time(1_000);
+    let mut fixture = build_fixture_with_blocked_build_pane(raised_at);
+
+    let first_rewrite_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Overwrite file?"),
+        )],
+        build_wall_time(1_005),
+    );
+    let second_rewrite_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Overwrite file?"),
+        )],
+        build_wall_time(1_006),
+    );
+
+    assert_eq!(
+        first_rewrite_events,
+        [build_build_pane_raised_event(
+            &fixture,
+            build_root_blocked_reason(Some("Overwrite file?")),
+            raised_at
+        )]
+    );
+    assert_eq!(second_rewrite_events, Vec::new());
+}
+
+#[test]
+fn a_rewrite_in_the_same_state_of_a_pane_that_waits_for_nobody_raises_nothing() {
+    let mut fixture = build_attention_fixture();
+    let bob_client_id = fixture.attach_bob_to_build_pane(TerminalFocus::Focused);
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Blocked, None)],
+        build_wall_time(1_000),
+    );
+    fixture
+        .server
+        .handle_terminal_focus_change(bob_client_id, false);
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "",
+            ProgramStatusState::Blocked,
+            Some("Still waiting"),
+        )],
+        build_wall_time(1_005),
+    );
+
+    assert_eq!(emitted_events, Vec::new());
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+}
+
+#[test]
+fn a_blocked_report_on_a_pane_that_waits_on_a_bell_replaces_the_reason() {
+    let raised_at = build_wall_time(1_000);
+    let mut fixture = build_fixture_with_waiting_build_pane(raised_at);
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Blocked, None)],
+        build_wall_time(1_030),
+    );
+
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_raised_event(
+            &fixture,
+            build_root_blocked_reason(None),
+            raised_at
+        )]
+    );
+}
+
+#[test]
+fn a_change_to_another_record_that_raises_nothing_keeps_the_wait() {
+    let mut fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![
+            build_report_fact("deploy", ProgramStatusState::Working, None),
+            build_report_fact("deploy", ProgramStatusState::Idle, None),
+            ProgramFact::ProgramStatus(ProgramStatusFact::Cleared {
+                record_id: "deploy".to_string(),
+            }),
+        ],
+        build_wall_time(1_010),
+    );
+
+    assert_eq!(emitted_events, Vec::new());
+    assert_eq!(
+        fixture
+            .find_pane_attention(fixture.build_pane_id)
+            .map(|attention| attention.reason),
+        Some(build_root_blocked_reason(None))
+    );
+}
+
+#[test]
+fn a_clear_of_the_waiting_record_or_its_ancestor_ends_the_wait() {
+    for cleared_record_id in ["deploy/us-east", "deploy", ""] {
+        let mut fixture = build_attention_fixture();
+        fixture.apply_build_pane_facts(
+            vec![build_report_fact(
+                "deploy/us-east",
+                ProgramStatusState::Error,
+                None,
+            )],
+            build_wall_time(1_000),
+        );
+
+        let emitted_events = fixture.apply_build_pane_facts(
+            vec![ProgramFact::ProgramStatus(ProgramStatusFact::Cleared {
+                record_id: cleared_record_id.to_string(),
+            })],
+            build_wall_time(1_010),
+        );
+
+        assert_eq!(
+            emitted_events,
+            [build_build_pane_cleared_event(&fixture, None)],
+            "clear {cleared_record_id:?}"
+        );
+    }
+}
+
+#[test]
+fn a_prompt_start_ends_a_blocked_wait_and_keeps_a_done_wait() {
+    let mut blocked_fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+    let blocked_events = blocked_fixture.apply_build_pane_facts(
+        vec![ProgramFact::ProgramStatus(ProgramStatusFact::PromptStarted)],
+        build_wall_time(1_010),
+    );
+    assert_eq!(
+        blocked_events,
+        [build_build_pane_cleared_event(&blocked_fixture, None)]
+    );
+
+    let mut done_fixture = build_attention_fixture();
+    let done_read_at = build_wall_time(1_000);
+    done_fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Done, None)],
+        done_read_at,
+    );
+    let done_events = done_fixture.apply_build_pane_facts(
+        vec![ProgramFact::ProgramStatus(ProgramStatusFact::PromptStarted)],
+        build_wall_time(1_010),
+    );
+    assert_eq!(done_events, Vec::new());
+    assert_eq!(
+        done_fixture
+            .find_pane_attention(done_fixture.build_pane_id)
+            .map(|attention| attention.reason),
+        Some(AttentionReason::ProgramDone {
+            record_id: String::new(),
+            message: None,
+        })
+    );
+    assert_eq!(
+        done_fixture
+            .list_program_status_records(done_fixture.build_pane_id)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_terminal_reset_removes_every_record_and_ends_a_done_wait() {
+    let mut fixture = build_attention_fixture();
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Done, None)],
+        build_wall_time(1_000),
+    );
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![ProgramFact::ProgramStatus(ProgramStatusFact::TerminalReset)],
+        build_wall_time(1_010),
+    );
+
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_cleared_event(&fixture, None)]
+    );
+    assert_eq!(
+        fixture.list_program_status_records(fixture.build_pane_id),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_new_id_that_removes_the_waiting_record_as_the_oldest_ends_the_wait() {
+    let mut fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+    let working_reports = (1..PROGRAM_STATUS_RECORDS_MAX)
+        .map(|record_index| {
+            build_report_fact(
+                &format!("task-{record_index}"),
+                ProgramStatusState::Working,
+                None,
+            )
+        })
+        .collect();
+    assert_eq!(
+        fixture.apply_build_pane_facts(working_reports, build_wall_time(1_010)),
+        Vec::new()
+    );
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "task-64",
+            ProgramStatusState::Working,
+            None,
+        )],
+        build_wall_time(1_020),
+    );
+
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_cleared_event(&fixture, None)]
+    );
+}
+
+#[test]
+fn blocked_then_done_while_a_person_watches_ends_the_blocked_wait() {
+    let mut fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+    fixture.attach_bob_to_build_pane(TerminalFocus::Focused);
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Done, None)],
+        build_wall_time(1_010),
+    );
+
+    assert_eq!(
+        emitted_events,
+        [build_build_pane_cleared_event(&fixture, None)]
+    );
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+}
+
+#[test]
+fn program_done_switched_off_raises_nothing_and_keeps_the_record() {
+    let mut fixture = build_attention_fixture();
+    fixture
+        .server
+        .config
+        .attention
+        .should_raise_for_program_done = false;
+
+    let emitted_events = fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Done, None)],
+        build_wall_time(1_000),
+    );
+
+    assert_eq!(emitted_events, Vec::new());
+    assert_eq!(fixture.find_pane_attention(fixture.build_pane_id), None);
+    assert_eq!(
+        fixture
+            .list_program_status_records(fixture.build_pane_id)
+            .iter()
+            .map(|program_status_record| program_status_record.program_status_state)
+            .collect::<Vec<_>>(),
+        [ProgramStatusState::Done]
+    );
+}
+
+#[test]
+fn a_working_report_then_a_prompt_start_in_one_read_leave_no_working_record() {
+    let mut fixture = build_attention_fixture();
+
+    fixture.write_build_pane_output(
+        b"\x1b]7501;state=working:app=cargo\x1b\\\x1b]133;A\x1b\\",
+        build_wall_time(1_000),
+    );
+
+    assert_eq!(
+        fixture.list_program_status_records(fixture.build_pane_id),
+        Vec::new()
+    );
+}
+
+#[test]
+fn a_person_at_the_pane_marks_every_record_seen_and_removes_none() {
+    let mut fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact(
+            "deploy",
+            ProgramStatusState::Working,
+            None,
+        )],
+        build_wall_time(1_005),
+    );
+    let bob_client_id = fixture.attach_bob_to_build_pane(TerminalFocus::Unfocused);
+
+    fixture
+        .server
+        .handle_terminal_focus_change(bob_client_id, true);
+
+    assert_eq!(
+        fixture.take_alice_deliveries(),
+        [build_cleared_delivery(
+            fixture.build_pane_id,
+            fixture.code_tab_id,
+            Some(bob_client_id)
+        )]
+    );
+    assert_eq!(
+        fixture
+            .list_program_status_records(fixture.build_pane_id)
+            .iter()
+            .map(|program_status_record| (
+                program_status_record.record_id.as_str().to_owned(),
+                program_status_record.is_seen
+            ))
+            .collect::<Vec<_>>(),
+        [(String::new(), true), ("deploy".to_string(), true)]
+    );
+}
+
+#[test]
+fn input_into_a_pane_that_waits_for_nobody_marks_its_records_seen() {
+    let mut fixture = build_attention_fixture();
+    fixture.apply_build_pane_facts(
+        vec![build_report_fact("", ProgramStatusState::Working, None)],
+        build_wall_time(1_000),
+    );
+    let bob_client_id = fixture.attach_bob_to_build_pane(TerminalFocus::Unfocused);
+    fixture.take_alice_deliveries();
+
+    fixture
+        .server
+        .clear_attended_pane_attention(bob_client_id, fixture.build_pane_id);
+
+    assert_eq!(fixture.take_alice_deliveries(), Vec::new());
+    assert_eq!(
+        fixture
+            .list_program_status_records(fixture.build_pane_id)
+            .iter()
+            .map(|program_status_record| program_status_record.is_seen)
+            .collect::<Vec<_>>(),
+        [true]
+    );
+}
+
+#[test]
+fn a_child_exit_removes_the_pane_with_its_records_and_its_wait() {
+    let mut fixture = build_fixture_with_blocked_build_pane(build_wall_time(1_000));
+
+    let _ = fixture
+        .server
+        .handle_child_exit(fixture.build_pane_id, ExitStatus::ExitCode(0));
+
+    assert_eq!(
+        fixture.server.session_by_id[&fixture.session_id]
+            .panes
+            .get_pane_record_by_id(fixture.build_pane_id),
+        None
     );
 }

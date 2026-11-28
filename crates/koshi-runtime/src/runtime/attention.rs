@@ -1,7 +1,8 @@
 //! Pane attention in the session server: the facts that make a pane wait for
 //! a person, and the acts that end the wait (`PaneRecord::attention`).
 //!
-//! A pane's bell, desktop notification, or finished command raises attention
+//! A pane's bell, desktop notification, finished command, or program status
+//! record that moves into `blocked`, `done` or `error` raises attention
 //! ([`Server::apply_program_facts`]). The signal is dropped when its kind is
 //! switched off in `koshi.kdl`, when a finished command ran for less than
 //! [`MIN_ATTENTION_COMMAND_SECONDS`], and when a client whose terminal
@@ -13,9 +14,11 @@
 //! exists ([`Server::clear_attention_on_focus_landing`]), its terminal reports
 //! `CSI I` while the pane takes its input
 //! ([`Server::handle_terminal_focus_change`]), or its key, paste or mouse
-//! report reaches the pane ([`Server::clear_attended_pane_attention`]). The
+//! report reaches the pane ([`Server::clear_attended_pane_attention`]). Each
+//! of the three also marks every program status record of the pane seen. The
 //! fourth comes from the program: `OSC 99 ; i=<id> : p=close` for the
-//! notification that set the reason.
+//! notification that set the reason, or the program status record that
+//! raised the reason leaving the state that raised it.
 //!
 //! Example: `cargo test` runs for 12 seconds in pane 3 while Alice reads tab
 //! 2, and fails with exit code `101`. Pane 3 waits with
@@ -33,8 +36,9 @@ use koshi_core::event::{
 use koshi_core::ids::{ClientId, PaneId};
 use koshi_session::client::TerminalFocus;
 use koshi_terminal::engine::TimedProgramFact;
-use koshi_terminal::state::ProgramFact;
+use koshi_terminal::state::{ProgramFact, ProgramStatusFact};
 
+use crate::runtime::program_status::apply_program_status_fact;
 use crate::server::Server;
 
 impl Server {
@@ -57,7 +61,8 @@ impl Server {
     ///   id when it has one.
     /// - `NotificationWithdrawn` ends the wait whose withdrawable id it names.
     ///   Another id ends nothing.
-    /// - `ProgramStatus` changes nothing and gives no event.
+    /// - `ProgramStatus` changes the pane's program status records and can
+    ///   raise or end the wait ([`Self::apply_pane_program_status_fact`]).
     ///
     /// A raise is dropped when `koshi.kdl` switches its kind off
     /// (`AttentionConfig::should_raise_for`), and every raise is dropped when
@@ -151,11 +156,93 @@ impl Server {
                 ProgramFact::NotificationWithdrawn { notification_id } => {
                     self.withdraw_pane_notification(pane_id, &notification_id);
                 }
-                ProgramFact::ProgramStatus(_) => {}
+                ProgramFact::ProgramStatus(program_status_fact) => {
+                    self.apply_pane_program_status_fact(
+                        pane_id,
+                        program_status_fact,
+                        read_at,
+                        is_pane_watched,
+                    );
+                }
             }
         }
         emitted_events.extend(self.report_pane_attention_change(pane_id, attention_before));
         emitted_events
+    }
+
+    /// Apply `program_status_fact`, read at `read_at`, to `pane_id`'s program
+    /// status records ([`apply_program_status_fact`]). A reported record takes
+    /// `is_seen: is_pane_watched`. The reason the fact raises makes the pane
+    /// wait ([`Self::raise_pane_attention`]) unless `is_pane_watched`. Then the
+    /// wait ends when its reason is a program status reason whose record no
+    /// longer holds the state that raised it: a report into another state, a
+    /// `clear`, a prompt start, a RIS, or the removal of the record written
+    /// longest ago. A pane no session holds changes nothing.
+    ///
+    /// Example: pane 5 waits on `ProgramBlocked { record_id: "", .. }`, and its
+    /// program reports `state=working`. The root record becomes `working` and
+    /// pane 5 waits for nobody.
+    fn apply_pane_program_status_fact(
+        &mut self,
+        pane_id: PaneId,
+        program_status_fact: ProgramStatusFact,
+        read_at: SystemTime,
+        is_pane_watched: bool,
+    ) {
+        let Some(pane_record) = self
+            .get_session_for_pane_mut(pane_id)
+            .and_then(|session| session.panes.get_pane_record_mut_by_id(pane_id))
+        else {
+            return;
+        };
+        let outstanding_reason = pane_record
+            .attention
+            .as_ref()
+            .map(|attention| &attention.reason);
+        let raised_reason = apply_program_status_fact(
+            &mut pane_record.program_status_records,
+            program_status_fact,
+            read_at,
+            is_pane_watched,
+            outstanding_reason,
+        );
+        if let Some(raised_reason) = raised_reason {
+            if !is_pane_watched {
+                self.raise_pane_attention(pane_id, raised_reason, None, read_at);
+            }
+        }
+        self.withdraw_settled_program_status_attention(pane_id);
+    }
+
+    /// End `pane_id`'s wait when its reason is a program status reason and the
+    /// pane holds no record with the reason's id in the state that raised it.
+    /// Every other wait, and a pane that waits for nobody, stays as it is.
+    fn withdraw_settled_program_status_attention(&mut self, pane_id: PaneId) {
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
+            return;
+        };
+        let Some(pane_record) = session.panes.get_pane_record_by_id(pane_id) else {
+            return;
+        };
+        let Some((raising_record_id, raising_program_status_state)) = pane_record
+            .attention
+            .as_ref()
+            .and_then(|attention| attention.reason.find_raising_program_status_record())
+        else {
+            return;
+        };
+        let is_reason_standing =
+            pane_record
+                .program_status_records
+                .iter()
+                .any(|program_status_record| {
+                    program_status_record.record_id == raising_record_id
+                        && program_status_record.program_status_state
+                            == raising_program_status_state
+                });
+        if !is_reason_standing {
+            session.set_pane_attention(pane_id, None);
+        }
     }
 
     /// What `pane_id` waits for, or `None` for a pane that waits for nobody
@@ -283,34 +370,32 @@ impl Server {
         }))
     }
 
-    /// End `pane_id`'s wait. `client_id` is the client that attended the
-    /// pane, or `None` when the program withdrew its notification. Returns the
-    /// [`Event::PaneAttentionCleared`] naming `client_id`, and `None` for a
-    /// pane that waits for nobody or that no session holds.
-    fn clear_pane_attention(
-        &mut self,
-        pane_id: PaneId,
-        client_id: Option<ClientId>,
-    ) -> Option<Event> {
-        let session = self.get_session_for_pane_mut(pane_id)?;
-        session.set_pane_attention(pane_id, None)?;
+    /// Record that `client_id` attended `pane_id`: every program status record
+    /// of the pane reads `is_seen: true` and stays, and the pane's wait ends
+    /// with one published [`Event::PaneAttentionCleared`] naming `client_id`.
+    /// A pane that waits for nobody publishes nothing, and a pane no session
+    /// holds changes nothing.
+    pub(crate) fn clear_attended_pane_attention(&mut self, client_id: ClientId, pane_id: PaneId) {
+        let Some(session) = self.get_session_for_pane_mut(pane_id) else {
+            return;
+        };
+        if let Some(pane_record) = session.panes.get_pane_record_mut_by_id(pane_id) {
+            for program_status_record in &mut pane_record.program_status_records {
+                program_status_record.is_seen = true;
+            }
+        }
+        if session.set_pane_attention(pane_id, None).is_none() {
+            return;
+        }
         let tab_id = session
             .find_tab_by_pane_id(pane_id)
             .map(|tab| tab.get_tab_id());
-        Some(Event::PaneAttentionCleared(PaneAttentionCleared {
+        let cleared_event = Event::PaneAttentionCleared(PaneAttentionCleared {
             pane_id,
             tab_id,
-            client_id,
-        }))
-    }
-
-    /// End `pane_id`'s wait because `client_id` attended it, and publish the
-    /// [`Event::PaneAttentionCleared`] naming `client_id`. A pane that waits
-    /// for nobody publishes nothing.
-    pub(crate) fn clear_attended_pane_attention(&mut self, client_id: ClientId, pane_id: PaneId) {
-        if let Some(cleared_event) = self.clear_pane_attention(pane_id, Some(client_id)) {
-            self.publish_events(&[cleared_event]);
-        }
+            client_id: Some(client_id),
+        });
+        self.publish_events(&[cleared_event]);
     }
 
     /// The pane that takes `client_id`'s input

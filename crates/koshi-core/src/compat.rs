@@ -174,6 +174,14 @@ pub struct Surface {
 /// - Each pane of a `Discovery` answer carries `attention`: the reason kind
 ///   and the start of the pane's wait for a person, or `null`. A row without
 ///   it fails to decode. 5 has no such field.
+/// - The reason of a `PaneAttentionRaised` and the reason kind of a
+///   `Discovery` pane's `attention` can be `ProgramBlocked`, `ProgramDone` or
+///   `ProgramFailed`: a program status record of the pane moved into
+///   `blocked`, `done` or `error`. 5 has none of the three.
+/// - Each pane of a `Discovery` answer carries `program_status`: the state,
+///   the blocked kind, the progress and the app name of the pane's root
+///   program status record, or `null`. A row without it fails to decode. 5
+///   has no such field.
 ///
 /// A restart request the session reads and refuses is answered with the
 /// `RequestFailed` code and a sentence naming what stopped the restart. A
@@ -331,7 +339,9 @@ pub const REMOTE_ACCESS_RECORD_FORMAT: Surface = Surface {
 /// empty map. Each saved view record holds `connection_token_hashes`, where
 /// format 5 held one `connection_token_hash`. Each pane record holds
 /// `attention`, what the pane last asked a person to look at and since when,
-/// and a format 5 pane record takes `null`. A pane's terminal state holds no
+/// and a format 5 pane record takes `null`. Each pane record holds
+/// `program_status_records`, the OSC 7501 records its programs reported, and
+/// a format 5 pane record takes `[]`. A pane's terminal state holds no
 /// device query reply and no shell-integration fact: a pane of format 5 or
 /// older drops the ones it held. A pane's open synchronized-output group holds
 /// `held_chunk_read_times`, the wall time koshi read each chunk among its

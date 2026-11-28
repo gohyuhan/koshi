@@ -23,6 +23,7 @@ use crate::client::ClientOrigin;
 use crate::geometry::{PaneArea, Size};
 use crate::ids::{ClientId, LayoutAreaId, PaneId, SessionId, TabId};
 use crate::lock::LockMode;
+use crate::program_status::{BlockedKind, ProgramStatusState};
 
 /// One session, as `inspect session` reports it and `list-sessions` rows
 /// are drawn from.
@@ -95,6 +96,32 @@ pub struct PaneDiscovery {
     /// A row without `attention` is refused.
     #[serde(deserialize_with = "Option::deserialize")]
     pub attention: Option<PaneAttentionDiscovery>,
+    /// The pane's root program status record, or `None` for a pane that holds
+    /// no root record. A row without `program_status` is refused.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub program_status: Option<PaneProgramStatusDiscovery>,
+}
+
+/// A pane's root program status record, as `list-panes` reports it: the
+/// state, the blocked kind, the progress and the app name, and no title and
+/// no message. A root record `state=blocked:kind=question:app=codex` reports
+/// `{ program_status_state: Blocked, blocked_kind: Some(Question),
+/// progress_percent: None, app_name: Some("codex") }`.
+///
+/// A message without one of the `Option` fields is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneProgramStatusDiscovery {
+    /// The state the record holds.
+    pub program_status_state: ProgramStatusState,
+    /// What the blocked program needs, or `None`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub blocked_kind: Option<BlockedKind>,
+    /// 0 to 100, or `None` when the work is indeterminate.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub progress_percent: Option<u8>,
+    /// The record's own app name, such as `cargo`, or `None`.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub app_name: Option<String>,
 }
 
 /// A pane's wait for a person, as `list-panes` reports it: the kind of

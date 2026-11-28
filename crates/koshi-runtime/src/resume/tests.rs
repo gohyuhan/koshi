@@ -36,6 +36,7 @@ use koshi_core::geometry::{
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, TabId};
 use koshi_core::notification::{NotificationQueueOwner, NotificationSeverity};
 use koshi_core::process::{ExitStatus, KillPolicy, PtySize, SpawnSpec};
+use koshi_core::program_status::{ProgramStatusRecord, ProgramStatusState};
 use koshi_ipc::protocol::ConnectionToken;
 use koshi_layout::content::find_content_rect;
 use koshi_layout::solver::solve_layout_with_sizing;
@@ -1887,6 +1888,12 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
         waiting_raised_at,
         Instant::now(),
     );
+    populated_server.server.handle_pty_output(
+        waiting_pane_id,
+        b"\x1b]7501;state=working:app=cargo\x1b\\",
+        waiting_raised_at,
+        Instant::now(),
+    );
     let expected_tabs = populated_server.server.session_by_id[&session_id]
         .tabs
         .clone();
@@ -1962,6 +1969,24 @@ fn a_carried_session_reads_back_with_every_tab_pane_client_and_screen() {
             withdrawable_notification_id: None,
         }),
         "a waiting pane keeps its reason and raise time across the swap"
+    );
+    assert_eq!(
+        session
+            .panes
+            .get_pane_record_by_id(waiting_pane_id)
+            .map(|pane_record| pane_record.program_status_records.clone()),
+        Some(vec![ProgramStatusRecord {
+            record_id: String::new(),
+            program_status_state: ProgramStatusState::Working,
+            blocked_kind: None,
+            progress_percent: None,
+            app_name: Some("cargo".to_string()),
+            title: None,
+            message: None,
+            is_seen: false,
+            updated_at: waiting_raised_at,
+        }]),
+        "a pane keeps its program status records and their seen flags across the swap"
     );
     assert_eq!(
         session.clients.count_clients(),

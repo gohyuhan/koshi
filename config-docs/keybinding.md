@@ -113,7 +113,9 @@ center.
 ## Full example
 
 Complete built-in keymap. `<leader>` bindings follow the configured leader.
-`<C-l>`, `<A-f>`, `<A-n>`, Tab, and Shift+Tab stay fixed.
+`<C-l>`, `<A-f>`, `<A-n>`, Tab, and Shift+Tab stay fixed. `unlock-alternative`
+and `remove` are commented out: by default, koshi has no alternative unlock
+chord and removes no key.
 
 ```kdl
 // keybinding.kdl — the complete default keymap.
@@ -164,6 +166,8 @@ mode "normal" {
     bind "<A-n>" "core:toggle-notification-center"
     bind "<Tab>" "core:next-tab"
     bind "<S-Tab>" "core:previous-tab"
+
+    // remove "<A-f>"            // voids a key in this mode; the default keymap removes no key
 }
 
 mode "locked" {
@@ -325,6 +329,36 @@ action to another key rejects the keymap. The same rule holds for
 `<leader>p m` opens the mode, then `<Right>` selects a destination instead of
 running `core:focus-pane-right`. A normal-mode binding for `<leader>p
 <Right>` still applies before placement opens.
+
+### Drag a pane by its grab handle
+
+When the pointer is over the top border of a pane, the pane shows its grab
+handle `⠿⠿⠿` beside its top-left corner. In normal or locked mode, a drag of
+the handle onto another pane swaps the two panes. After the drop, the client
+stays in normal or locked mode, and typed keys go to the same pane as before
+the drag.
+
+In pane placement mode, a drag of a pane onto another pane also swaps them. To
+insert the pane instead, press `<C-p> m`, wait for `PLACE PANE` in the
+tabline, and hold Shift when the drag starts. While the mode is open, koshi
+asks the outer terminal to send mouse events that carry Shift. A terminal that
+accepts the request sends Shift with the drag. Another terminal can keep Shift
+for its own text selection. Shift+Arrow selects an insertion edge without a
+mouse.
+
+Outside pane placement mode, Shift+drag over pane content selects text, and
+Shift on a grab handle does not open pane placement mode.
+
+### What the placement preview shows
+
+The preview dims each visible pane that the placement changes. The moving pane
+and the destination have different tints. A centered message names the moving
+pane and tells what happens to each changed pane or group. Each message stays
+inside visible pane content and clear of every visible stack header. A
+collapsed stack header keeps its title and its position, and takes the tint of
+its role. A group shows its message in an uncovered area of one visible
+destination pane. When panes overlap during a slide, the tint of the moving
+pane is on top.
 
 ## Float and dock a pane
 

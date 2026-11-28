@@ -581,6 +581,12 @@ pub struct PartialAttentionConfig {
     pub should_raise_for_notify: Option<bool>,
     /// Whether a finished command raises attention.
     pub should_raise_for_command_finished: Option<bool>,
+    /// Whether a program status record moving into `blocked` raises attention.
+    pub should_raise_for_program_blocked: Option<bool>,
+    /// Whether a program status record moving into `done` raises attention.
+    pub should_raise_for_program_done: Option<bool>,
+    /// Whether a program status record moving into `error` raises attention.
+    pub should_raise_for_program_failed: Option<bool>,
 }
 
 impl PartialAttentionConfig {
@@ -596,6 +602,18 @@ impl PartialAttentionConfig {
         merge_override_field(
             &mut attention_config.should_raise_for_command_finished,
             self.should_raise_for_command_finished,
+        );
+        merge_override_field(
+            &mut attention_config.should_raise_for_program_blocked,
+            self.should_raise_for_program_blocked,
+        );
+        merge_override_field(
+            &mut attention_config.should_raise_for_program_done,
+            self.should_raise_for_program_done,
+        );
+        merge_override_field(
+            &mut attention_config.should_raise_for_program_failed,
+            self.should_raise_for_program_failed,
         );
     }
 }

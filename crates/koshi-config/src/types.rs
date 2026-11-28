@@ -143,6 +143,15 @@ pub struct AttentionConfig {
     /// [`MIN_ATTENTION_COMMAND_SECONDS`](koshi_core::attention::MIN_ATTENTION_COMMAND_SECONDS)
     /// or more raises attention when it finishes: the `command-finished` key.
     pub should_raise_for_command_finished: bool,
+    /// Whether an OSC 7501 record that moves into `blocked` raises attention:
+    /// the `program-blocked` key.
+    pub should_raise_for_program_blocked: bool,
+    /// Whether an OSC 7501 record that moves into `done` raises attention: the
+    /// `program-done` key.
+    pub should_raise_for_program_done: bool,
+    /// Whether an OSC 7501 record that moves into `error` raises attention:
+    /// the `program-failed` key.
+    pub should_raise_for_program_failed: bool,
 }
 
 impl Default for AttentionConfig {
@@ -151,6 +160,9 @@ impl Default for AttentionConfig {
             should_raise_for_bell: true,
             should_raise_for_notify: true,
             should_raise_for_command_finished: true,
+            should_raise_for_program_blocked: true,
+            should_raise_for_program_done: true,
+            should_raise_for_program_failed: true,
         }
     }
 }
@@ -165,6 +177,9 @@ impl AttentionConfig {
             AttentionReasonKind::Bell => self.should_raise_for_bell,
             AttentionReasonKind::Notify => self.should_raise_for_notify,
             AttentionReasonKind::CommandFinished => self.should_raise_for_command_finished,
+            AttentionReasonKind::ProgramBlocked => self.should_raise_for_program_blocked,
+            AttentionReasonKind::ProgramDone => self.should_raise_for_program_done,
+            AttentionReasonKind::ProgramFailed => self.should_raise_for_program_failed,
         }
     }
 }
