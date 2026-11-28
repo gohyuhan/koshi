@@ -19,7 +19,7 @@ use koshi_core::attention::AttentionReasonKind;
 use koshi_core::geometry::Direction;
 use koshi_core::geometry::{Point, Size};
 use koshi_core::ids::PaneId;
-use koshi_core::ids::TabId;
+use koshi_core::ids::{CommandId, TabId};
 use koshi_core::key::{
     BindingModifierFlags, Key, KeyChord, KeySequence, NamedKey, PendingKeySequence,
 };
@@ -37,7 +37,7 @@ use crate::mouse::tests::{
     build_render_snapshot_from_mouse_frame,
 };
 use crate::tests::{build_core_fired_action, build_input_read_stamp, TEST_VIEWPORT_SIZE};
-use crate::{LinkStatus, PaneMoveMode, PlacementInputAction, PlacementMode};
+use crate::{LinkStatus, PaneMoveMode, PlacementInputAction, PlacementMode, PlacementModeLifetime};
 
 /// A cell of the open center's body below its cards.
 const CENTER_BODY_CELL: Point = Point {
@@ -1553,7 +1553,7 @@ fn a_left_press_on_the_toast_focus_control_returns_a_focus_pane_for_its_pane() {
 
 #[test]
 fn a_press_on_the_toast_focus_control_sends_nothing_without_a_link_or_while_a_layout_mode_is_on() {
-    let set_ups: [fn(&mut Client); 3] = [
+    let set_ups: [fn(&mut Client); 4] = [
         |client| {
             client.set_link_status(LinkStatus::Redialing(Reconnecting {
                 attempt: 1,
@@ -1570,6 +1570,18 @@ fn a_press_on_the_toast_focus_control_sends_nothing_without_a_link_or_while_a_la
                 placement_target: None,
                 pending_placement_command_id: None,
             });
+        },
+        |client| {
+            client.placement_state.placement_mode = Some(PlacementMode {
+                source_pane_id: PaneId::new(),
+                source_tab_id: None,
+                destination_tab_id: TabId::new(),
+                placement_direction: Direction::Right,
+                placement_target: None,
+                pending_placement_command_id: Some(CommandId::new()),
+            });
+            client.placement_state.placement_mode_lifetime = PlacementModeLifetime::UntilDragEnds;
+            assert!(!client.is_placement_mode_active());
         },
     ];
     for (set_up_index, set_up) in set_ups.into_iter().enumerate() {

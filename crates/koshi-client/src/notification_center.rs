@@ -382,8 +382,10 @@ impl Client {
     ///   ([`NotificationHistory::find_toast_focus_pane_id`](crate::notification_history::NotificationHistory::find_toast_focus_pane_id)),
     ///   after it closes the floating pane tray while the tray is open. It
     ///   returns nothing while the session no longer holds the pane, while the
-    ///   viewer is not [`LinkStatus::Linked`], and while pane placement mode,
-    ///   the move chooser or floating pane move mode is on.
+    ///   viewer is not [`LinkStatus::Linked`], while pane placement mode is on
+    ///   or a submitted placement waits for the session's answer
+    ///   ([`is_pane_placement_visible`](Self::is_pane_placement_visible)), and
+    ///   while the move chooser or floating pane move mode is on.
     ///
     /// Any press on either control is consumed. Returns `None` for every
     /// other event, which takes the next mouse path.
@@ -420,7 +422,7 @@ impl Client {
             return Some(Vec::new());
         }
         let is_layout_input_mode_on =
-            self.is_placement_mode_active() || self.pane_move_mode.is_some();
+            self.is_pane_placement_visible() || self.pane_move_mode.is_some();
         if self.link_status != LinkStatus::Linked || is_layout_input_mode_on {
             return Some(Vec::new());
         }

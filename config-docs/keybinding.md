@@ -688,8 +688,8 @@ slides it out at once, and its notification stays in the center. A toast
 about a pane that the session holds shows ` ↗ ` left of ` ✕ `. A click on
 ` ↗ ` takes this client to that pane, and closes the floating pane tray first
 when the tray is open. The click does nothing while pane placement, the move
-chooser or floating pane move mode is on, and while the link to the session
-is lost. A click on ` ↗ ` that lands this client's input on a waiting pane
+chooser or floating pane move mode is on, while a placement waits for the
+session's answer, and while the link to the session is lost. A click on ` ↗ ` that lands this client's input on a waiting pane
 ends the wait, as any other click does. Opening the
 center removes every toast. A notification that arrives while the center is
 open shows no toast.
