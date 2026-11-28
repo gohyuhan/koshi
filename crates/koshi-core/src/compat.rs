@@ -167,6 +167,11 @@ pub struct Surface {
 /// - The session's event stream carries `PaneAttentionRaised` and
 ///   `PaneAttentionCleared`: a pane that began or stopped waiting for a
 ///   person. 5 has neither event.
+/// - The session's event stream carries `PaneRemoved` with the `pane_id` of
+///   a pane that closed. 5 has no such event.
+/// - The `Attached` answer and the `Resync` event carry `held_panes`: every
+///   pane the session holds, each with its `pane_id` and `is_waiting`. An
+///   answer or a `Resync` without it fails to decode. 5 has no such field.
 /// - A painted frame says which panes wait for a person: the session carries
 ///   `waiting_pane_count`, each tab entry `has_waiting_pane`, each pane
 ///   `is_waiting`, and each minimized floating pane `is_waiting`. A frame

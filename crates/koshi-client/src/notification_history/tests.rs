@@ -1,7 +1,9 @@
 //! Tests for `NotificationHistory`: the viewer's own posts, the session's
 //! queue and posts, stale and foreign input, the history bound, the unread
 //! and dropped counts, clearing, the center's state, its selected card and
-//! its slide, and the toast previews arrivals queue.
+//! its slide, and the toast previews arrivals queue: none for a pane the
+//! frame draws or a pane a queue lists as waiting no more, and a withdraw for
+//! a pane that stops waiting or closes.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -177,7 +179,7 @@ fn an_own_repeat_moves_to_the_newest_place() {
     );
     post_to_session(&mut session_queue, "pane …a1b2 exited 101");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     notification_history.post_core_entry(
@@ -205,7 +207,7 @@ fn a_session_queue_adds_its_entries_oldest_first() {
     post_to_session(&mut session_queue, "second");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     assert_eq!(
@@ -220,11 +222,11 @@ fn a_resync_of_entries_already_held_adds_nothing() {
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "first");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue again");
 
     assert_eq!(
@@ -238,16 +240,16 @@ fn posts_at_the_last_sequence_saturate_the_dropped_count() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
     let (session_id, mut session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     let (revision, mut last_entry) = post_to_session(&mut session_queue, "last");
     last_entry.notification_id.sequence = u64::MAX;
 
     notification_history
-        .take_session_post(revision, last_entry.clone(), true)
+        .take_session_post(revision, last_entry.clone(), &|_| false, true)
         .expect("take the post at the last sequence");
     notification_history
-        .take_session_post(revision + 1, last_entry, true)
+        .take_session_post(revision + 1, last_entry, &|_| false, true)
         .expect("take the post at the last sequence again");
 
     assert_eq!(
@@ -267,17 +269,17 @@ fn a_viewer_that_missed_posts_holds_every_entry_after_a_resync() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
     let (session_id, mut session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     let (revision, first_entry) = post_to_session(&mut session_queue, "first");
     notification_history
-        .take_session_post(revision, first_entry, true)
+        .take_session_post(revision, first_entry, &|_| false, true)
         .expect("take the first post");
     post_to_session(&mut session_queue, "second");
     post_to_session(&mut session_queue, "third");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     assert_eq!(
@@ -296,7 +298,7 @@ fn a_session_post_merged_into_a_held_entry_replaces_it_at_the_newest_place() {
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "a");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     notification_history.post_core_entry(
         NotificationSeverity::Info,
@@ -308,7 +310,7 @@ fn a_session_post_merged_into_a_held_entry_replaces_it_at_the_newest_place() {
 
     let (revision, merged_entry) = post_to_session(&mut session_queue, "a");
     notification_history
-        .take_session_post(revision, merged_entry, true)
+        .take_session_post(revision, merged_entry, &|_| false, true)
         .expect("take the post");
 
     assert_eq!(
@@ -325,11 +327,11 @@ fn a_queue_older_than_the_one_taken_is_left_untaken() {
     let older_queue = session_queue.clone();
     post_to_session(&mut session_queue, "first");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the newer queue");
 
     notification_history
-        .take_session_queue(session_id, &older_queue, true)
+        .take_session_queue(session_id, &older_queue, &[], &|_| false, true)
         .expect("leave the older queue");
 
     assert_eq!(
@@ -345,13 +347,13 @@ fn a_post_not_above_the_revision_taken_is_dropped() {
     let (revision, stale_entry) = post_to_session(&mut session_queue, "stale");
     post_to_session(&mut session_queue, "kept");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     let mut changed_entry = stale_entry;
     changed_entry.repeat_count = 9;
 
     notification_history
-        .take_session_post(revision, changed_entry, true)
+        .take_session_post(revision, changed_entry, &|_| false, true)
         .expect("drop the stale post");
 
     assert_eq!(
@@ -367,11 +369,11 @@ fn a_post_above_the_revision_taken_that_carries_an_older_entry_changes_no_entry(
     let (_, older_entry) = post_to_session(&mut session_queue, "older");
     let (revision, _) = post_to_session(&mut session_queue, "newer");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     notification_history
-        .take_session_post(revision + 1, older_entry, true)
+        .take_session_post(revision + 1, older_entry, &|_| false, true)
         .expect("take the post");
 
     assert_eq!(
@@ -387,14 +389,14 @@ fn a_queue_of_a_new_epoch_keeps_every_entry_held() {
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "before the restart");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the first epoch");
     let mut restarted_queue =
         NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
     post_to_session(&mut restarted_queue, "after the restart");
 
     notification_history
-        .take_session_queue(session_id, &restarted_queue, true)
+        .take_session_queue(session_id, &restarted_queue, &[], &|_| false, true)
         .expect("take the new epoch");
 
     assert_eq!(
@@ -406,7 +408,7 @@ fn a_queue_of_a_new_epoch_keeps_every_entry_held() {
     );
     let (revision, posted_entry) = post_to_session(&mut restarted_queue, "posted in the new epoch");
     notification_history
-        .take_session_post(revision, posted_entry, true)
+        .take_session_post(revision, posted_entry, &|_| false, true)
         .expect("take a post of the new epoch");
     assert_eq!(notification_history.list_merged_entries().count(), 3);
 }
@@ -425,7 +427,7 @@ fn an_entry_of_the_own_queue_and_one_of_the_session_queue_never_collide() {
     post_to_session(&mut session_queue, "same");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     let sequences: Vec<u64> = notification_history
@@ -441,7 +443,13 @@ fn a_queue_of_another_session_is_refused() {
     let (_, mut other_queue) = create_session_queue();
     post_to_session(&mut other_queue, "elsewhere");
 
-    let take_result = notification_history.take_session_queue(SessionId::new(), &other_queue, true);
+    let take_result = notification_history.take_session_queue(
+        SessionId::new(),
+        &other_queue,
+        &[],
+        &|_| false,
+        true,
+    );
 
     assert_eq!(
         take_result,
@@ -464,7 +472,8 @@ fn a_queue_that_fails_its_own_check_is_refused() {
     let forged_queue: NotificationQueue =
         serde_json::from_value(forged_queue_json).expect("decode");
 
-    let take_result = notification_history.take_session_queue(session_id, &forged_queue, true);
+    let take_result =
+        notification_history.take_session_queue(session_id, &forged_queue, &[], &|_| false, true);
 
     assert_eq!(
         take_result,
@@ -484,7 +493,8 @@ fn a_post_before_any_queue_is_refused() {
     let (revision, posted_entry) = post_to_session(&mut session_queue, "a");
     let posted_id = posted_entry.notification_id;
 
-    let take_result = notification_history.take_session_post(revision, posted_entry, true);
+    let take_result =
+        notification_history.take_session_post(revision, posted_entry, &|_| false, true);
 
     assert_eq!(
         take_result,
@@ -499,14 +509,15 @@ fn a_post_of_another_epoch_is_refused() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
     let (session_id, session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     let mut other_epoch_queue =
         NotificationQueue::from_owner(NotificationQueueOwner::Session(session_id));
     let (revision, posted_entry) = post_to_session(&mut other_epoch_queue, "a");
     let posted_id = posted_entry.notification_id;
 
-    let take_result = notification_history.take_session_post(revision, posted_entry, true);
+    let take_result =
+        notification_history.take_session_post(revision, posted_entry, &|_| false, true);
 
     assert_eq!(
         take_result,
@@ -549,7 +560,7 @@ fn a_session_entry_the_history_evicted_does_not_come_back_with_a_resync() {
     post_to_session(&mut session_queue, "session entry");
     post_to_session(&mut session_queue, "newest session entry");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     for posted_entry_index in 0..(MAX_MERGED_NOTIFICATION_COUNT - 1) {
         notification_history.post_core_entry(
@@ -562,7 +573,7 @@ fn a_session_entry_the_history_evicted_does_not_come_back_with_a_resync() {
     }
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     let texts = list_merged_texts_with_repeat_counts(&notification_history);
@@ -583,7 +594,7 @@ fn a_repeat_of_an_evicted_entry_that_a_resync_carries_comes_back() {
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "repeated");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     for posted_entry_index in 0..MAX_MERGED_NOTIFICATION_COUNT {
         notification_history.post_core_entry(
@@ -597,7 +608,7 @@ fn a_repeat_of_an_evicted_entry_that_a_resync_carries_comes_back() {
     post_to_session(&mut session_queue, "repeated");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     assert_eq!(
@@ -612,7 +623,7 @@ fn a_repeat_of_a_held_entry_that_a_resync_carries_moves_to_the_newest_place_as_u
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "repeated");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     notification_history.post_core_entry(
         NotificationSeverity::Info,
@@ -626,7 +637,7 @@ fn a_repeat_of_a_held_entry_that_a_resync_carries_moves_to_the_newest_place_as_u
     post_to_session(&mut session_queue, "repeated");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     let newest_entry = get_newest_entry(&notification_history);
@@ -656,7 +667,7 @@ fn a_post_that_takes_the_place_of_a_held_entry_replaces_its_text_in_one_card() {
         )
         .clone();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     let returning_client_id = ClientId::new();
     let reconnected_entry = session_queue
@@ -673,6 +684,7 @@ fn a_post_that_takes_the_place_of_a_held_entry_replaces_its_text_in_one_card() {
         .take_session_post(
             session_queue.get_revision(),
             reconnected_entry.clone(),
+            &|_| false,
             true,
         )
         .expect("take the post");
@@ -697,7 +709,7 @@ fn a_repeat_of_a_held_entry_in_a_full_history_evicts_nothing() {
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "repeated");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     for own_entry_index in 0..(MAX_MERGED_NOTIFICATION_COUNT - 1) {
         notification_history.post_core_entry(
@@ -711,7 +723,7 @@ fn a_repeat_of_a_held_entry_in_a_full_history_evicts_nothing() {
     post_to_session(&mut session_queue, "repeated");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     let texts = list_merged_texts_with_repeat_counts(&notification_history);
@@ -733,7 +745,7 @@ fn a_repeat_of_a_held_entry_that_a_resync_carries_while_the_center_is_open_moves
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "repeated");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     notification_history.post_core_entry(
         NotificationSeverity::Info,
@@ -746,7 +758,7 @@ fn a_repeat_of_a_held_entry_that_a_resync_carries_while_the_center_is_open_moves
     post_to_session(&mut session_queue, "repeated");
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     assert_eq!(
@@ -770,13 +782,13 @@ fn a_received_text_loses_refused_characters_and_is_cut_to_its_bound() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
     let (session_id, mut session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     let (revision, mut posted_entry) = post_to_session(&mut session_queue, "a");
     posted_entry.text = format!("\u{1b}]52;c;{}", "a".repeat(5000));
 
     notification_history
-        .take_session_post(revision, posted_entry, true)
+        .take_session_post(revision, posted_entry, &|_| false, true)
         .expect("take the post");
 
     let held_text = &notification_history
@@ -907,7 +919,7 @@ fn a_local_session_queue_holding_the_viewers_warning_replaces_the_viewers_entry(
 
     notification_history.set_session_local(true);
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("the queue is taken");
 
     assert_eq!(
@@ -942,7 +954,7 @@ fn a_local_viewer_posts_nothing_the_session_already_posted() {
         compute_time_after_unix_epoch(1),
     );
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("the queue is taken");
 
     notification_history.post_core_entry(
@@ -984,7 +996,7 @@ fn a_local_session_post_of_the_viewers_warning_replaces_the_viewers_entry() {
     notification_history.set_session_local(true);
     let (session_id, mut session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("the empty queue is taken");
     notification_history.post_core_entry(
         NotificationSeverity::Warning,
@@ -1004,7 +1016,7 @@ fn a_local_session_post_of_the_viewers_warning_replaces_the_viewers_entry() {
         .clone();
 
     notification_history
-        .take_session_post(session_queue.get_revision(), posted_entry, true)
+        .take_session_post(session_queue.get_revision(), posted_entry, &|_| false, true)
         .expect("the post is taken");
 
     assert_eq!(
@@ -1038,7 +1050,7 @@ fn a_remote_session_and_its_viewer_each_keep_their_own_warning() {
     );
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("the queue is taken");
     notification_history.post_core_entry(
         NotificationSeverity::Warning,
@@ -1246,7 +1258,7 @@ fn a_first_queue_that_starts_past_sequence_zero_counts_the_entries_before_it_as_
     }
 
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     assert_eq!(
@@ -1269,14 +1281,14 @@ fn a_post_that_skips_sequences_counts_them_as_dropped() {
     let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
     let (session_id, mut session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the empty queue");
     post_to_session(&mut session_queue, "missed 0");
     post_to_session(&mut session_queue, "missed 1");
     let (revision, posted_entry) = post_to_session(&mut session_queue, "received");
 
     notification_history
-        .take_session_post(revision, posted_entry, true)
+        .take_session_post(revision, posted_entry, &|_| false, true)
         .expect("take the post");
 
     assert_eq!(
@@ -1299,7 +1311,7 @@ fn clearing_removes_every_entry_and_count_and_keeps_the_open_center_at_its_top_w
         post_to_session(&mut session_queue, &format!("entry {posted_entry_index}"));
     }
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
     notification_history.post_core_entry(
         NotificationSeverity::Info,
@@ -1337,19 +1349,19 @@ fn a_resync_after_a_clear_brings_back_no_cleared_entry() {
     let older_queue = session_queue.clone();
     post_to_session(&mut session_queue, "pane …c3d4 exited 101");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the queue");
 
     notification_history.clear_merged_entries();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
     notification_history
-        .take_session_queue(session_id, &older_queue, true)
+        .take_session_queue(session_id, &older_queue, &[], &|_| false, true)
         .expect("leave the older queue");
     let (revision, posted_entry) = post_to_session(&mut session_queue, "pane …e5f6 exited 2");
     notification_history
-        .take_session_post(revision, posted_entry, true)
+        .take_session_post(revision, posted_entry, &|_| false, true)
         .expect("take the post");
 
     assert_eq!(
@@ -1397,7 +1409,7 @@ fn a_queue_of_a_new_epoch_after_a_clear_adds_every_entry_of_that_epoch() {
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "first epoch");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the first epoch");
     notification_history.clear_merged_entries();
     let mut restarted_queue =
@@ -1406,12 +1418,12 @@ fn a_queue_of_a_new_epoch_after_a_clear_adds_every_entry_of_that_epoch() {
     post_to_session(&mut restarted_queue, "second epoch 1");
 
     notification_history
-        .take_session_queue(session_id, &restarted_queue, true)
+        .take_session_queue(session_id, &restarted_queue, &[], &|_| false, true)
         .expect("take the new epoch");
     let (revision, old_epoch_entry) = post_to_session(&mut session_queue, "first epoch late");
     let old_epoch_entry_id = old_epoch_entry.notification_id;
     let old_epoch_post_result =
-        notification_history.take_session_post(revision, old_epoch_entry, true);
+        notification_history.take_session_post(revision, old_epoch_entry, &|_| false, true);
 
     assert_eq!(
         list_merged_texts_with_repeat_counts(&notification_history),
@@ -1434,13 +1446,13 @@ fn the_first_queue_of_a_session_previews_nothing_and_a_later_queue_previews_its_
     let (session_id, mut session_queue) = create_session_queue();
     post_to_session(&mut session_queue, "before the attach");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the attach queue");
     assert_eq!(find_shown_toast_content(&notification_history), None);
 
     post_to_session(&mut session_queue, "after the attach");
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the resync queue");
 
     let newest_entry = get_newest_entry(&notification_history);
@@ -1473,7 +1485,7 @@ fn a_session_entry_about_this_viewer_or_its_previous_client_shows_no_toast_and_c
             let mut notification_history = NotificationHistory::from_client_id(previous_client_id);
             let (session_id, mut session_queue) = create_session_queue();
             notification_history
-                .take_session_queue(session_id, &session_queue, true)
+                .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
                 .expect("take the attach queue");
             notification_history.set_client_id(client_id);
 
@@ -1481,11 +1493,20 @@ fn a_session_entry_about_this_viewer_or_its_previous_client_shows_no_toast_and_c
                 post_to_session_about_subject(&mut session_queue, "bob (2) reconnected", subject);
             if is_taken_as_post {
                 notification_history
-                    .take_session_post(revision, posted_entry, true)
+                    .take_session_post(revision, posted_entry, &|_| false, true)
                     .expect("take the post");
             } else {
                 notification_history
-                    .take_session_queue(session_id, &session_queue, true)
+                    .take_session_queue(
+                        session_id,
+                        &session_queue,
+                        &[HeldPane {
+                            pane_id,
+                            is_waiting: true,
+                        }],
+                        &|_| false,
+                        true,
+                    )
                     .expect("take the redial queue");
             }
 
@@ -1585,6 +1606,7 @@ fn forty_posts_end_in_a_summary_of_thirty_six_at_the_loudest_severity() {
             start + Duration::from_millis(millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
     }
 
@@ -1614,7 +1636,12 @@ fn an_evicted_entry_loses_its_preview() {
         );
     }
 
-    notification_history.advance_notification_clocks(Instant::now(), DEFAULT_TOAST_TIMING, false);
+    notification_history.advance_notification_clocks(
+        Instant::now(),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
 
     let second_entry = notification_history
         .list_merged_entries()
@@ -1634,7 +1661,7 @@ fn a_local_session_entry_takes_over_the_preview_of_the_viewers_own_entry() {
     notification_history.set_session_local(true);
     let (session_id, mut session_queue) = create_session_queue();
     notification_history
-        .take_session_queue(session_id, &session_queue, true)
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
         .expect("take the empty queue");
     notification_history.post_core_entry(
         NotificationSeverity::Warning,
@@ -1654,7 +1681,12 @@ fn a_local_session_entry_takes_over_the_preview_of_the_viewers_own_entry() {
         .clone();
 
     notification_history
-        .take_session_post(session_queue.get_revision(), session_entry.clone(), true)
+        .take_session_post(
+            session_queue.get_revision(),
+            session_entry.clone(),
+            &|_| false,
+            true,
+        )
         .expect("take the post");
 
     assert_eq!(
@@ -1882,6 +1914,7 @@ fn an_opened_center_slides_in_over_160_ms_from_its_first_advance() {
             start + Duration::from_millis(millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         hidden_per_mille_steps.push(find_center_hidden_per_mille(&notification_history));
     }
@@ -1910,6 +1943,7 @@ fn a_closed_center_slides_out_takes_no_input_and_goes_when_the_slide_ends() {
             start + Duration::from_millis(millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         hidden_per_mille_steps.push(find_center_hidden_per_mille(&notification_history));
     }
@@ -1926,11 +1960,13 @@ fn a_center_reopened_while_it_slides_out_slides_in_from_where_it_stands() {
     notification_history.open_notification_center(true);
     let start = Instant::now();
     notification_history.close_notification_center(false);
-    notification_history.advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false);
+    notification_history
+        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     notification_history.advance_notification_clocks(
         start + Duration::from_millis(80),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     notification_history.open_notification_center(false);
@@ -1942,6 +1978,7 @@ fn a_center_reopened_while_it_slides_out_slides_in_from_where_it_stands() {
             reopen_start + Duration::from_millis(millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         hidden_per_mille_steps.push(find_center_hidden_per_mille(&notification_history));
     }
@@ -1978,8 +2015,18 @@ fn a_sliding_center_advanced_with_reduced_motion_ends_its_slide_at_once() {
         ..DEFAULT_TOAST_TIMING
     };
 
-    opening_history.advance_notification_clocks(Instant::now(), reduced_motion_timing, false);
-    closing_history.advance_notification_clocks(Instant::now(), reduced_motion_timing, false);
+    opening_history.advance_notification_clocks(
+        Instant::now(),
+        reduced_motion_timing,
+        false,
+        &|_| false,
+    );
+    closing_history.advance_notification_clocks(
+        Instant::now(),
+        reduced_motion_timing,
+        false,
+        &|_| false,
+    );
 
     assert_eq!(find_center_hidden_per_mille(&opening_history), Some(0));
     assert_eq!(closing_history.get_notification_center(), None);
@@ -2017,13 +2064,15 @@ fn a_sliding_center_wakes_at_once_before_its_first_advance_then_once_per_frame_u
 
     notification_history.open_notification_center(false);
     let unstarted_wakeup = find_wakeup(&notification_history, 0);
-    notification_history.advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false);
+    notification_history
+        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     let early_wakeup = find_wakeup(&notification_history, 10);
     let late_wakeup = find_wakeup(&notification_history, 150);
     notification_history.advance_notification_clocks(
         start + Duration::from_millis(160),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let in_place_wakeup = find_wakeup(&notification_history, 160);
 
@@ -2056,4 +2105,249 @@ fn a_restored_center_state_puts_back_the_slide_the_scroll_and_the_selection() {
     );
     assert_eq!(restored_revision, saved_revision + 2);
     assert_eq!(notification_history.get_revision(), restored_revision);
+}
+
+/// The subject of an entry that a `ProgramBlocked` raise of `pane_id` posted.
+fn build_blocked_pane_subject(pane_id: PaneId) -> Option<NotificationSubject> {
+    Some(NotificationSubject::Pane {
+        pane_id,
+        attention_reason_kind: Some(AttentionReasonKind::ProgramBlocked),
+    })
+}
+
+/// A history of a new client that took the first queue of a new session,
+/// with the session's id and queue.
+fn build_history_with_session_queue() -> (NotificationHistory, SessionId, NotificationQueue) {
+    let mut notification_history = NotificationHistory::from_client_id(ClientId::new());
+    let (session_id, session_queue) = create_session_queue();
+    notification_history
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
+        .expect("take the attach queue");
+    (notification_history, session_id, session_queue)
+}
+
+#[test]
+fn a_post_about_a_pane_the_frame_draws_shows_no_toast_and_one_it_does_not_draw_shows_one() {
+    let pane_id = PaneId::new();
+    for is_pane_drawn in [false, true] {
+        let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+        let (revision, posted_entry) = post_to_session_about_subject(
+            &mut session_queue,
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(pane_id),
+        );
+
+        notification_history
+            .take_session_post(
+                revision,
+                posted_entry,
+                &|drawn_pane_id| is_pane_drawn && drawn_pane_id == pane_id,
+                true,
+            )
+            .expect("take the post");
+
+        let newest_entry = get_newest_entry(&notification_history);
+        assert_eq!(
+            find_shown_toast_content(&notification_history),
+            (!is_pane_drawn).then_some((NotificationToastContent::Entry(&newest_entry), 1000)),
+            "the frame draws the pane: {is_pane_drawn}"
+        );
+        assert_eq!(notification_history.get_unread_entry_count(), 1);
+    }
+}
+
+#[test]
+fn a_waiting_preview_goes_at_its_turn_when_the_viewer_switched_to_its_pane() {
+    let pane_id = PaneId::new();
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    for (text, subject) in [
+        ("pane …77c0 killed by signal 9", None),
+        (
+            "agents › pane …a1b2 · codex: blocked",
+            build_blocked_pane_subject(pane_id),
+        ),
+    ] {
+        let (revision, posted_entry) =
+            post_to_session_about_subject(&mut session_queue, text, subject);
+        notification_history
+            .take_session_post(revision, posted_entry, &|_| false, true)
+            .expect("take the post");
+    }
+    let start = Instant::now();
+    notification_history
+        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+
+    notification_history.advance_notification_clocks(
+        start + Duration::from_millis(1500),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|drawn_pane_id| drawn_pane_id == pane_id,
+    );
+
+    assert_eq!(find_shown_toast_content(&notification_history), None);
+    assert_eq!(
+        list_merged_texts(&notification_history),
+        vec![
+            "pane …77c0 killed by signal 9".to_owned(),
+            "agents › pane …a1b2 · codex: blocked".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_pane_that_stops_waiting_or_closes_withdraws_its_toast_and_keeps_its_entry() {
+    let pane_id = PaneId::new();
+    let (mut notification_history, _, mut session_queue) = build_history_with_session_queue();
+    let (revision, posted_entry) = post_to_session_about_subject(
+        &mut session_queue,
+        "agents › pane …a1b2 · codex: blocked",
+        build_blocked_pane_subject(pane_id),
+    );
+    notification_history
+        .take_session_post(revision, posted_entry, &|_| false, true)
+        .expect("take the post");
+    let start = Instant::now();
+    notification_history
+        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    notification_history.advance_notification_clocks(
+        start + Duration::from_millis(2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    notification_history.withdraw_pane_previews(pane_id);
+    notification_history.advance_notification_clocks(
+        start + Duration::from_millis(2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    notification_history.advance_notification_clocks(
+        start + Duration::from_millis(2250),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let newest_entry = get_newest_entry(&notification_history);
+    assert_eq!(
+        find_shown_toast_content(&notification_history),
+        Some((NotificationToastContent::Entry(&newest_entry), 500))
+    );
+    notification_history.advance_notification_clocks(
+        start + Duration::from_millis(2500),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert_eq!(find_shown_toast_content(&notification_history), None);
+    assert_eq!(
+        list_merged_texts(&notification_history),
+        vec!["agents › pane …a1b2 · codex: blocked".to_owned()]
+    );
+    assert_eq!(notification_history.get_unread_entry_count(), 1);
+}
+
+#[test]
+fn a_queue_withdraws_toasts_of_panes_that_wait_no_more_and_previews_only_hidden_waiting_panes() {
+    let (attended_pane_id, waiting_pane_id, drawn_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    let (mut notification_history, session_id, mut session_queue) =
+        build_history_with_session_queue();
+    let (revision, attended_entry) = post_to_session_about_subject(
+        &mut session_queue,
+        "agents › pane …a1b2 · codex: blocked",
+        build_blocked_pane_subject(attended_pane_id),
+    );
+    notification_history
+        .take_session_post(revision, attended_entry, &|_| false, true)
+        .expect("take the post");
+    let start = Instant::now();
+    notification_history
+        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    for (text, pane_id) in [
+        (
+            "build › cargo test · failed — exit 101 after 2m 14s",
+            waiting_pane_id,
+        ),
+        (
+            "docs › pane …09f3 · Claude Code: Waiting for input",
+            drawn_pane_id,
+        ),
+    ] {
+        let _ = post_to_session_about_subject(
+            &mut session_queue,
+            text,
+            build_blocked_pane_subject(pane_id),
+        );
+    }
+
+    notification_history
+        .take_session_queue(
+            session_id,
+            &session_queue,
+            &[
+                HeldPane {
+                    pane_id: attended_pane_id,
+                    is_waiting: false,
+                },
+                HeldPane {
+                    pane_id: waiting_pane_id,
+                    is_waiting: true,
+                },
+                HeldPane {
+                    pane_id: drawn_pane_id,
+                    is_waiting: true,
+                },
+            ],
+            &|pane_id| pane_id == drawn_pane_id,
+            true,
+        )
+        .expect("take the resync queue");
+    notification_history
+        .advance_notification_clocks(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    let waiting_entry_id = get_entry_id_by_text(
+        &notification_history,
+        "build › cargo test · failed — exit 101 after 2m 14s",
+    );
+    let shown_entry_id =
+        notification_history
+            .find_shown_toast()
+            .and_then(
+                |(shown_toast, hidden_per_mille)| match shown_toast.toast_content {
+                    NotificationToastContent::Entry(shown_entry) => {
+                        Some((shown_entry.notification_id, hidden_per_mille))
+                    }
+                    NotificationToastContent::Summary { .. } => None,
+                },
+            );
+    notification_history.advance_notification_clocks(
+        start + Duration::from_millis(5000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert_eq!(shown_entry_id, Some((waiting_entry_id, 1000)));
+    assert_eq!(find_shown_toast_content(&notification_history), None);
+    assert_eq!(list_merged_texts(&notification_history).len(), 3);
+}
+
+#[test]
+fn a_queue_previews_no_entry_about_a_pane_it_does_not_list() {
+    let (mut notification_history, session_id, mut session_queue) =
+        build_history_with_session_queue();
+    let _ = post_to_session_about_subject(
+        &mut session_queue,
+        "agents › pane …a1b2 · codex: blocked",
+        build_blocked_pane_subject(PaneId::new()),
+    );
+
+    notification_history
+        .take_session_queue(session_id, &session_queue, &[], &|_| false, true)
+        .expect("take the resync queue");
+
+    assert_eq!(find_shown_toast_content(&notification_history), None);
+    assert_eq!(notification_history.get_unread_entry_count(), 1);
 }

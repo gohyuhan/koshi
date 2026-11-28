@@ -180,6 +180,7 @@ fn build_attach_accepted(
     ending_notice: Arc<EndingNotice>,
 ) -> AttachAccepted {
     AttachAccepted {
+        held_panes: Vec::new(),
         client_id,
         session_id,
         notification_queue: build_fixed_epoch_notification_queue(NotificationQueueOwner::Session(
@@ -1481,6 +1482,7 @@ fn attach_test_client_with_graphics(
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -4907,6 +4909,7 @@ fn attach_as_other_user(
     assert_eq!(
         attach_response.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -6536,6 +6539,7 @@ fn attach_saying_remote(
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -7644,6 +7648,7 @@ fn open_attached_connection_over_link(
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -8056,6 +8061,7 @@ fn an_attach_with_a_link_timeout_below_the_minimum_is_refused_and_the_connection
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -8141,6 +8147,7 @@ fn an_attach_with_a_viewport_over_the_cell_limit_is_refused_and_the_connection_k
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -8205,6 +8212,7 @@ fn an_attach_with_a_frame_rate_outside_30_to_120_is_refused_and_the_connection_k
     assert_eq!(
         attach_reply.answer_result,
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id,
             session_id,
             notification_queue: build_fixed_epoch_notification_queue(
@@ -8563,6 +8571,7 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
             subscriber_id,
             Box::new(render_snapshot.clone()),
             Box::new(notification_queue.clone()),
+            Vec::new(),
         ),
         Some(1)
     );
@@ -8579,6 +8588,7 @@ fn a_resynced_client_reads_the_resync_then_the_frame_it_resumes_from() {
         ),
         vec![
             SessionFrame::Event(SessionEvent::Resync {
+                held_panes: Vec::new(),
                 dropped_event_count: 1,
                 notification_queue,
                 held_command_rejections: Vec::new(),

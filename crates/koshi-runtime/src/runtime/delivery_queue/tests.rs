@@ -140,6 +140,7 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
 
     delivery_sender
         .try_send(Delivery::Snapshot {
+            held_panes: Vec::new(),
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
             notification_queue: build_test_notification_queue(),
             lag_report,
@@ -159,6 +160,7 @@ fn a_frame_takes_the_place_of_the_frame_at_the_tail_and_of_nothing_else() {
         delivery_receiver.try_iter().collect::<Vec<Delivery>>(),
         vec![
             Delivery::Snapshot {
+                held_panes: Vec::new(),
                 render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
                 notification_queue: build_test_notification_queue(),
                 lag_report,
@@ -239,6 +241,7 @@ fn a_frame_taken_notice_follows_the_frame_that_took_the_requested_frames_place_a
         dropped_event_count: 1,
     };
     let build_resync_snapshot = || Delivery::Snapshot {
+        held_panes: Vec::new(),
         render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
         notification_queue: build_test_notification_queue(),
         lag_report,
@@ -519,6 +522,7 @@ fn a_paced_receive_holds_a_resync_snapshot_as_it_holds_a_frame() {
     };
     delivery_sender
         .try_send(Delivery::Snapshot {
+            held_panes: Vec::new(),
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
             notification_queue: build_test_notification_queue(),
             lag_report,
@@ -534,6 +538,7 @@ fn a_paced_receive_holds_a_resync_snapshot_as_it_holds_a_frame() {
     assert_eq!(
         delivery_receiver.recv_paced(None, true, &ending_notice),
         PacedReceive::Delivery(Delivery::Snapshot {
+            held_panes: Vec::new(),
             render_snapshot: build_named_frame(&base_render_snapshot, "resync"),
             notification_queue: build_test_notification_queue(),
             lag_report,

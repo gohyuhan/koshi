@@ -34,11 +34,12 @@ use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ActionReference;
+use koshi_core::attention::HeldPane;
 use koshi_core::client::ClientOrigin;
 use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::event::{
     HeldCommandRejection, PaneAttentionCleared, PaneAttentionRaised, PanePlacementCommitted,
-    RejectReason, SubscriberLagged,
+    PaneRemoved, RejectReason, SubscriberLagged,
 };
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
@@ -273,6 +274,32 @@ impl RenderSnapshot {
         }
     }
 
+    /// Whether this frame draws content of the pane `pane_id`: a visible
+    /// pane slot of the active tab, or of a floating pane slot the viewing
+    /// client shows ([`LayoutAreaSnapshot::find_visible_pane_slot`]). A pane
+    /// on another tab, in a floating pane the client minimized, collapsed in a
+    /// stack, hidden behind a zoomed pane, or suppressed for want of room is
+    /// not drawn. A visible tiled pane that a floating pane covers in part or
+    /// whole is drawn.
+    #[must_use]
+    pub fn is_pane_content_drawn(&self, pane_id: PaneId) -> bool {
+        let session_snapshot = &self.session_snapshot;
+        session_snapshot
+            .active_tab_snapshot
+            .layout_area
+            .find_visible_pane_slot(pane_id)
+            .is_some()
+            || session_snapshot
+                .floating_pane_slots
+                .iter()
+                .any(|floating_pane_slot| {
+                    floating_pane_slot
+                        .layout_area
+                        .find_visible_pane_slot(pane_id)
+                        .is_some()
+                })
+    }
+
     /// The content snapshot of the pane `pane_id` in this frame, or `None`
     /// when the frame carries no content for it.
     #[must_use]
@@ -328,7 +355,7 @@ impl CommittedRegions {
 }
 
 /// One item on a subscriber's queue: a pane placement the session committed,
-/// a pane that began or stopped waiting for a person,
+/// a pane that began or stopped waiting for a person, a pane that closed,
 /// the end of the session, the frame composed for the subscriber's client, a
 /// fresh frame that resyncs a subscriber whose queue overflowed, one post the
 /// session's notification queue took, the answers to one round of mouse
@@ -347,6 +374,8 @@ pub enum Delivery {
     PaneAttentionRaised(PaneAttentionRaised),
     /// A pane stopped waiting for a person.
     PaneAttentionCleared(PaneAttentionCleared),
+    /// A pane closed: the session holds it no more.
+    PaneRemoved(PaneRemoved),
     /// The session is over. The client's writing thread writes it as the
     /// stream's last frame, then stops.
     Quit,
@@ -366,6 +395,9 @@ pub enum Delivery {
         lag_report: SubscriberLagged,
         /// The session's notification queue as it stands.
         notification_queue: Box<NotificationQueue>,
+        /// Every pane the session holds, in pane id order, each with whether
+        /// it waits for a person.
+        held_panes: Vec<HeldPane>,
         /// The rejections of the subscriber's commands held since it paused,
         /// oldest first, each run of equal rejections in a row as one
         /// [`HeldCommandRejection`].

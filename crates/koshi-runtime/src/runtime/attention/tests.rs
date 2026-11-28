@@ -11,6 +11,7 @@ use koshi_core::command::{
     ClosePaneArgs, Command, CommandEnvelope, CommandResult, CommandSource, FocusTabArgs, TabTarget,
     ToggleLockModeArgs, WriteToPaneArgs,
 };
+use koshi_core::event::PaneRemoved;
 use koshi_core::geometry::Point;
 use koshi_core::ids::{CommandId, SessionId, TabId};
 use koshi_core::key::{
@@ -68,6 +69,7 @@ struct AttentionFixture {
     fake_pty_backend: Arc<FakePtyBackend>,
     session_id: SessionId,
     code_tab_id: TabId,
+    docs_tab_id: TabId,
     build_pane_id: PaneId,
     docs_pane_id: PaneId,
     alice_client_id: ClientId,
@@ -129,6 +131,7 @@ fn build_attention_fixture() -> AttentionFixture {
         fake_pty_backend,
         session_id,
         code_tab_id,
+        docs_tab_id,
         build_pane_id,
         docs_pane_id,
         alice_client_id,
@@ -1120,9 +1123,10 @@ fn focus_repair_after_a_pane_closes_leaves_the_landing_pane_waiting() {
         let docs_pane_id = fixture.docs_pane_id;
 
         if close_index == 0 {
-            fixture
+            let child_exit_events = fixture
                 .server
                 .handle_child_exit(docs_pane_id, ExitStatus::ExitCode(0));
+            fixture.server.publish_events(&child_exit_events);
         } else {
             let closing_client_id = if close_index == 1 {
                 bob_client_id
@@ -1146,7 +1150,10 @@ fn focus_repair_after_a_pane_closes_leaves_the_landing_pane_waiting() {
         );
         assert_eq!(
             fixture.take_alice_deliveries(),
-            Vec::new(),
+            vec![Delivery::PaneRemoved(PaneRemoved {
+                pane_id: docs_pane_id,
+                tab_id: Some(fixture.docs_tab_id),
+            })],
             "close {close_index}"
         );
         assert_eq!(
@@ -1344,7 +1351,13 @@ fn a_closed_pane_takes_its_attention_and_its_command_start_with_it() {
             .get(&build_pane_id),
         None
     );
-    assert_eq!(fixture.take_alice_deliveries(), Vec::new());
+    assert_eq!(
+        fixture.take_alice_deliveries(),
+        vec![Delivery::PaneRemoved(PaneRemoved {
+            pane_id: build_pane_id,
+            tab_id: Some(fixture.code_tab_id),
+        })]
+    );
 }
 
 #[test]

@@ -28,11 +28,22 @@
 //! preview nothing, and neither does an entry whose subject is this viewer's
 //! current client or the client it replaced: a viewer that dials again does
 //! not toast its own `bob (2) disconnected` and `bob (2) reconnected`.
+//!
+//! An entry about a pane previews only while the viewer's newest painted frame
+//! draws none of that pane's content, and an entry a queue brings previews only
+//! while its pane still waits for a person. A pane that stops waiting or
+//! closes loses its entry previews; its entries stay.
+//!
+//! Example: `codex` blocks in pane 3 on tab 2. A viewer on tab 1 shows the
+//! toast, and a viewer on tab 2 shows none. A person focuses pane 3, and the
+//! toast of the viewer on tab 1 slides out fast.
 
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::time::{Duration, Instant, SystemTime};
 
-use koshi_core::ids::{ClientId, SessionId};
+use koshi_core::attention::HeldPane;
+use koshi_core::ids::{ClientId, PaneId, SessionId};
 use koshi_core::notification::{
     NotificationEntry, NotificationEpoch, NotificationId, NotificationQueue,
     NotificationQueueError, NotificationQueueOwner, NotificationSeverity, NotificationSource,
@@ -528,7 +539,8 @@ impl NotificationHistory {
     }
 
     /// Advance the toast's clock to `current_time` with the phase lengths of
-    /// `toast_timing`, stopped while `is_toast_paused`
+    /// `toast_timing`, stopped while `is_toast_paused`, while `is_pane_drawn`
+    /// says whether the viewer's newest painted frame draws a pane's content
     /// ([`NotificationToastQueue::advance`]), and the center's slide to
     /// `current_time`.
     ///
@@ -545,11 +557,14 @@ impl NotificationHistory {
         current_time: Instant,
         toast_timing: ToastTiming,
         is_toast_paused: bool,
+        is_pane_drawn: &dyn Fn(PaneId) -> bool,
     ) {
-        if self
-            .notification_toast
-            .advance(current_time, toast_timing, is_toast_paused)
-        {
+        if self.notification_toast.advance(
+            current_time,
+            toast_timing,
+            is_toast_paused,
+            is_pane_drawn,
+        ) {
             self.revision += 1;
         }
         let Some(center_state) = &mut self.notification_center else {
@@ -699,10 +714,20 @@ impl NotificationHistory {
     /// the epoch, or the epoch's start, and the queue's next newer entry. A
     /// first queue whose oldest entry has sequence 40 adds 40.
     ///
-    /// With `should_show_toasts`, each newer entry queues a toast preview
+    /// `held_panes` lists every pane the session holds, with whether it waits
+    /// for a person, as the attach answer or the `Resync` carried them. A
+    /// taken queue first drops every entry preview about a pane that does not
+    /// wait there ([`NotificationToastQueue::withdraw_pane_previews`]). With
+    /// `should_show_toasts`, each newer entry then queues a toast preview
     /// while the center is closed, except in the first queue taken from its
-    /// owner, and except an entry about this viewer
-    /// ([`is_about_this_viewer`](Self::is_about_this_viewer)).
+    /// owner, except an entry about this viewer
+    /// ([`is_about_this_viewer`](Self::is_about_this_viewer)), and except an
+    /// entry about a pane that does not wait in `held_panes` or that
+    /// `is_pane_drawn` names as drawn in the viewer's newest painted frame.
+    ///
+    /// Example: the toast shows `codex: blocked` about pane 3, and a person
+    /// attends pane 3 while this viewer lags. The `Resync` lists pane 3 with
+    /// `is_waiting: false`, and the toast slides out fast.
     ///
     /// # Errors
     /// [`NotificationTakeError::InvalidQueue`] when the queue fails
@@ -713,6 +738,8 @@ impl NotificationHistory {
         &mut self,
         session_id: SessionId,
         notification_queue: &NotificationQueue,
+        held_panes: &[HeldPane],
+        is_pane_drawn: &dyn Fn(PaneId) -> bool,
         should_show_toasts: bool,
     ) -> Result<(), NotificationTakeError> {
         notification_queue
@@ -736,6 +763,15 @@ impl NotificationHistory {
                 merged_through = session_queue_mark.merged_through;
             }
         }
+        let waiting_pane_ids: HashSet<PaneId> = held_panes
+            .iter()
+            .filter(|held_pane| held_pane.is_waiting)
+            .map(|held_pane| held_pane.pane_id)
+            .collect();
+        self.notification_toast
+            .withdraw_pane_previews(&|pane_id| !waiting_pane_ids.contains(&pane_id));
+        let is_waiting_pane_out_of_view =
+            |pane_id: PaneId| waiting_pane_ids.contains(&pane_id) && !is_pane_drawn(pane_id);
         let mut next_expected_sequence = merged_through
             .map_or(0, |merged_through: MergedThrough| {
                 merged_through.sequence.saturating_add(1)
@@ -753,8 +789,11 @@ impl NotificationHistory {
                 repeat_count: received_entry.repeat_count,
             });
             let held_entry_index = self.find_merged_entry_index(received_entry.notification_id);
-            let should_preview_entry =
-                should_preview_new_entries && !self.is_about_this_viewer(&received_entry);
+            let should_preview_entry = should_preview_new_entries
+                && !self.is_about_this_viewer(&received_entry)
+                && received_entry
+                    .find_subject_pane_id()
+                    .is_none_or(is_waiting_pane_out_of_view);
             self.take_arrival(received_entry, held_entry_index, should_preview_entry);
         }
         self.session_queue_mark = Some(SessionQueueMark {
@@ -781,7 +820,9 @@ impl NotificationHistory {
     /// [`take_session_queue`](Self::take_session_queue) counts them. With
     /// `should_show_toasts`, the arrival queues a toast preview while the
     /// center is closed, unless the entry is about this viewer
-    /// ([`is_about_this_viewer`](Self::is_about_this_viewer)).
+    /// ([`is_about_this_viewer`](Self::is_about_this_viewer)), or about a
+    /// pane that `is_pane_drawn` names as drawn in the viewer's newest
+    /// painted frame.
     ///
     /// # Errors
     /// [`NotificationTakeError::PostWithoutQueue`] before any queue was
@@ -792,6 +833,7 @@ impl NotificationHistory {
         &mut self,
         revision: u64,
         posted_entry: NotificationEntry,
+        is_pane_drawn: &dyn Fn(PaneId) -> bool,
         should_show_toasts: bool,
     ) -> Result<(), NotificationTakeError> {
         let Some(session_queue_mark) = self.session_queue_mark.as_mut() else {
@@ -825,8 +867,11 @@ impl NotificationHistory {
         self.count_skipped_sequences(&posted_entry, &mut next_expected_sequence);
         if is_new {
             let held_entry_index = self.find_merged_entry_index(posted_entry.notification_id);
-            let should_preview_entry =
-                should_show_toasts && !self.is_about_this_viewer(&posted_entry);
+            let should_preview_entry = should_show_toasts
+                && !self.is_about_this_viewer(&posted_entry)
+                && !posted_entry
+                    .find_subject_pane_id()
+                    .is_some_and(is_pane_drawn);
             self.take_arrival(
                 sanitize_received_entry(posted_entry),
                 held_entry_index,
@@ -834,6 +879,14 @@ impl NotificationHistory {
             );
         }
         Ok(())
+    }
+
+    /// Drop every entry preview about the pane `pane_id`, and withdraw a
+    /// shown one fast ([`NotificationToastQueue::withdraw_pane_previews`]):
+    /// the pane stopped waiting or closed. Its entries stay.
+    pub(crate) fn withdraw_pane_previews(&mut self, pane_id: PaneId) {
+        self.notification_toast
+            .withdraw_pane_previews(&|previewed_pane_id| previewed_pane_id == pane_id);
     }
 
     /// Add the sequences between `next_expected_sequence` and

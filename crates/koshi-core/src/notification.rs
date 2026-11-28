@@ -132,6 +132,19 @@ pub struct NotificationEntry {
     pub subject: Option<NotificationSubject>,
 }
 
+impl NotificationEntry {
+    /// The pane the entry is about: the `pane_id` of a
+    /// [`NotificationSubject::Pane`] subject, or `None` for an entry about a
+    /// client and an entry with no subject.
+    #[must_use]
+    pub fn find_subject_pane_id(&self) -> Option<PaneId> {
+        match self.subject {
+            Some(NotificationSubject::Pane { pane_id, .. }) => Some(pane_id),
+            Some(NotificationSubject::Client(_)) | None => None,
+        }
+    }
+}
+
 /// A bounded queue of entries, oldest first, kept by one owner for one epoch.
 ///
 /// The queue holds at most [`MAX_QUEUED_NOTIFICATION_COUNT`] entries. Each

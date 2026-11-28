@@ -21,6 +21,7 @@ use std::time::{Instant, SystemTime};
 
 use koshi_core::{
     action::ActionReference,
+    attention::HeldPane,
     client::ClientOrigin,
     command::{CommandEnvelope, CommandResult, CommandSource, TiledPlacementTarget},
     discovery::SessionOverview,
@@ -508,8 +509,8 @@ impl RuntimeEvent {
 }
 
 /// What the dispatcher minted for one [`RuntimeEvent::IpcAttach`]: the client
-/// record, the session it joined, the session's notification queue for the
-/// attach reply, the receiving end of the client's own event queue, what waits
+/// record, the session it joined, the session's notification queue and every
+/// pane the session holds for the attach reply, the receiving end of the client's own event queue, what waits
 /// beside that queue for the client's writing thread, and the session's shared
 /// ending notice.
 ///
@@ -523,6 +524,9 @@ pub struct AttachAccepted {
     pub session_id: SessionId,
     /// The session's notification queue as it stands.
     pub notification_queue: NotificationQueue,
+    /// Every pane the session holds, in pane id order, each with whether it
+    /// waits for a person.
+    pub held_panes: Vec<HeldPane>,
     /// The client's event queue. Dropping it ends the subscription.
     pub deliveries: DeliveryReceiver,
     /// Shared with the session. This client's writing thread takes the bytes

@@ -35,6 +35,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use koshi_core::ids::PaneId;
 use koshi_core::notification::{NotificationEntry, NotificationId, NotificationSeverity};
 
 /// The most entry previews that wait behind the shown preview: 3. An entry
@@ -318,6 +319,41 @@ impl NotificationToastQueue {
         }
     }
 
+    /// Drop every waiting entry preview whose entry is about a pane that
+    /// `is_withdrawn_pane` names ([`NotificationEntry::find_subject_pane_id`]),
+    /// and withdraw a shown entry preview about such a pane fast from where it
+    /// stands at the next advance of the clock. A shown preview that already
+    /// withdraws fast goes on as it is. A summary keeps counting such entries.
+    ///
+    /// Example: the toast shows `codex: blocked` about pane 3, and
+    /// `cargo test: failed` about pane 3 waits behind it. Withdrawing pane 3
+    /// drops the waiting preview, and the toast slides out over 0.5 s.
+    pub(crate) fn withdraw_pane_previews(&mut self, is_withdrawn_pane: &dyn Fn(PaneId) -> bool) {
+        let is_about_withdrawn_pane = |previewed_entry: &NotificationEntry| {
+            previewed_entry
+                .find_subject_pane_id()
+                .is_some_and(is_withdrawn_pane)
+        };
+        self.waiting_entries
+            .retain(|waiting_entry| !is_about_withdrawn_pane(waiting_entry));
+        let Some(shown_toast) = &mut self.shown_toast else {
+            return;
+        };
+        let ToastPreview::Entry(shown_entry) = &shown_toast.preview else {
+            return;
+        };
+        let is_withdrawing_fast = matches!(
+            shown_toast.phase,
+            ToastPhase::Withdraw {
+                withdraw_speed: WithdrawSpeed::Fast,
+                ..
+            }
+        );
+        if !is_withdrawing_fast && is_about_withdrawn_pane(shown_entry) {
+            shown_toast.withdraw_request = Some(WithdrawSpeed::Fast);
+        }
+    }
+
     /// Withdraw the shown preview from where it stands at the next advance of
     /// the clock, at the speed of the withdraw phase. Does nothing while no
     /// toast shows, or while it withdraws.
@@ -341,12 +377,15 @@ impl NotificationToastQueue {
     }
 
     /// Advance the clock to `current_time` with the phase lengths of
-    /// `toast_timing`.
+    /// `toast_timing`, while `is_pane_drawn` says whether the viewer's newest
+    /// painted frame draws a pane's content.
     ///
     /// While `is_paused`, the clock stops, and nothing moves. When it runs
     /// again, the shown phase resumes where it stopped. A shown preview that
     /// the clock has not yet advanced with starts its appear phase at
-    /// `current_time`. A requested withdraw starts at `current_time`, from the
+    /// `current_time`, unless its entry is about a pane that `is_pane_drawn`
+    /// names: that preview goes before it shows, and the next preview takes
+    /// its turn. A requested withdraw starts at `current_time`, from the
     /// slide position at `current_time`; a toast still fully past its edge
     /// ends there. Each phase that ended by `current_time` gives way to the
     /// next one at its own end ([`compute_phase_ended_at`]), and a withdraw
@@ -364,6 +403,7 @@ impl NotificationToastQueue {
         current_time: Instant,
         toast_timing: ToastTiming,
         is_paused: bool,
+        is_pane_drawn: &dyn Fn(PaneId) -> bool,
     ) -> bool {
         if is_paused {
             self.paused_at.get_or_insert(current_time);
@@ -389,6 +429,17 @@ impl NotificationToastQueue {
             let Some(shown_toast) = &mut self.shown_toast else {
                 return is_preview_changed;
             };
+            let is_turn_of_drawn_pane = shown_toast.phase_started_at.is_none()
+                && matches!(
+                    &shown_toast.preview,
+                    ToastPreview::Entry(shown_entry)
+                        if shown_entry.find_subject_pane_id().is_some_and(is_pane_drawn)
+                );
+            if is_turn_of_drawn_pane {
+                self.show_next_preview();
+                is_preview_changed = true;
+                continue;
+            }
             let phase_started_at = *shown_toast.phase_started_at.get_or_insert(current_time);
             let phase_ended_at = compute_phase_ended_at(
                 shown_toast.phase,

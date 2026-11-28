@@ -13,8 +13,9 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use koshi_core::attention::HeldPane;
 use koshi_core::constant::compute_frame_interval;
-use koshi_core::ids::SessionId;
+use koshi_core::ids::{PaneId, SessionId};
 use koshi_core::mouse::{MouseButton, MouseInput, MouseKind, ScrollDirection};
 use koshi_core::notification::{
     NotificationEntry, NotificationId, NotificationQueue, NotificationSeverity,
@@ -57,9 +58,13 @@ impl Client {
         );
     }
 
-    /// Take `notification_queue`, the queue of session `session_id`
+    /// Take `notification_queue`, the queue of session `session_id`, with
+    /// `held_panes`, every pane the session holds
     /// ([`NotificationHistory::take_session_queue`](crate::notification_history::NotificationHistory::take_session_queue)),
-    /// with toasts as this viewer's settings say.
+    /// with toasts as this viewer's settings say. A pane counts as drawn
+    /// while `painted_frame`, the frame this viewer last painted, draws its
+    /// content ([`RenderSnapshot::is_pane_content_drawn`]); with no painted
+    /// frame, no pane is drawn.
     ///
     /// # Errors
     /// The [`NotificationTakeError`] of a queue the history does not take.
@@ -67,11 +72,15 @@ impl Client {
         &mut self,
         session_id: SessionId,
         notification_queue: &NotificationQueue,
+        held_panes: &[HeldPane],
+        painted_frame: Option<&RenderSnapshot>,
     ) -> Result<(), NotificationTakeError> {
         let should_show_toasts = self.client_config.notifications.should_show_toasts;
         self.notification_history.take_session_queue(
             session_id,
             notification_queue,
+            held_panes,
+            &|pane_id| painted_frame.is_some_and(|frame| frame.is_pane_content_drawn(pane_id)),
             should_show_toasts,
         )
     }
@@ -79,7 +88,10 @@ impl Client {
     /// Take one `NotificationPosted` from the session: `posted_entry` at the
     /// queue's `revision`
     /// ([`NotificationHistory::take_session_post`](crate::notification_history::NotificationHistory::take_session_post)),
-    /// with toasts as this viewer's settings say.
+    /// with toasts as this viewer's settings say. A pane counts as drawn
+    /// while `painted_frame`, the frame this viewer last painted, draws its
+    /// content ([`RenderSnapshot::is_pane_content_drawn`]); with no painted
+    /// frame, no pane is drawn.
     ///
     /// # Errors
     /// The [`NotificationTakeError`] of a post the history does not take.
@@ -87,10 +99,23 @@ impl Client {
         &mut self,
         revision: u64,
         posted_entry: NotificationEntry,
+        painted_frame: Option<&RenderSnapshot>,
     ) -> Result<(), NotificationTakeError> {
         let should_show_toasts = self.client_config.notifications.should_show_toasts;
-        self.notification_history
-            .take_session_post(revision, posted_entry, should_show_toasts)
+        self.notification_history.take_session_post(
+            revision,
+            posted_entry,
+            &|pane_id| painted_frame.is_some_and(|frame| frame.is_pane_content_drawn(pane_id)),
+            should_show_toasts,
+        )
+    }
+
+    /// Drop every toast preview about the pane `pane_id`, and slide a shown
+    /// one out fast: the pane stopped waiting or closed
+    /// ([`NotificationHistory::withdraw_pane_previews`](crate::notification_history::NotificationHistory::withdraw_pane_previews)).
+    /// Its entries stay in the center.
+    pub(crate) fn withdraw_pane_toasts(&mut self, pane_id: PaneId) {
+        self.notification_history.withdraw_pane_previews(pane_id);
     }
 
     /// Close the center while it is open, and open it
@@ -500,16 +525,21 @@ impl Client {
     /// `is_toast_paused`, and the center's slide, with the timing this
     /// viewer's settings give
     /// ([`NotificationHistory::advance_notification_clocks`](crate::notification_history::NotificationHistory::advance_notification_clocks)).
+    /// A preview about a pane that `painted_frame`, the frame this viewer
+    /// last painted, draws goes at its turn
+    /// ([`RenderSnapshot::is_pane_content_drawn`]).
     pub(crate) fn advance_notification_clocks(
         &mut self,
         current_time: Instant,
         is_toast_paused: bool,
+        painted_frame: Option<&RenderSnapshot>,
     ) {
         let toast_timing = self.get_toast_timing();
         self.notification_history.advance_notification_clocks(
             current_time,
             toast_timing,
             is_toast_paused,
+            &|pane_id| painted_frame.is_some_and(|frame| frame.is_pane_content_drawn(pane_id)),
         );
     }
 

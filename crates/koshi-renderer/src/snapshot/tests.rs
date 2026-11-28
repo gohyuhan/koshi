@@ -2,7 +2,8 @@
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
 //! cloning shares every row by reference (no cell copy), confirm equality, and
 //! check the mouse-frame projection, the borrowed layout views, the selection
-//! row lookup, the pane slots of a layout solve, the tab a placement
+//! row lookup, the pane slots of a layout solve, the panes a frame draws, the
+//! tab a placement
 //! preview shows for a tiled and a floating source, the comparison of two
 //! frames' floating pane visibility, and a floating pane slot resized for a
 //! slide: each rect edge scaled per axis, a content rect only inside a box of
@@ -1331,5 +1332,60 @@ fn a_resized_split_slot_scales_each_pane_box_and_each_stack_header_and_keeps_its
         LayoutMode::Fullscreen {
             focused_pane_id: vim_pane_id,
         }
+    );
+}
+
+/// A frame draws the content of a visible slot of its active tab and of a
+/// visible slot of a floating pane it shows. A slot with no content (a
+/// collapsed stack member, a pane a zoomed sibling hides, a suppressed pane), a
+/// hidden slot inside a shown floating pane, and a pane the frame holds no slot
+/// for (on another tab, or in a minimized floating pane) are not drawn.
+#[test]
+fn a_frame_draws_only_the_visible_slots_of_its_active_tab_and_its_shown_floating_panes() {
+    let mut render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let tiled_pane_id = render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots[0]
+        .pane_id;
+    let (hidden_tiled_pane_id, floating_pane_id, hidden_floating_pane_id) =
+        (PaneId::new(), PaneId::new(), PaneId::new());
+    render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area
+        .pane_slots
+        .push(PaneSlot {
+            pane_id: hidden_tiled_pane_id,
+            outer_rect: build_cell_rect(0, 0, 10, 1),
+            content_rect: None,
+            is_visible: false,
+            is_suppressed: false,
+        });
+    let mut floating_pane_slot =
+        build_one_pane_floating_pane_slot(floating_pane_id, build_cell_rect(0, 0, 40, 12), false);
+    floating_pane_slot.layout_area.pane_slots.push(PaneSlot {
+        pane_id: hidden_floating_pane_id,
+        outer_rect: build_cell_rect(0, 0, 0, 0),
+        content_rect: None,
+        is_visible: false,
+        is_suppressed: true,
+    });
+    render_snapshot
+        .session_snapshot
+        .floating_pane_slots
+        .push(floating_pane_slot);
+
+    assert_eq!(
+        [
+            tiled_pane_id,
+            hidden_tiled_pane_id,
+            floating_pane_id,
+            hidden_floating_pane_id,
+            PaneId::new(),
+        ]
+        .map(|pane_id| render_snapshot.is_pane_content_drawn(pane_id)),
+        [true, false, true, false, false]
     );
 }

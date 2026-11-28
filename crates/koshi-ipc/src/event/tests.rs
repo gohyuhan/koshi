@@ -6,9 +6,10 @@
 
 use std::num::NonZeroU32;
 
+use koshi_core::attention::{AttentionReason, HeldPane};
 use koshi_core::command::{PanePlacementAnchor, PanePlacementTarget, TiledPlacementTarget};
 use koshi_core::geometry::Direction;
-use koshi_core::ids::{CommandId, PaneId, SessionId, TabId};
+use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
 use koshi_core::mouse::MouseAnswer;
 use serde_json::json;
 
@@ -47,6 +48,7 @@ fn list_test_events() -> Vec<SessionEvent> {
     let command_id = CommandId::from_uuid(build_fixed_test_uuid());
     let pane_id = PaneId::from_uuid(build_fixed_test_uuid());
     let tab_id = TabId::from_uuid(build_fixed_test_uuid());
+    let client_id = ClientId::from_uuid(build_fixed_test_uuid());
 
     vec![
         SessionEvent::ImageCacheReset,
@@ -64,12 +66,28 @@ fn list_test_events() -> Vec<SessionEvent> {
                 direction: Direction::Right,
             }),
         },
+        SessionEvent::PaneAttentionRaised {
+            pane_id,
+            tab_id: Some(tab_id),
+            reason: AttentionReason::Bell,
+            raised_at: std::time::SystemTime::UNIX_EPOCH,
+        },
+        SessionEvent::PaneAttentionCleared {
+            pane_id,
+            tab_id: None,
+            client_id: Some(client_id),
+        },
+        SessionEvent::PaneRemoved { pane_id },
         SessionEvent::Quit,
         SessionEvent::Restarting,
         SessionEvent::Detached,
         SessionEvent::Resync {
             dropped_event_count: 4,
             notification_queue: build_fixed_session_notification_queue(),
+            held_panes: vec![HeldPane {
+                pane_id,
+                is_waiting: true,
+            }],
             held_command_rejections: vec![HeldCommandRejection {
                 fired_action: Some(
                     ActionReference::from_core_action_name("resize-pane-left")
@@ -319,7 +337,7 @@ fn an_absent_optional_field_round_trips_as_absent() {
 #[test]
 fn the_event_wire_shape_belongs_to_this_protocol_version() {
     // The exact encoding of every structure frame an attached client reads,
-    // at protocol version 5.
+    // at protocol version 6.
     let wire_identifier = "00000000-0000-0000-0000-000000000001";
 
     assert_eq!(
@@ -345,12 +363,25 @@ fn the_event_wire_shape_belongs_to_this_protocol_version() {
                     }
                 }
             } }),
+            json!({ "PaneAttentionRaised": {
+                "pane_id": wire_identifier,
+                "tab_id": wire_identifier,
+                "reason": "Bell",
+                "raised_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 }
+            } }),
+            json!({ "PaneAttentionCleared": {
+                "pane_id": wire_identifier,
+                "tab_id": null,
+                "client_id": wire_identifier
+            } }),
+            json!({ "PaneRemoved": { "pane_id": wire_identifier } }),
             json!("Quit"),
             json!("Restarting"),
             json!("Detached"),
             json!({ "Resync": {
                 "dropped_event_count": 4,
                 "notification_queue": build_fixed_notification_queue_json(),
+                "held_panes": [{ "pane_id": wire_identifier, "is_waiting": true }],
                 "held_command_rejections": [{
                     "fired_action": "core:resize-pane-left",
                     "reject_reason": "MinimumSize",
@@ -598,6 +629,7 @@ fn numeric_fields_round_trip_at_their_extremes() {
         SessionEvent::Resync {
             dropped_event_count: u64::MAX,
             notification_queue: build_fixed_session_notification_queue(),
+            held_panes: Vec::new(),
             held_command_rejections: vec![HeldCommandRejection {
                 fired_action: None,
                 reject_reason: RejectReason::TargetGone,

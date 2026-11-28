@@ -1,7 +1,7 @@
 //! What an attached client is told after the attach reply: the picture to
 //! draw, a pane placement the session committed, a pane that began or stopped
-//! waiting for a person, the end of the stream, and the session's
-//! notifications. [`SessionEvent`](crate::event::SessionEvent)
+//! waiting for a person, a pane that closed, the end of the stream, and the
+//! session's notifications. [`SessionEvent`](crate::event::SessionEvent)
 //! is every JSON frame after the reply.
 //!
 //! Pane content travels in painted updates, which are binary frames
@@ -20,7 +20,9 @@
 //! [`NotificationPosted`](crate::event::SessionEvent::NotificationPosted)
 //! carries one entry the session's notification queue took. The attach reply
 //! ([`IpcResult::Attached`](crate::protocol::IpcResult::Attached)) and
-//! [`Resync`](crate::event::SessionEvent::Resync) carry the whole queue.
+//! [`Resync`](crate::event::SessionEvent::Resync) carry the whole queue, and
+//! every pane the session holds with whether it waits for a person
+//! ([`HeldPane`](koshi_core::attention::HeldPane)).
 //!
 //! Eight frames here are not session facts.
 //! [`Resync`](crate::event::SessionEvent::Resync) is the first: the server
@@ -51,7 +53,7 @@
 use std::time::SystemTime;
 
 use koshi_core::action::ActionReference;
-use koshi_core::attention::AttentionReason;
+use koshi_core::attention::{AttentionReason, HeldPane};
 use koshi_core::command::PanePlacementTarget;
 use koshi_core::event::{HeldCommandRejection, RejectReason};
 use koshi_core::ids::{ClientId, CommandId, PaneId, SessionId, TabId};
@@ -156,6 +158,12 @@ pub enum SessionEvent {
         #[serde(deserialize_with = "Option::deserialize")]
         client_id: Option<ClientId>,
     },
+    /// A pane of the session closed: the session holds it no more. Sent once
+    /// to every attached client.
+    PaneRemoved {
+        /// The pane that closed.
+        pane_id: PaneId,
+    },
     /// The session is over: its last tab closed, a quit command was applied,
     /// or its last pane's child exited. A terminal frame — nothing follows it.
     Quit,
@@ -178,6 +186,9 @@ pub enum SessionEvent {
         /// The session's notification queue as it stands. The client takes
         /// every entry of it that it does not hold.
         notification_queue: NotificationQueue,
+        /// Every pane the session holds, in pane id order, each with whether
+        /// it waits for a person.
+        held_panes: Vec<HeldPane>,
         /// The rejections of this client's commands that the session held
         /// since the overflow, oldest first, each run of equal rejections in
         /// a row as one [`HeldCommandRejection`]. At most
@@ -300,6 +311,7 @@ impl SessionEvent {
             SessionEvent::PanePlacementCommitted { .. } => "PanePlacementCommitted",
             SessionEvent::PaneAttentionRaised { .. } => "PaneAttentionRaised",
             SessionEvent::PaneAttentionCleared { .. } => "PaneAttentionCleared",
+            SessionEvent::PaneRemoved { .. } => "PaneRemoved",
             SessionEvent::Quit => "Quit",
             SessionEvent::Restarting => "Restarting",
             SessionEvent::Detached => "Detached",
@@ -326,6 +338,7 @@ impl WireVariants for SessionEvent {
         "PanePlacementCommitted",
         "PaneAttentionRaised",
         "PaneAttentionCleared",
+        "PaneRemoved",
         "Quit",
         "Restarting",
         "Detached",

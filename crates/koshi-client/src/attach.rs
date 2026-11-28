@@ -182,6 +182,7 @@ use crate::PlacementInputAction;
 use crate::{compute_core_pane_area, Client, LinkStatus, PlacementTargetOutcome};
 use koshi_config::layer::PartialKoshiConfig;
 use koshi_core::action::ActionReference;
+use koshi_core::attention::HeldPane;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, FocusPaneArgs, FocusTarget,
     LockModeArgs, PanePlacementAnchor, SwitchSessionArgs, TiledPlacementTarget, ToggleLockModeArgs,
@@ -1235,7 +1236,8 @@ impl<B: Backend> Screen<B> {
     /// committed region solve draws nothing until the next session frame.
     ///
     /// Each refresh first advances the toast's clock and the notification
-    /// center's slide ([`Client::advance_notification_clocks`]). The toast's
+    /// center's slide ([`Client::advance_notification_clocks`]), with the
+    /// shown frame as the one that says which panes this viewer draws. The toast's
     /// clock stops while no frame shows, while the viewport differs from the
     /// one the shown frame was committed for, and while the shown frame has
     /// no room for the toast ([`has_notification_toast_room`]): a viewport
@@ -1264,7 +1266,11 @@ impl<B: Backend> Screen<B> {
                     &self.committed_regions,
                 ))
             });
-        client.advance_notification_clocks(current_time, is_toast_paused);
+        client.advance_notification_clocks(
+            current_time,
+            is_toast_paused,
+            self.last_snapshot.as_ref(),
+        );
         if self.pending_snapshot.is_some() {
             return self.commit_pending_snapshot(client, current_time);
         }
@@ -2206,17 +2212,17 @@ enum Incoming {
     /// or this terminal hanging up as a termination signal or a console close
     /// reports it, boxed.
     Input(Box<TerminalInput>),
-    /// What one attempt to get the link back ended with, boxed. Only
+    /// What one attempt to get the link back ended with. Only
     /// [`run_without_link`] starts an attempt, one at a time.
-    RejoinAnswer(Box<RejoinAnswer>),
+    RejoinAnswer(RejoinAnswer),
 }
 
 /// What one attempt to get the link back ended with, as its
 /// `koshi-attach-rejoin` thread puts it on the loop's channel.
 enum RejoinAnswer {
     /// The attempt joined the session on a new connection, held until the
-    /// loop takes it.
-    Joined(JoinedSessionGuard),
+    /// loop takes it, boxed.
+    Joined(Box<JoinedSessionGuard>),
     /// The attempt did not reach the session, for the cause carried here. A
     /// redial dials again if its next pause fits the window.
     Unreachable(CliError),
@@ -2799,6 +2805,8 @@ struct SessionAttachAnswer {
     resume_token: Option<ConnectionToken>,
     /// The session's notification queue.
     notification_queue: NotificationQueue,
+    /// Every pane the session holds, each with whether it waits for a person.
+    held_panes: Vec<HeldPane>,
 }
 
 /// Resolve what the user typed to one running session, through
@@ -3388,6 +3396,7 @@ fn attach_once(
                 session_id,
                 resume_token,
                 notification_queue,
+                held_panes,
             },
     } = joined_session_guard.release_joined_session();
     if should_read_input {
@@ -3419,7 +3428,13 @@ fn attach_once(
     );
     client.set_session_id(session_id);
     client.set_session_local(matches!(home, Home::Local { .. }));
-    apply_session_notification_queue(&mut client, session_id, &notification_queue);
+    apply_session_notification_queue(
+        &mut client,
+        session_id,
+        &notification_queue,
+        &held_panes,
+        None,
+    );
     let mut uplink = Uplink {
         uplink_writer: Some(spawn_uplink_writer(writer)),
         registry: ActionRegistry::new(),
@@ -3781,9 +3796,11 @@ fn run_attachment<B: Backend, W: Write>(
                             revision,
                             posted_entry,
                         }) => {
-                            if let Err(take_error) =
-                                client.take_session_notification_post(revision, posted_entry)
-                            {
+                            if let Err(take_error) = client.take_session_notification_post(
+                                revision,
+                                posted_entry,
+                                screen.last_snapshot.as_ref(),
+                            ) {
                                 tracing::warn!(%take_error, "a notification from the session was not taken");
                             }
                         }
@@ -3812,6 +3829,7 @@ fn run_attachment<B: Backend, W: Write>(
                         // taken.
                         Ok(SessionEvent::Resync {
                             notification_queue,
+                            held_panes,
                             held_command_rejections,
                             dropped_command_rejection_count,
                             ..
@@ -3823,6 +3841,8 @@ fn run_attachment<B: Backend, W: Write>(
                                 client,
                                 session_id,
                                 &notification_queue,
+                                &held_panes,
+                                screen.last_snapshot.as_ref(),
                             );
                             if let Err(take_error) = client.take_held_command_rejections(
                                 &held_command_rejections,
@@ -3864,10 +3884,18 @@ fn run_attachment<B: Backend, W: Write>(
                                 refusal,
                             });
                         }
-                        // A `PaneAttentionRaised` or `PaneAttentionCleared`
-                        // frame changes nothing in this client. Every other
-                        // frame is a `Pong`, which carries nothing. The frames
-                        // that end the attachment leave the loop above.
+                        // A pane that stopped waiting or closed takes its
+                        // toasts down; its entries stay in the center.
+                        Ok(
+                            SessionEvent::PaneAttentionCleared { pane_id, .. }
+                            | SessionEvent::PaneRemoved { pane_id },
+                        ) => {
+                            client.withdraw_pane_toasts(pane_id);
+                        }
+                        // A `PaneAttentionRaised` frame changes nothing in this
+                        // client. Every other frame is a `Pong`, which carries
+                        // nothing. The frames that end the attachment leave the
+                        // loop above.
                         _ => {}
                     }
                 }
@@ -3951,9 +3979,9 @@ fn run_attachment<B: Backend, W: Write>(
                                 is_viewer_local_input_mode_on,
                                 remote_link_timeout_ms,
                             ) {
-                                Ok(joined_session) => RejoinAnswer::Joined(
+                                Ok(joined_session) => RejoinAnswer::Joined(Box::new(
                                     JoinedSessionGuard::from_joined_session(joined_session),
-                                ),
+                                )),
                                 Err(restart_ending) => RejoinAnswer::Ended(restart_ending),
                             }
                         }),
@@ -4025,7 +4053,13 @@ fn run_attachment<B: Backend, W: Write>(
             connection_token = joined_session.connection_token;
             resume_token = attach_answer.resume_token;
             client.set_client_id(client_id);
-            apply_session_notification_queue(client, session_id, &attach_answer.notification_queue);
+            apply_session_notification_queue(
+                client,
+                session_id,
+                &attach_answer.notification_queue,
+                &attach_answer.held_panes,
+                screen.last_snapshot.as_ref(),
+            );
             client.end_mouse_gestures();
             pending_mouse_actions.clear();
             // The panes the old frame placed may be gone. Mouse events wait for
@@ -5148,7 +5182,7 @@ fn run_without_link<B: Backend>(
             Incoming::Frame { .. } | Incoming::Painted { .. } | Incoming::ImageChunk { .. } => {}
             // The next iteration starts with the refresh that paints the result.
             Incoming::ImageOutputReady => {}
-            Incoming::RejoinAnswer(rejoin_answer) => match *rejoin_answer {
+            Incoming::RejoinAnswer(rejoin_answer) => match rejoin_answer {
                 RejoinAnswer::Joined(joined_session_guard) => {
                     break Ok(joined_session_guard.release_joined_session())
                 }
@@ -5306,7 +5340,7 @@ fn spawn_rejoin_attempt(
                         ),
                     })))
                 });
-            let _ = incoming_sender.send(Incoming::RejoinAnswer(Box::new(rejoin_answer)));
+            let _ = incoming_sender.send(Incoming::RejoinAnswer(rejoin_answer));
         })
         .expect("spawn attach rejoin thread");
 }
@@ -5318,9 +5352,9 @@ fn spawn_rejoin_attempt(
 /// [`DialError::Unreachable`] or a [`DialError::Restarting`].
 fn build_redial_answer(dial_result: Result<JoinedSession, DialError>) -> RejoinAnswer {
     match dial_result {
-        Ok(joined_session) => {
-            RejoinAnswer::Joined(JoinedSessionGuard::from_joined_session(joined_session))
-        }
+        Ok(joined_session) => RejoinAnswer::Joined(Box::new(
+            JoinedSessionGuard::from_joined_session(joined_session),
+        )),
         Err(DialError::Refused(dial_refusal)) => {
             tracing::warn!(%dial_refusal, "the server refused this client's dial");
             RejoinAnswer::Ended(AttachmentEnding::LinkLost(Box::new(dial_refusal)))
@@ -5870,6 +5904,7 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
             client_id,
             session_id,
             notification_queue,
+            held_panes,
             resume_token,
             pane_area,
         } => {
@@ -5881,6 +5916,7 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
                 session_id,
                 resume_token,
                 notification_queue,
+                held_panes,
             })
         }
         IpcResult::Error(refusal) => Err(talk::build_peer_refusal_error(&refusal)),
@@ -5891,17 +5927,25 @@ fn parse_attached_session(attach_result: IpcResult) -> Result<SessionAttachAnswe
     }
 }
 
-/// Take `notification_queue`, the queue of session `session_id` as an attach
-/// answer or a `Resync` carried it, into `client`'s notification history
-/// ([`Client::take_session_notification_queue`]). A queue the history does
-/// not take changes nothing and logs one warning.
+/// Take `notification_queue`, the queue of session `session_id`, with
+/// `held_panes`, every pane the session holds, as an attach answer or a
+/// `Resync` carried them, into `client`'s notification history
+/// ([`Client::take_session_notification_queue`]). `painted_frame` is the frame
+/// this viewer last painted, or `None` before its first paint. A queue the
+/// history does not take changes nothing and logs one warning.
 fn apply_session_notification_queue(
     client: &mut Client,
     session_id: SessionId,
     notification_queue: &NotificationQueue,
+    held_panes: &[HeldPane],
+    painted_frame: Option<&RenderSnapshot>,
 ) {
-    if let Err(take_error) = client.take_session_notification_queue(session_id, notification_queue)
-    {
+    if let Err(take_error) = client.take_session_notification_queue(
+        session_id,
+        notification_queue,
+        held_panes,
+        painted_frame,
+    ) {
         tracing::warn!(%take_error, "the session's notification queue was not taken");
     }
 }

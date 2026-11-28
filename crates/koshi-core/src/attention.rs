@@ -14,6 +14,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ids::PaneId;
 use crate::notification::NotificationSeverity;
 use crate::program_status::{BlockedKind, ProgramStatusRecord, ProgramStatusState};
 
@@ -35,6 +36,20 @@ pub struct Attention {
     /// this field is refused.
     #[serde(deserialize_with = "Option::deserialize")]
     pub withdrawable_notification_id: Option<String>,
+}
+
+/// One pane a session holds, as an attach answer and a `Resync` list it: the
+/// pane's id, and whether it waits for a person.
+///
+/// Example: a session whose `codex` pane waits and whose `htop` pane waits
+/// for nobody lists `HeldPane { pane_id: <codex>, is_waiting: true }` and
+/// `HeldPane { pane_id: <htop>, is_waiting: false }`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldPane {
+    /// The pane.
+    pub pane_id: PaneId,
+    /// Whether the pane holds an [`Attention`].
+    pub is_waiting: bool,
 }
 
 /// Why a pane wants a person.
