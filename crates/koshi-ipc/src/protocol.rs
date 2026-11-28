@@ -19,6 +19,7 @@ use std::fmt;
 use std::sync::OnceLock;
 
 use koshi_core::action::ActionReference;
+use koshi_core::attention::HeldPane;
 use koshi_core::command::{
     Command, CommandEnvelope, CommandResult, CommandSource, MoveFloatingPaneArgs,
     TiledPlacementTarget,
@@ -1088,6 +1089,9 @@ pub enum IpcResult {
         session_id: SessionId,
         /// The session's notification queue as it stands.
         notification_queue: NotificationQueue,
+        /// Every pane the session holds, in pane id order, each with whether
+        /// it waits for a person.
+        held_panes: Vec<HeldPane>,
         /// The fresh secret this attach minted, presented on the next attach
         /// to get this attach's view back, and with `resume_client_id` to
         /// claim this client's record after the session replaced its own

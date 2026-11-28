@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU16;
 use std::time::SystemTime;
 
-use koshi_core::attention::AttentionReason;
+use koshi_core::attention::{AttentionReason, HeldPane};
 use koshi_core::command::{GridPosition, Selection, SelectionKind};
 use koshi_core::event::Event;
 use koshi_core::geometry::{AxisPercent, FloatingPanePosition, PaneArea, Point, SplitDirection};
@@ -5696,6 +5696,25 @@ fn build_attention_view_changes() -> SessionViewChanges {
         is_attention_changed: true,
         ..SessionViewChanges::default()
     }
+}
+
+#[test]
+fn list_held_panes_lists_every_pane_in_pane_id_order_with_whether_it_waits() {
+    let (mut session, (_, a_pane_id), (_, b_pane_id)) = build_session_with_two_tabs();
+    let _ = session.set_pane_attention(b_pane_id, Some(build_bell_attention(1)));
+    let mut expected_held_panes = vec![
+        HeldPane {
+            pane_id: a_pane_id,
+            is_waiting: false,
+        },
+        HeldPane {
+            pane_id: b_pane_id,
+            is_waiting: true,
+        },
+    ];
+    expected_held_panes.sort_by_key(|held_pane| held_pane.pane_id);
+
+    assert_eq!(session.list_held_panes(), expected_held_panes);
 }
 
 #[test]

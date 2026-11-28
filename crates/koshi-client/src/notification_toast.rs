@@ -35,6 +35,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use koshi_core::ids::PaneId;
 use koshi_core::notification::{NotificationEntry, NotificationId, NotificationSeverity};
 
 /// The most entry previews that wait behind the shown preview: 3. An entry
@@ -77,8 +78,12 @@ enum WithdrawSpeed {
 /// The phase of the shown preview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ToastPhase {
-    /// Sliding in from past the side edge.
-    Appear,
+    /// Sliding in to the toast's corner.
+    Appear {
+        /// The thousandths of the width past the edge when the appear
+        /// started: [`FULLY_HIDDEN_PER_MILLE`] for a new toast.
+        start_hidden_per_mille: u16,
+    },
     /// Holding in place.
     Stay,
     /// Sliding out past the side edge.
@@ -117,7 +122,9 @@ impl ShownToast {
         ShownToast {
             toast_number,
             preview,
-            phase: ToastPhase::Appear,
+            phase: ToastPhase::Appear {
+                start_hidden_per_mille: FULLY_HIDDEN_PER_MILLE,
+            },
             phase_started_at: None,
             hidden_per_mille: FULLY_HIDDEN_PER_MILLE,
             withdraw_request: None,
@@ -159,9 +166,13 @@ pub(crate) struct NotificationToastQueue {
 impl NotificationToastQueue {
     /// Preview `arrived_entry`, an arrival of the history.
     ///
-    /// A preview that already shows `arrived_entry`'s id takes
-    /// `arrived_entry` as its copy, so a repeat shows its new `×N`, and
-    /// nothing is queued. Otherwise, in this order: the waiting summary counts
+    /// A shown entry preview of `arrived_entry`'s id that withdraws, or that
+    /// a withdraw is requested for, turns back: it takes `arrived_entry` as
+    /// its copy and the next toast number, and slides in from where it
+    /// stands at the next advance of the clock. Nothing is queued. Any other
+    /// preview that already shows `arrived_entry`'s id takes `arrived_entry`
+    /// as its copy, so a repeat shows its new `×N`, and nothing is queued.
+    /// Otherwise, in this order: the waiting summary counts
     /// `arrived_entry`; with no toast shown, `arrived_entry` shows; with fewer
     /// than [`MAX_WAITING_TOAST_COUNT`] waiting, `arrived_entry` waits; and
     /// else `arrived_entry` starts the waiting summary. A shown summary counts
@@ -170,6 +181,29 @@ impl NotificationToastQueue {
     /// Example: a summary of 36 entries shows, and an `Error` arrives. The
     /// `Error` waits behind the summary and shows after it.
     pub(crate) fn queue_preview(&mut self, arrived_entry: &NotificationEntry) {
+        if let Some(shown_toast) = &mut self.shown_toast {
+            let is_shown_entry_withdrawing =
+                matches!(
+                    &shown_toast.preview,
+                    ToastPreview::Entry(shown_entry)
+                        if shown_entry.notification_id == arrived_entry.notification_id
+                ) && (matches!(shown_toast.phase, ToastPhase::Withdraw { .. })
+                    || shown_toast.withdraw_request.is_some());
+            if is_shown_entry_withdrawing {
+                *shown_toast = ShownToast {
+                    toast_number: self.shown_toast_count,
+                    preview: ToastPreview::Entry(arrived_entry.clone()),
+                    phase: ToastPhase::Appear {
+                        start_hidden_per_mille: shown_toast.hidden_per_mille,
+                    },
+                    phase_started_at: None,
+                    hidden_per_mille: shown_toast.hidden_per_mille,
+                    withdraw_request: None,
+                };
+                self.shown_toast_count += 1;
+                return;
+            }
+        }
         if self.update_previews(arrived_entry) {
             return;
         }
@@ -318,6 +352,41 @@ impl NotificationToastQueue {
         }
     }
 
+    /// Drop every waiting entry preview whose entry is about a pane that
+    /// `is_withdrawn_pane` names ([`NotificationEntry::find_subject_pane_id`]),
+    /// and withdraw a shown entry preview about such a pane fast from where it
+    /// stands at the next advance of the clock. A shown preview that already
+    /// withdraws fast goes on as it is. A summary keeps counting such entries.
+    ///
+    /// Example: the toast shows `codex: blocked` about pane 3, and
+    /// `cargo test: failed` about pane 3 waits behind it. Withdrawing pane 3
+    /// drops the waiting preview, and the toast slides out over 0.5 s.
+    pub(crate) fn withdraw_pane_previews(&mut self, is_withdrawn_pane: &dyn Fn(PaneId) -> bool) {
+        let is_about_withdrawn_pane = |previewed_entry: &NotificationEntry| {
+            previewed_entry
+                .find_subject_pane_id()
+                .is_some_and(is_withdrawn_pane)
+        };
+        self.waiting_entries
+            .retain(|waiting_entry| !is_about_withdrawn_pane(waiting_entry));
+        let Some(shown_toast) = &mut self.shown_toast else {
+            return;
+        };
+        let ToastPreview::Entry(shown_entry) = &shown_toast.preview else {
+            return;
+        };
+        let is_withdrawing_fast = matches!(
+            shown_toast.phase,
+            ToastPhase::Withdraw {
+                withdraw_speed: WithdrawSpeed::Fast,
+                ..
+            }
+        );
+        if !is_withdrawing_fast && is_about_withdrawn_pane(shown_entry) {
+            shown_toast.withdraw_request = Some(WithdrawSpeed::Fast);
+        }
+    }
+
     /// Withdraw the shown preview from where it stands at the next advance of
     /// the clock, at the speed of the withdraw phase. Does nothing while no
     /// toast shows, or while it withdraws.
@@ -341,12 +410,15 @@ impl NotificationToastQueue {
     }
 
     /// Advance the clock to `current_time` with the phase lengths of
-    /// `toast_timing`.
+    /// `toast_timing`, while `is_pane_drawn` says whether the viewer's newest
+    /// painted frame draws a pane's content.
     ///
     /// While `is_paused`, the clock stops, and nothing moves. When it runs
     /// again, the shown phase resumes where it stopped. A shown preview that
     /// the clock has not yet advanced with starts its appear phase at
-    /// `current_time`. A requested withdraw starts at `current_time`, from the
+    /// `current_time`, unless its entry is about a pane that `is_pane_drawn`
+    /// names: that preview goes before it shows, and the next preview takes
+    /// its turn. A requested withdraw starts at `current_time`, from the
     /// slide position at `current_time`; a toast still fully past its edge
     /// ends there. Each phase that ended by `current_time` gives way to the
     /// next one at its own end ([`compute_phase_ended_at`]), and a withdraw
@@ -364,6 +436,7 @@ impl NotificationToastQueue {
         current_time: Instant,
         toast_timing: ToastTiming,
         is_paused: bool,
+        is_pane_drawn: &dyn Fn(PaneId) -> bool,
     ) -> bool {
         if is_paused {
             self.paused_at.get_or_insert(current_time);
@@ -389,6 +462,17 @@ impl NotificationToastQueue {
             let Some(shown_toast) = &mut self.shown_toast else {
                 return is_preview_changed;
             };
+            let is_turn_of_drawn_pane = shown_toast.phase_started_at.is_none()
+                && matches!(
+                    &shown_toast.preview,
+                    ToastPreview::Entry(shown_entry)
+                        if shown_entry.find_subject_pane_id().is_some_and(is_pane_drawn)
+                );
+            if is_turn_of_drawn_pane {
+                self.show_next_preview();
+                is_preview_changed = true;
+                continue;
+            }
             let phase_started_at = *shown_toast.phase_started_at.get_or_insert(current_time);
             let phase_ended_at = compute_phase_ended_at(
                 shown_toast.phase,
@@ -425,7 +509,7 @@ impl NotificationToastQueue {
             }
             shown_toast.phase_started_at = Some(phase_ended_at);
             match shown_toast.phase {
-                ToastPhase::Appear => shown_toast.phase = ToastPhase::Stay,
+                ToastPhase::Appear { .. } => shown_toast.phase = ToastPhase::Stay,
                 ToastPhase::Stay => {
                     shown_toast.phase = ToastPhase::Withdraw {
                         start_hidden_per_mille: 0,
@@ -474,7 +558,7 @@ impl NotificationToastQueue {
         );
         let next_change_at = match shown_toast.phase {
             ToastPhase::Stay => phase_ended_at,
-            ToastPhase::Appear | ToastPhase::Withdraw { .. } => {
+            ToastPhase::Appear { .. } | ToastPhase::Withdraw { .. } => {
                 let elapsed_step_count =
                     count_elapsed_steps(current_time.saturating_duration_since(phase_started_at));
                 let next_step_at = phase_started_at
@@ -565,7 +649,9 @@ fn compute_phase_duration(
     has_waiting_preview: bool,
 ) -> Duration {
     match phase {
-        ToastPhase::Appear | ToastPhase::Withdraw { .. } if toast_timing.should_reduce_motion => {
+        ToastPhase::Appear { .. } | ToastPhase::Withdraw { .. }
+            if toast_timing.should_reduce_motion =>
+        {
             Duration::ZERO
         }
         ToastPhase::Withdraw {
@@ -573,7 +659,7 @@ fn compute_phase_duration(
             ..
         } => BACKLOG_PHASE_DURATION,
         _ if has_waiting_preview => BACKLOG_PHASE_DURATION,
-        ToastPhase::Appear | ToastPhase::Withdraw { .. } => NORMAL_SLIDE_DURATION,
+        ToastPhase::Appear { .. } | ToastPhase::Withdraw { .. } => NORMAL_SLIDE_DURATION,
         ToastPhase::Stay => toast_timing.stay_duration,
     }
 }
@@ -613,8 +699,9 @@ fn count_elapsed_steps(elapsed_duration: Duration) -> u128 {
 /// into `phase`, which runs `phase_duration`. The elapsed time counts in
 /// whole 50 ms steps, and a phase of no length counts as ended.
 ///
-/// Appear runs from `1000` to `0`, stay holds `0`, and withdraw runs from its
-/// start to `1000`. 1 s of appear at 325 ms gives `700`.
+/// Appear runs from its start to `0`, stay holds `0`, and withdraw runs from
+/// its start to `1000`. 1 s of appear from `1000` at 325 ms gives `700`, and
+/// from `400` gives `280`.
 fn compute_hidden_per_mille(
     phase: ToastPhase,
     elapsed_duration: Duration,
@@ -627,7 +714,13 @@ fn compute_hidden_per_mille(
         .unwrap_or(1000)
         .min(1000) as u16;
     match phase {
-        ToastPhase::Appear => FULLY_HIDDEN_PER_MILLE - progress_per_mille,
+        ToastPhase::Appear {
+            start_hidden_per_mille,
+        } => {
+            let appeared_per_mille =
+                u32::from(start_hidden_per_mille) * u32::from(progress_per_mille) / 1000;
+            start_hidden_per_mille - appeared_per_mille as u16
+        }
         ToastPhase::Stay => 0,
         ToastPhase::Withdraw {
             start_hidden_per_mille,

@@ -405,6 +405,7 @@ pub fn send_test_attach(
         client_id,
         session_id,
         notification_queue,
+        held_panes: _,
         resume_token,
         pane_area,
     } = attach_response.answer_result

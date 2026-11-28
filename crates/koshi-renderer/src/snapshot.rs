@@ -34,11 +34,12 @@ use std::sync::Arc;
 
 use koshi_config::types::ToastPosition;
 use koshi_core::action::ActionReference;
+use koshi_core::attention::HeldPane;
 use koshi_core::client::ClientOrigin;
 use koshi_core::constant::FLOATING_TITLEBAR_STRIP_ROW_COUNT;
 use koshi_core::event::{
     HeldCommandRejection, PaneAttentionCleared, PaneAttentionRaised, PanePlacementCommitted,
-    RejectReason, SubscriberLagged,
+    PaneRemoved, RejectReason, SubscriberLagged,
 };
 use koshi_core::geometry::{Point, Rect, Size};
 use koshi_core::ids::{ClientId, CommandId, FloatingPaneId, PaneId, SessionId, TabId};
@@ -328,7 +329,7 @@ impl CommittedRegions {
 }
 
 /// One item on a subscriber's queue: a pane placement the session committed,
-/// a pane that began or stopped waiting for a person,
+/// a pane that began or stopped waiting for a person, a pane that closed,
 /// the end of the session, the frame composed for the subscriber's client, a
 /// fresh frame that resyncs a subscriber whose queue overflowed, one post the
 /// session's notification queue took, the answers to one round of mouse
@@ -347,6 +348,8 @@ pub enum Delivery {
     PaneAttentionRaised(PaneAttentionRaised),
     /// A pane stopped waiting for a person.
     PaneAttentionCleared(PaneAttentionCleared),
+    /// A pane closed: the session holds it no more.
+    PaneRemoved(PaneRemoved),
     /// The session is over. The client's writing thread writes it as the
     /// stream's last frame, then stops.
     Quit,
@@ -366,6 +369,9 @@ pub enum Delivery {
         lag_report: SubscriberLagged,
         /// The session's notification queue as it stands.
         notification_queue: Box<NotificationQueue>,
+        /// Every pane the session holds, in pane id order, each with whether
+        /// it waits for a person.
+        held_panes: Vec<HeldPane>,
         /// The rejections of the subscriber's commands held since it paused,
         /// oldest first, each run of equal rejections in a row as one
         /// [`HeldCommandRejection`].
@@ -491,6 +497,39 @@ pub struct ViewerChrome {
     /// The viewer's toast as this frame draws it, over every other part of
     /// the pane area. `None` while no toast shows.
     pub notification_toast: Option<NotificationToast>,
+}
+
+impl ViewerChrome {
+    /// Whether a frame painted with this chrome, whose active tab has the
+    /// layout `active_tab_layout_area`, draws `floating_pane_slot`. No slot is
+    /// drawn while `active_tab_layout_area.is_every_pane_suppressed` is
+    /// `true`. While `is_pane_placement_visible` is `true`, the only slot
+    /// drawn is the one whose tree holds `placement_source_pane_id`, and only
+    /// while `active_tab_layout_area` holds no slot of that pane. Otherwise
+    /// every slot is drawn.
+    ///
+    /// Example: in pane placement mode for the tiled pane 1, a floating pane
+    /// that holds pane 2 is not drawn.
+    #[must_use]
+    pub fn is_floating_pane_slot_drawn(
+        &self,
+        active_tab_layout_area: &LayoutAreaSnapshot,
+        floating_pane_slot: &FloatingPaneSlot,
+    ) -> bool {
+        if active_tab_layout_area.is_every_pane_suppressed {
+            return false;
+        }
+        if !self.is_pane_placement_visible {
+            return true;
+        }
+        self.placement_source_pane_id
+            .is_some_and(|placement_source_pane_id| {
+                floating_pane_slot
+                    .layout_area
+                    .has_pane(placement_source_pane_id)
+                    && !active_tab_layout_area.has_pane(placement_source_pane_id)
+            })
+    }
 }
 
 /// One viewer's notification center as one frame draws it: where its body
@@ -774,38 +813,20 @@ impl<'a> FrameLayout<'a> {
     pub fn list_drawn_floating_pane_slots(
         &self,
     ) -> impl DoubleEndedIterator<Item = DrawnFloatingPaneSlot<'a>> + 'a {
-        let floating_pane_slots: &'a [FloatingPaneSlot] = if self
+        let frame_layout = *self;
+        let active_tab_layout_area = &frame_layout
             .session_snapshot
             .active_tab_snapshot
-            .layout_area
-            .is_every_pane_suppressed
-        {
-            &[]
-        } else {
-            &self.session_snapshot.floating_pane_slots
-        };
-        let frame_layout = *self;
-        let is_drawn_floating_pane_slot = move |floating_pane_slot: &&FloatingPaneSlot| {
-            if !frame_layout.viewer_chrome.is_pane_placement_visible {
-                return true;
-            }
-            frame_layout
-                .viewer_chrome
-                .placement_source_pane_id
-                .is_some_and(|placement_source_pane_id| {
-                    floating_pane_slot
-                        .layout_area
-                        .has_pane(placement_source_pane_id)
-                        && !frame_layout
-                            .session_snapshot
-                            .active_tab_snapshot
-                            .layout_area
-                            .has_pane(placement_source_pane_id)
-                })
-        };
-        floating_pane_slots
+            .layout_area;
+        frame_layout
+            .session_snapshot
+            .floating_pane_slots
             .iter()
-            .filter(is_drawn_floating_pane_slot)
+            .filter(move |floating_pane_slot| {
+                frame_layout
+                    .viewer_chrome
+                    .is_floating_pane_slot_drawn(active_tab_layout_area, floating_pane_slot)
+            })
             .map(move |floating_pane_slot| {
                 let outer_rect = match frame_layout.viewer_chrome.floating_pane_move_draft {
                     Some(floating_pane_move_draft)

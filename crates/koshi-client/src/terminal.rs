@@ -257,18 +257,49 @@ pub(crate) fn build_committed_placement_render_snapshot(
             .session_snapshot
             .active_tab_snapshot = animated_tab_snapshot;
     }
-    let floating_pane_slots = &mut committed_placement_render_snapshot
-        .session_snapshot
-        .floating_pane_slots;
-    for animated_floating_pane_slot in animated_floating_pane_slots {
-        match floating_pane_slots.iter_mut().find(|floating_pane_slot| {
-            floating_pane_slot.floating_pane_id == animated_floating_pane_slot.floating_pane_id
-        }) {
-            Some(floating_pane_slot) => *floating_pane_slot = animated_floating_pane_slot.clone(),
-            None => floating_pane_slots.push(animated_floating_pane_slot.clone()),
-        }
-    }
     committed_placement_render_snapshot
+        .session_snapshot
+        .floating_pane_slots = list_displayed_floating_pane_slots(
+        &render_snapshot.session_snapshot.floating_pane_slots,
+        animated_floating_pane_slots,
+    )
+    .cloned()
+    .collect();
+    committed_placement_render_snapshot
+}
+
+/// The floating pane slots a frame draws while floating panes slide, back to
+/// front: each of `floating_pane_slots`, or the slot of
+/// `animated_floating_pane_slots` with the same floating pane in its place,
+/// then each slot of `animated_floating_pane_slots` whose floating pane has no
+/// slot in `floating_pane_slots`.
+///
+/// Example: slots `[1, 2]` with the slides `[2', 3']` give `[1, 2', 3']`.
+pub(crate) fn list_displayed_floating_pane_slots<'a>(
+    floating_pane_slots: &'a [FloatingPaneSlot],
+    animated_floating_pane_slots: &'a [FloatingPaneSlot],
+) -> impl Iterator<Item = &'a FloatingPaneSlot> + 'a {
+    let has_same_floating_pane =
+        |floating_pane_slot: &FloatingPaneSlot, other_floating_pane_slot: &FloatingPaneSlot| {
+            floating_pane_slot.floating_pane_id == other_floating_pane_slot.floating_pane_id
+        };
+    let replaced_floating_pane_slots = floating_pane_slots.iter().map(move |floating_pane_slot| {
+        animated_floating_pane_slots
+            .iter()
+            .find(|animated_floating_pane_slot| {
+                has_same_floating_pane(animated_floating_pane_slot, floating_pane_slot)
+            })
+            .unwrap_or(floating_pane_slot)
+    });
+    let added_floating_pane_slots =
+        animated_floating_pane_slots
+            .iter()
+            .filter(move |animated_floating_pane_slot| {
+                !floating_pane_slots.iter().any(|floating_pane_slot| {
+                    has_same_floating_pane(floating_pane_slot, animated_floating_pane_slot)
+                })
+            });
+    replaced_floating_pane_slots.chain(added_floating_pane_slots)
 }
 
 /// The outer box of `pane_id` in `tab_snapshot`, counted from the origin of a

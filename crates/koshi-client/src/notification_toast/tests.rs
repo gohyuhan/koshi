@@ -1,12 +1,15 @@
 //! Tests for `NotificationToastQueue`: the normal and backlog phases, the
 //! cap a new successor sets and the deadline its removal restores, flood
-//! control, repeats, the close control, eviction, the pause and the wakeups.
+//! control, repeats, the close control, eviction, the pause and the wakeups,
+//! and the previews about a pane: withdrawn when the pane stops waiting or
+//! closes, and dropped at their turn while the frame draws the pane.
 
 use std::num::NonZeroU32;
 use std::time::SystemTime;
 
+use koshi_core::attention::AttentionReasonKind;
 use koshi_core::ids::{ClientId, SessionId};
-use koshi_core::notification::{NotificationQueue, NotificationQueueOwner};
+use koshi_core::notification::{NotificationQueue, NotificationQueueOwner, NotificationSubject};
 
 use super::*;
 
@@ -78,7 +81,8 @@ fn one_toast_runs_one_second_of_appear_three_of_stay_and_one_of_withdraw() {
         assert!(!toast_queue.advance(
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
-            false
+            false,
+            &|_| false,
         ));
         slide_positions.push(clone_shown_preview(&toast_queue));
     }
@@ -86,6 +90,7 @@ fn one_toast_runs_one_second_of_appear_three_of_stay_and_one_of_withdraw() {
         compute_instant_after_milliseconds(start, 5000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -108,24 +113,27 @@ fn a_waiting_preview_runs_each_phase_of_the_shown_toast_for_half_a_second() {
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
 
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 250),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let first_at_250 = clone_shown_preview(&toast_queue);
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 1500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let second_at_1500 = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 2000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -148,11 +156,12 @@ fn a_new_successor_caps_the_shown_phase_at_half_a_second_from_its_start() {
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries[..1]);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 200),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let before_the_successor = clone_shown_preview(&toast_queue);
 
@@ -161,12 +170,14 @@ fn a_new_successor_caps_the_shown_phase_at_half_a_second_from_its_start() {
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let after_the_successor = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -188,11 +199,12 @@ fn a_successor_past_the_capped_deadline_ends_the_shown_phase_at_the_next_advance
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries[..1]);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 800),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let before_the_successor = clone_shown_preview(&toast_queue);
 
@@ -201,18 +213,21 @@ fn a_successor_past_the_capped_deadline_ends_the_shown_phase_at_the_next_advance
         compute_instant_after_milliseconds(start, 800),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let in_the_capped_stay = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1299),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let at_the_end_of_the_capped_stay = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1550),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -242,11 +257,12 @@ fn successors_that_arrive_late_in_a_long_stay_each_show_after_the_shown_toast_wi
         should_reduce_motion: false,
     };
     let start = Instant::now();
-    toast_queue.advance(start, toast_timing, false);
+    toast_queue.advance(start, toast_timing, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1000),
         toast_timing,
         false,
+        &|_| false,
     );
 
     for posted_entry in &posted_entries[1..] {
@@ -258,6 +274,7 @@ fn successors_that_arrive_late_in_a_long_stay_each_show_after_the_shown_toast_wi
             compute_instant_after_milliseconds(start, millisecond_count),
             toast_timing,
             false,
+            &|_| false,
         );
         shown_previews.push(clone_shown_preview(&toast_queue));
     }
@@ -280,11 +297,12 @@ fn a_successor_after_an_earlier_backlog_cleared_caps_the_phase_from_its_own_arri
     let posted_entries = post_own_entries(3);
     let mut toast_queue = build_previewing_queue(&posted_entries[..2]);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 2500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.queue_preview(&posted_entries[2]);
@@ -294,6 +312,7 @@ fn a_successor_after_an_earlier_backlog_cleared_caps_the_phase_from_its_own_arri
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         shown_previews.push(clone_shown_preview(&toast_queue));
     }
@@ -317,16 +336,18 @@ fn a_successor_queued_while_the_clock_is_paused_caps_the_stay_when_the_clock_run
         should_reduce_motion: false,
     };
     let start = Instant::now();
-    toast_queue.advance(start, toast_timing, false);
+    toast_queue.advance(start, toast_timing, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1000),
         toast_timing,
         false,
+        &|_| false,
     );
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 10_000),
         toast_timing,
         true,
+        &|_| false,
     );
 
     toast_queue.queue_preview(&posted_entries[1]);
@@ -336,6 +357,7 @@ fn a_successor_queued_while_the_clock_is_paused_caps_the_stay_when_the_clock_run
             compute_instant_after_milliseconds(start, millisecond_count),
             toast_timing,
             false,
+            &|_| false,
         );
         shown_previews.push(clone_shown_preview(&toast_queue));
     }
@@ -366,6 +388,7 @@ fn reduced_motion_with_a_successor_holds_the_toast_half_a_second_then_shows_the_
             compute_instant_after_milliseconds(start, millisecond_count),
             toast_timing,
             false,
+            &|_| false,
         );
         shown_previews.push(clone_shown_preview(&toast_queue));
     }
@@ -385,11 +408,12 @@ fn a_withdraw_requested_while_a_successor_waits_slides_out_in_half_a_second_from
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.request_withdraw();
@@ -399,6 +423,7 @@ fn a_withdraw_requested_while_a_successor_waits_slides_out_in_half_a_second_from
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         shown_previews.push(clone_shown_preview(&toast_queue));
     }
@@ -424,12 +449,13 @@ fn an_advance_an_hour_late_ends_the_shown_preview_and_starts_the_next_at_that_ad
         should_reduce_motion: false,
     };
     let start = Instant::now();
-    toast_queue.advance(start, toast_timing, false);
+    toast_queue.advance(start, toast_timing, false, &|_| false);
 
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 3_600_000),
         toast_timing,
         false,
+        &|_| false,
     );
     let next_wakeup = toast_queue.find_next_wakeup(
         compute_instant_after_milliseconds(start, 3_600_000),
@@ -439,6 +465,7 @@ fn an_advance_an_hour_late_ends_the_shown_preview_and_starts_the_next_at_that_ad
         compute_instant_after_milliseconds(start, 3_600_250),
         toast_timing,
         false,
+        &|_| false,
     );
 
     assert!(is_preview_changed);
@@ -455,11 +482,12 @@ fn a_successor_first_seen_after_the_shown_phase_ended_keeps_that_phase_end() {
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries[..1]);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.queue_preview(&posted_entries[1]);
@@ -467,12 +495,14 @@ fn a_successor_first_seen_after_the_shown_phase_ended_keeps_that_phase_end() {
         compute_instant_after_milliseconds(start, 4100),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let in_the_withdraw = clone_shown_preview(&toast_queue);
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 4500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -491,11 +521,12 @@ fn removing_every_successor_restores_the_normal_deadline_of_the_unfinished_phase
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let with_the_successor = clone_shown_preview(&toast_queue);
 
@@ -504,6 +535,7 @@ fn removing_every_successor_restores_the_normal_deadline_of_the_unfinished_phase
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -521,11 +553,12 @@ fn removing_every_successor_never_rewinds_a_finished_phase() {
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 600),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.remove_previews(posted_entries[1].notification_id);
@@ -535,6 +568,7 @@ fn removing_every_successor_never_rewinds_a_finished_phase() {
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         slide_positions.push(clone_shown_preview(&toast_queue));
     }
@@ -559,24 +593,27 @@ fn a_toast_duration_of_five_seconds_holds_the_toast_five_seconds() {
         should_reduce_motion: false,
     };
     let start = Instant::now();
-    toast_queue.advance(start, toast_timing, false);
+    toast_queue.advance(start, toast_timing, false, &|_| false);
 
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 5999),
         toast_timing,
         false,
+        &|_| false,
     );
     let before_the_withdraw = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 6500),
         toast_timing,
         false,
+        &|_| false,
     );
     let in_the_withdraw = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 7000),
         toast_timing,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -600,18 +637,20 @@ fn reduced_motion_puts_the_toast_in_place_in_one_frame_and_removes_it_in_one() {
     };
     let start = Instant::now();
 
-    toast_queue.advance(start, toast_timing, false);
+    toast_queue.advance(start, toast_timing, false, &|_| false);
     let first_frame = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 2999),
         toast_timing,
         false,
+        &|_| false,
     );
     let last_stay_frame = clone_shown_preview(&toast_queue);
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 3000),
         toast_timing,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -638,6 +677,7 @@ fn forty_entries_give_four_previews_then_one_summary_that_counts_thirty_six() {
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
         shown_previews.push(clone_shown_preview(&toast_queue));
     }
@@ -645,6 +685,7 @@ fn forty_entries_give_four_previews_then_one_summary_that_counts_thirty_six() {
         compute_instant_after_milliseconds(start, 11_000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     let summary_members: Vec<(NotificationId, NotificationSeverity)> = posted_entries[4..]
@@ -676,6 +717,7 @@ fn an_entry_that_arrives_while_the_summary_shows_waits_behind_it_and_shows_after
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
     }
     let summary_in_its_stay = clone_shown_preview(&toast_queue);
@@ -687,17 +729,20 @@ fn an_entry_that_arrives_while_the_summary_shows_waits_behind_it_and_shows_after
         compute_instant_after_milliseconds(start, 8000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 8250),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let summary_halfway_out = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 8500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     let summary_preview = Some((
@@ -741,18 +786,20 @@ fn a_repeat_updates_its_shown_and_its_waiting_preview_and_queues_nothing() {
 
     toast_queue.queue_preview(&repeated_first_entry);
     toast_queue.queue_preview(&repeated_second_entry);
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     let first_preview = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let second_preview = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 6500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -789,11 +836,12 @@ fn a_repeat_after_its_toast_ended_shows_a_new_preview() {
     let posted_entries = post_own_entries(1);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 5000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let mut repeated_entry = posted_entries[0].clone();
     repeated_entry.repeat_count = 2;
@@ -811,11 +859,12 @@ fn the_close_control_withdraws_the_toast_from_where_it_stands() {
     let posted_entries = post_own_entries(1);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.request_withdraw();
@@ -827,18 +876,21 @@ fn the_close_control_withdraws_the_toast_from_where_it_stands() {
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let at_the_press = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 800),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let halfway_out = clone_shown_preview(&toast_queue);
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 1300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(wakeup_after_the_press, Some(Duration::ZERO));
@@ -861,7 +913,7 @@ fn the_close_control_on_a_toast_not_yet_drawn_ends_it_at_once() {
     let start = Instant::now();
 
     toast_queue.request_withdraw();
-    let is_preview_changed = toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    let is_preview_changed = toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
 
     assert!(is_preview_changed);
     assert_eq!(
@@ -875,11 +927,12 @@ fn the_close_control_during_a_withdraw_changes_nothing() {
     let posted_entries = post_own_entries(1);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 4500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.request_withdraw();
@@ -887,6 +940,7 @@ fn the_close_control_during_a_withdraw_changes_nothing() {
         compute_instant_after_milliseconds(start, 4750),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -900,11 +954,12 @@ fn an_evicted_shown_entry_withdraws_in_half_a_second() {
     let posted_entries = post_own_entries(1);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 2000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     toast_queue.remove_previews(posted_entries[0].notification_id);
@@ -912,17 +967,20 @@ fn an_evicted_shown_entry_withdraws_in_half_a_second() {
         compute_instant_after_milliseconds(start, 2000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 2250),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let halfway_out = clone_shown_preview(&toast_queue);
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 2500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -938,19 +996,21 @@ fn an_evicted_waiting_entry_loses_its_preview() {
     let posted_entries = post_own_entries(3);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
 
     toast_queue.remove_previews(posted_entries[1].notification_id);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 1500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let next_preview = clone_shown_preview(&toast_queue);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 2000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -968,7 +1028,7 @@ fn an_evicted_summary_member_leaves_the_summary_and_an_empty_summary_goes() {
     let posted_entries = post_own_entries(5);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
 
     toast_queue.remove_previews(posted_entries[4].notification_id);
     for millisecond_count in [1500, 3000, 4500, 6000] {
@@ -976,6 +1036,7 @@ fn an_evicted_summary_member_leaves_the_summary_and_an_empty_summary_goes() {
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
     }
 
@@ -996,6 +1057,7 @@ fn an_evicted_last_member_of_the_shown_summary_ends_it_at_once() {
             compute_instant_after_milliseconds(start, millisecond_count),
             DEFAULT_TOAST_TIMING,
             false,
+            &|_| false,
         );
     }
     let shown_summary = clone_shown_preview(&toast_queue);
@@ -1036,17 +1098,19 @@ fn a_paused_clock_holds_the_toast_and_resumes_where_it_stopped() {
     let posted_entries = post_own_entries(1);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 300),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     let is_preview_changed = toast_queue.advance(
         compute_instant_after_milliseconds(start, 400),
         DEFAULT_TOAST_TIMING,
         true,
+        &|_| false,
     );
     let while_paused = clone_shown_preview(&toast_queue);
     let wakeup_while_paused = toast_queue.find_next_wakeup(
@@ -1057,11 +1121,13 @@ fn a_paused_clock_holds_the_toast_and_resumes_where_it_stopped() {
         compute_instant_after_milliseconds(start, 10_000),
         DEFAULT_TOAST_TIMING,
         true,
+        &|_| false,
     );
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 10_400),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert!(!is_preview_changed);
@@ -1081,18 +1147,20 @@ fn a_toast_that_arrives_while_the_clock_is_paused_starts_when_it_runs_again() {
     let posted_entries = post_own_entries(1);
     let mut toast_queue = NotificationToastQueue::default();
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, true);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, true, &|_| false);
 
     toast_queue.queue_preview(&posted_entries[0]);
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 5000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     toast_queue.advance(
         compute_instant_after_milliseconds(start, 5500),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
 
     assert_eq!(
@@ -1108,7 +1176,7 @@ fn the_next_wakeup_is_the_next_slide_step_or_the_end_of_the_stay() {
     let start = Instant::now();
 
     let before_the_first_advance = toast_queue.find_next_wakeup(start, DEFAULT_TOAST_TIMING);
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
     let in_the_appear = toast_queue.find_next_wakeup(
         compute_instant_after_milliseconds(start, 120),
         DEFAULT_TOAST_TIMING,
@@ -1117,6 +1185,7 @@ fn the_next_wakeup_is_the_next_slide_step_or_the_end_of_the_stay() {
         compute_instant_after_milliseconds(start, 1000),
         DEFAULT_TOAST_TIMING,
         false,
+        &|_| false,
     );
     let in_the_stay = toast_queue.find_next_wakeup(
         compute_instant_after_milliseconds(start, 1000),
@@ -1143,7 +1212,7 @@ fn the_next_wakeup_in_a_slide_stops_at_the_end_of_its_phase() {
     let posted_entries = post_own_entries(2);
     let mut toast_queue = build_previewing_queue(&posted_entries);
     let start = Instant::now();
-    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false);
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
 
     let near_the_end_of_the_appear = toast_queue.find_next_wakeup(
         compute_instant_after_milliseconds(start, 480),
@@ -1232,4 +1301,376 @@ fn a_replaced_summary_member_counts_the_replacing_entry() {
             ),
         ])
     );
+}
+
+/// One `Warning` entry of a new session queue per pane of `pane_ids`, oldest
+/// first, each about its pane as a `ProgramBlocked` raise, with the texts
+/// `pane entry 0`, `pane entry 1`, ….
+fn post_pane_entries(pane_ids: &[PaneId]) -> Vec<NotificationEntry> {
+    let mut session_queue =
+        NotificationQueue::from_owner(NotificationQueueOwner::Session(SessionId::new()));
+    pane_ids
+        .iter()
+        .enumerate()
+        .map(|(pane_entry_index, &pane_id)| {
+            session_queue
+                .post_core_entry(
+                    NotificationSeverity::Warning,
+                    &format!("pane entry {pane_entry_index}"),
+                    Some(NotificationSubject::Pane {
+                        pane_id,
+                        attention_reason_kind: Some(AttentionReasonKind::ProgramBlocked),
+                    }),
+                    NonZeroU32::MIN,
+                    SystemTime::UNIX_EPOCH,
+                )
+                .clone()
+        })
+        .collect()
+}
+
+#[test]
+fn withdrawing_a_pane_drops_its_waiting_previews_and_slides_its_toast_out_in_half_a_second() {
+    let (withdrawn_pane_id, other_pane_id) = (PaneId::new(), PaneId::new());
+    let posted_entries = post_pane_entries(&[withdrawn_pane_id, withdrawn_pane_id, other_pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 700),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    toast_queue.withdraw_pane_previews(&|pane_id| pane_id == withdrawn_pane_id);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 700),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 950),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let halfway_out = clone_shown_preview(&toast_queue);
+    let is_preview_changed = toast_queue.advance(
+        compute_instant_after_milliseconds(start, 1200),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert_eq!(
+        halfway_out,
+        build_shown_entry_preview(&posted_entries[0], 500)
+    );
+    assert!(is_preview_changed);
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        build_shown_entry_preview(&posted_entries[2], 1000)
+    );
+}
+
+#[test]
+fn a_repeat_of_a_withdrawing_toast_turns_it_back_from_where_it_stands_as_a_new_toast() {
+    let pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.withdraw_pane_previews(&|withdrawn_pane_id| withdrawn_pane_id == pane_id);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2250),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let mut repeated_entry = posted_entries[0].clone();
+    repeated_entry.repeat_count = 2;
+
+    toast_queue.queue_preview(&repeated_entry);
+    let turned_back_preview = clone_shown_preview(&toast_queue);
+    let turned_back_toast_number = toast_queue.find_shown_toast_number();
+    let mut slide_positions = Vec::new();
+    for elapsed_millisecond_count in [2250, 2750, 3250, 6000] {
+        toast_queue.advance(
+            compute_instant_after_milliseconds(start, elapsed_millisecond_count),
+            DEFAULT_TOAST_TIMING,
+            false,
+            &|_| false,
+        );
+        slide_positions.push(clone_shown_preview(&toast_queue));
+    }
+
+    assert_eq!(
+        turned_back_preview,
+        build_shown_entry_preview(&repeated_entry, 500)
+    );
+    assert_eq!(turned_back_toast_number, Some(1));
+    assert_eq!(toast_queue.waiting_entries.len(), 0);
+    assert_eq!(
+        slide_positions,
+        vec![
+            build_shown_entry_preview(&repeated_entry, 500),
+            build_shown_entry_preview(&repeated_entry, 250),
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 0),
+        ]
+    );
+}
+
+#[test]
+fn a_repeat_after_a_requested_withdraw_keeps_the_toast_in_place_as_a_new_toast() {
+    let posted_entries = post_own_entries(1);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.request_withdraw();
+    let mut repeated_entry = posted_entries[0].clone();
+    repeated_entry.repeat_count = 2;
+
+    toast_queue.queue_preview(&repeated_entry);
+    let mut slide_positions = Vec::new();
+    for elapsed_millisecond_count in [2000, 2500, 5900, 6100] {
+        toast_queue.advance(
+            compute_instant_after_milliseconds(start, elapsed_millisecond_count),
+            DEFAULT_TOAST_TIMING,
+            false,
+            &|_| false,
+        );
+        slide_positions.push(clone_shown_preview(&toast_queue));
+    }
+
+    assert_eq!(toast_queue.find_shown_toast_number(), Some(1));
+    assert_eq!(
+        slide_positions,
+        vec![
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 0),
+            build_shown_entry_preview(&repeated_entry, 100),
+        ]
+    );
+}
+
+#[test]
+fn a_repeat_of_a_toast_in_place_counts_on_the_same_toast() {
+    let posted_entries = post_own_entries(1);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let mut repeated_entry = posted_entries[0].clone();
+    repeated_entry.repeat_count = 2;
+
+    toast_queue.queue_preview(&repeated_entry);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 4100),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert_eq!(toast_queue.find_shown_toast_number(), Some(0));
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        build_shown_entry_preview(&repeated_entry, 100)
+    );
+}
+
+#[test]
+fn withdrawing_a_pane_keeps_its_entries_counted_in_the_waiting_summary() {
+    let withdrawn_pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[withdrawn_pane_id; 5]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+
+    toast_queue.withdraw_pane_previews(&|pane_id| pane_id == withdrawn_pane_id);
+    let is_preview_changed = toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+
+    assert!(is_preview_changed);
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        Some((
+            ToastPreview::Summary(vec![(
+                posted_entries[4].notification_id,
+                NotificationSeverity::Warning
+            )]),
+            1000
+        ))
+    );
+}
+
+#[test]
+fn withdrawing_a_pane_again_keeps_the_pace_of_its_fast_withdraw() {
+    let withdrawn_pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[withdrawn_pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.withdraw_pane_previews(&|pane_id| pane_id == withdrawn_pane_id);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2000),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2250),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    toast_queue.withdraw_pane_previews(&|pane_id| pane_id == withdrawn_pane_id);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2250),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+    let is_preview_changed = toast_queue.advance(
+        compute_instant_after_milliseconds(start, 2500),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert!(is_preview_changed);
+    assert_eq!(clone_shown_preview(&toast_queue), None);
+}
+
+#[test]
+fn withdrawing_a_pane_leaves_the_previews_of_other_panes_and_of_no_pane() {
+    let mut posted_entries = post_own_entries(1);
+    posted_entries.extend(post_pane_entries(&[PaneId::new()]));
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+
+    toast_queue.withdraw_pane_previews(&|_| false);
+    toast_queue.advance(
+        compute_instant_after_milliseconds(start, 1500),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|_| false,
+    );
+
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        build_shown_entry_preview(&posted_entries[1], 1000)
+    );
+}
+
+#[test]
+fn a_preview_about_a_pane_the_frame_draws_at_its_turn_goes_and_the_next_shows() {
+    let (drawn_pane_id, hidden_pane_id) = (PaneId::new(), PaneId::new());
+    let mut posted_entries = post_own_entries(1);
+    posted_entries.extend(post_pane_entries(&[drawn_pane_id, hidden_pane_id]));
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+
+    let is_preview_changed = toast_queue.advance(
+        compute_instant_after_milliseconds(start, 1500),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|pane_id| pane_id == drawn_pane_id,
+    );
+
+    assert!(is_preview_changed);
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        build_shown_entry_preview(&posted_entries[2], 1000)
+    );
+}
+
+#[test]
+fn a_lone_preview_about_a_pane_the_frame_draws_goes_before_it_shows() {
+    let drawn_pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[drawn_pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+
+    let is_preview_changed =
+        toast_queue.advance(Instant::now(), DEFAULT_TOAST_TIMING, false, &|pane_id| {
+            pane_id == drawn_pane_id
+        });
+
+    assert!(is_preview_changed);
+    assert_eq!(clone_shown_preview(&toast_queue), None);
+}
+
+#[test]
+fn a_toast_that_shows_stays_when_the_frame_starts_to_draw_its_pane() {
+    let drawn_pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[drawn_pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, false, &|_| false);
+
+    let is_preview_changed = toast_queue.advance(
+        compute_instant_after_milliseconds(start, 500),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|pane_id| pane_id == drawn_pane_id,
+    );
+
+    assert!(!is_preview_changed);
+    assert_eq!(
+        clone_shown_preview(&toast_queue),
+        build_shown_entry_preview(&posted_entries[0], 500)
+    );
+}
+
+#[test]
+fn a_paused_clock_checks_the_waiting_preview_when_it_runs_again() {
+    let drawn_pane_id = PaneId::new();
+    let posted_entries = post_pane_entries(&[drawn_pane_id]);
+    let mut toast_queue = build_previewing_queue(&posted_entries);
+    let start = Instant::now();
+    toast_queue.advance(start, DEFAULT_TOAST_TIMING, true, &|_| false);
+
+    let is_preview_changed = toast_queue.advance(
+        compute_instant_after_milliseconds(start, 100),
+        DEFAULT_TOAST_TIMING,
+        false,
+        &|pane_id| pane_id == drawn_pane_id,
+    );
+
+    assert!(is_preview_changed);
+    assert_eq!(clone_shown_preview(&toast_queue), None);
 }

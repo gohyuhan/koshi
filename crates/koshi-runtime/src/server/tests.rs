@@ -19,7 +19,7 @@ use std::sync::mpsc;
 use std::time::{Instant, SystemTime};
 
 use crate::runtime::pty_inbox::InboxSink;
-use koshi_core::attention::AttentionReasonKind;
+use koshi_core::attention::{Attention, AttentionReason, AttentionReasonKind, HeldPane};
 use koshi_core::command::{
     ClosePaneArgs, Command, CommandSource, DetachArgs, NewPaneArgs, NewPanePlacement,
     PanePlacementAnchor, PanePlacementTarget, PlacePaneArgs, TiledPlacementTarget,
@@ -260,6 +260,21 @@ fn build_sole_session_notification_queue(server: &Server) -> Box<NotificationQue
             .notification_queue
             .clone(),
     )
+}
+
+/// One [`HeldPane`] per pane of `server`'s one session, in pane id order,
+/// each waiting for nobody.
+fn list_quiet_held_panes(server: &Server) -> Vec<HeldPane> {
+    server
+        .get_sole_session()
+        .expect("the session")
+        .panes
+        .list_pane_records()
+        .map(|pane_record| HeldPane {
+            pane_id: pane_record.get_pane_id(),
+            is_waiting: false,
+        })
+        .collect()
 }
 
 /// Publish critical events until every subscriber's queue overflows and pauses
@@ -744,6 +759,7 @@ fn resyncing_hands_a_paused_subscriber_a_frame_of_the_client_it_views() {
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
             notification_queue: build_sole_session_notification_queue(&server),
+            held_panes: list_quiet_held_panes(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
@@ -811,6 +827,7 @@ fn resyncing_a_starving_sole_viewer_keeps_its_subscription() {
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
             notification_queue: build_sole_session_notification_queue(&server),
+            held_panes: list_quiet_held_panes(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
@@ -884,6 +901,7 @@ fn a_resync_blocked_by_a_full_queue_retries_with_a_newer_frame() {
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
             notification_queue: build_sole_session_notification_queue(&server),
+            held_panes: list_quiet_held_panes(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 1,
@@ -921,6 +939,7 @@ fn one_unresyncable_subscriber_does_not_block_the_others_frame() {
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
             notification_queue: build_sole_session_notification_queue(&server),
+            held_panes: list_quiet_held_panes(&server),
             lag_report: SubscriberLagged {
                 subscriber_id: kept_subscriber_id,
                 dropped_event_count: 1,
@@ -1191,6 +1210,7 @@ fn a_frame_blocked_by_a_full_queue_leaves_the_subscription_in_place() {
     expected_deliveries.push(Delivery::Snapshot {
         render_snapshot: Box::new(server.build_snapshot(client_id).expect("frame")),
         notification_queue: build_sole_session_notification_queue(&server),
+        held_panes: list_quiet_held_panes(&server),
         lag_report: SubscriberLagged {
             subscriber_id,
             dropped_event_count: 1,
@@ -1363,6 +1383,7 @@ fn a_freed_slot_for_a_paused_subscriber_takes_the_resync_snapshot_and_no_frame()
     expected_deliveries.push(Delivery::Snapshot {
         render_snapshot: Box::new(expected_render_snapshot),
         notification_queue: build_sole_session_notification_queue(&server),
+        held_panes: list_quiet_held_panes(&server),
         lag_report: SubscriberLagged {
             subscriber_id,
             dropped_event_count: 1,
@@ -1788,6 +1809,49 @@ fn an_attach_claiming_a_carried_client_keeps_its_id_zoom_focus_and_tab() {
     assert_eq!(client.get_zoomed_pane_id(tab_id), Some(pane_id));
     assert_eq!(client.get_scroll_offset(pane_id), 7);
     assert_eq!(client.get_viewport_size(), REMOTE_VIEWPORT_SIZE);
+}
+
+#[test]
+fn handle_ipc_attach_lists_every_pane_the_session_holds_with_whether_it_waits() {
+    let (mut server, client_id) = boot_server();
+    let (session_id, _, pane_id) = get_booted_parts(&server, client_id);
+    let _ = server
+        .session_by_id
+        .get_mut(&session_id)
+        .expect("the booted session")
+        .set_pane_attention(
+            pane_id,
+            Some(Attention {
+                raised_at: SystemTime::UNIX_EPOCH,
+                reason: AttentionReason::Bell,
+                withdrawable_notification_id: None,
+            }),
+        );
+
+    let attachment = server
+        .handle_ipc_attach(
+            None,
+            None,
+            REMOTE_VIEWPORT_SIZE,
+            None,
+            None,
+            SystemTime::now(),
+            ClientOrigin::Local { is_same_user: true },
+            None,
+            60,
+            None,
+            None,
+            false,
+        )
+        .expect("the session admits the attach");
+
+    assert_eq!(
+        attachment.held_panes,
+        vec![HeldPane {
+            pane_id,
+            is_waiting: true,
+        }]
+    );
 }
 
 /// The attach reply hands back the report the session recorded.
@@ -4769,6 +4833,7 @@ fn a_paused_subscriber_that_missed_a_post_gets_the_whole_queue_in_its_resync() {
         vec![Delivery::Snapshot {
             render_snapshot: Box::new(expected_render_snapshot),
             notification_queue: Box::new(expected_notification_queue),
+            held_panes: list_quiet_held_panes(&server),
             lag_report: SubscriberLagged {
                 subscriber_id,
                 dropped_event_count: 2,

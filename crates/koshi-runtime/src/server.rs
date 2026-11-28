@@ -817,7 +817,9 @@ impl Server {
     /// [`build_snapshot`](Self::build_snapshot) as
     /// [`push_frames`](Self::push_frames) builds it, and goes with that
     /// client's session's notification queue, regardless of the subscriber's
-    /// frame pace. A queued frame counts as the subscriber's frame at
+    /// frame pace, and with every pane that session holds
+    /// ([`Session::list_held_panes`](koshi_session::session::state::Session::list_held_panes)).
+    /// A queued frame counts as the subscriber's frame at
     /// `current_time`, and names the subscriber's marks of other clients'
     /// input, as a frame that [`push_frames`](Self::push_frames) queues does. A subscriber
     /// that views no client, or whose client is no longer attached, has its
@@ -850,10 +852,14 @@ impl Server {
                 continue;
             };
             let client_id = self.subscriptions[subscription_index].client_id;
-            let (Some(snapshot), Some(notification_queue)) = (
+            let (Some(snapshot), Some((notification_queue, held_panes))) = (
                 self.build_snapshot(client_id),
-                self.get_session_for_client(client_id)
-                    .map(|session| Box::new(session.notification_queue.clone())),
+                self.get_session_for_client(client_id).map(|session| {
+                    (
+                        Box::new(session.notification_queue.clone()),
+                        session.list_held_panes(),
+                    )
+                }),
             ) else {
                 tracing::warn!(
                     subscriber_id = %desynced_subscriber_id,
@@ -873,6 +879,7 @@ impl Server {
                 desynced_subscriber_id,
                 Box::new(snapshot),
                 notification_queue,
+                held_panes,
             ) {
                 let frame_subscription = &mut self.subscriptions[subscription_index];
                 frame_subscription

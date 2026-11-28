@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::SystemTime;
 
 use koshi_core::{
-    attention::Attention,
+    attention::{Attention, HeldPane},
     constant::{
         FLOATING_TITLEBAR_STRIP_ROW_COUNT, MAX_FLOATING_PANES_PER_SESSION,
         MAX_TAB_FOCUS_MRU_ENTRY_COUNT,
@@ -1081,6 +1081,19 @@ impl Session {
         }
         let (_, floating_pane) = self.floating_set.find_floating_pane_by_pane_id(pane_id)?;
         Some(LayoutAreaId::FloatingPane(floating_pane.floating_pane_id))
+    }
+
+    /// Every pane this session holds, in pane id order, each with whether it
+    /// waits for a person: its [`PaneRecord::attention`] is `Some`.
+    #[must_use]
+    pub fn list_held_panes(&self) -> Vec<HeldPane> {
+        self.panes
+            .list_pane_records()
+            .map(|pane_record| HeldPane {
+                pane_id: pane_record.get_pane_id(),
+                is_waiting: pane_record.attention.is_some(),
+            })
+            .collect()
     }
 
     /// The tab whose layout holds `pane_id` as a leaf. `None` when no tab

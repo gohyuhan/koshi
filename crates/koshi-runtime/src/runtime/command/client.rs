@@ -127,10 +127,13 @@ impl Server {
     /// terminal's measured cell size in pixels, recorded before the tab
     /// reflows; `None` records no measurement.
     ///
-    /// Registration, subscription, and the copy of the session's notification
-    /// queue land in the same turn. [`AttachAccepted::notification_queue`]
-    /// holds every post made before the subscription, and every later post
-    /// reaches the subscription: no post can slip between them. The
+    /// Registration, subscription, and the copies of the session's notification
+    /// queue and of its held panes land in the same turn.
+    /// [`AttachAccepted::notification_queue`] holds every post made before the
+    /// subscription, and every later post reaches the subscription: no post
+    /// can slip between them. [`AttachAccepted::held_panes`] lists every pane
+    /// the session holds at the subscription, and the subscription receives
+    /// each later raise, clear and close of a pane. The
     /// subscription also receives each pane placement commit, quit and
     /// restart published after it
     /// ([`EventBus::publish`](crate::runtime::bus::EventBus::publish)), and
@@ -335,6 +338,7 @@ impl Server {
             client_id,
             session_id,
             notification_queue: session.notification_queue.clone(),
+            held_panes: session.list_held_panes(),
             deliveries,
             writer_handoff,
             ending_notice: Arc::clone(self.event_bus.get_ending_notice()),

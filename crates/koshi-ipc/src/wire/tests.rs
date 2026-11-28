@@ -760,12 +760,16 @@ fn sample_events() -> Vec<SessionEvent> {
             tab_id: None,
             client_id: Some(koshi_core::ids::ClientId::new()),
         },
+        SessionEvent::PaneRemoved {
+            pane_id: target_pane_id,
+        },
         SessionEvent::Quit,
         SessionEvent::Restarting,
         SessionEvent::Detached,
         SessionEvent::Resync {
             dropped_event_count: 1,
             notification_queue: crate::protocol::tests::build_fixed_session_notification_queue(),
+            held_panes: Vec::new(),
             held_command_rejections: Vec::new(),
             dropped_command_rejection_count: 0,
         },

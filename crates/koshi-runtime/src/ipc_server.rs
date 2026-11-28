@@ -1288,6 +1288,7 @@ fn serve_connection(
                         client_id: accepted_client.client_id,
                         session_id: accepted_client.session_id,
                         notification_queue: accepted_client.notification_queue,
+                        held_panes: accepted_client.held_panes,
                         resume_token: Some(accepted_client.resume_token),
                         pane_area: accepted_client.pane_area,
                     },

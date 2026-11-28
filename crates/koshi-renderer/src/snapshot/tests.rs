@@ -2,7 +2,8 @@
 //! pieces, check exact field values, confirm it is `Send + Sync`, confirm
 //! cloning shares every row by reference (no cell copy), confirm equality, and
 //! check the mouse-frame projection, the borrowed layout views, the selection
-//! row lookup, the pane slots of a layout solve, the tab a placement
+//! row lookup, the pane slots of a layout solve, the floating pane slots a
+//! frame draws, the tab a placement
 //! preview shows for a tiled and a floating source, the comparison of two
 //! frames' floating pane visibility, and a floating pane slot resized for a
 //! slide: each rect edge scaled per axis, a content rect only inside a box of
@@ -1331,5 +1332,50 @@ fn a_resized_split_slot_scales_each_pane_box_and_each_stack_header_and_keeps_its
         LayoutMode::Fullscreen {
             focused_pane_id: vim_pane_id,
         }
+    );
+}
+
+/// A frame draws every floating pane slot outside pane placement mode, none
+/// while every pane of its active tab is suppressed, and in pane placement
+/// mode only the slot that holds the pane being placed, while the active tab
+/// holds no slot of that pane.
+#[test]
+fn a_frame_draws_a_floating_pane_slot_as_placement_mode_and_room_allow() {
+    let render_snapshot = build_render_snapshot_fixture(build_render_snapshot_fixture_grid());
+    let active_tab_layout_area = &render_snapshot
+        .session_snapshot
+        .active_tab_snapshot
+        .layout_area;
+    let tiled_pane_id = active_tab_layout_area.pane_slots[0].pane_id;
+    let floating_pane_id = PaneId::new();
+    let floating_pane_slot =
+        build_one_pane_floating_pane_slot(floating_pane_id, build_cell_rect(0, 0, 40, 12), false);
+    let mut suppressed_layout_area = active_tab_layout_area.clone();
+    suppressed_layout_area.is_every_pane_suppressed = true;
+    let build_placement_chrome = |placement_source_pane_id: PaneId| ViewerChrome {
+        is_pane_placement_visible: true,
+        placement_source_pane_id: Some(placement_source_pane_id),
+        ..ViewerChrome::default()
+    };
+
+    assert_eq!(
+        [
+            ViewerChrome::default()
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            ViewerChrome::default()
+                .is_floating_pane_slot_drawn(&suppressed_layout_area, &floating_pane_slot),
+            build_placement_chrome(floating_pane_id)
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            build_placement_chrome(tiled_pane_id)
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            build_placement_chrome(PaneId::new())
+                .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+            ViewerChrome {
+                is_pane_placement_visible: true,
+                ..ViewerChrome::default()
+            }
+            .is_floating_pane_slot_drawn(active_tab_layout_area, &floating_pane_slot),
+        ],
+        [true, false, true, false, false, false]
     );
 }

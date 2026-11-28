@@ -85,6 +85,7 @@ use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex};
 
 use koshi_core::action::ActionReference;
+use koshi_core::attention::HeldPane;
 use koshi_core::event::{Event, HeldCommandRejection, RejectReason, SubscriberLagged};
 use koshi_core::ids::{CommandId, SessionId, SubscriberId};
 use koshi_core::mouse::MouseAnswer;
@@ -367,12 +368,13 @@ impl EventBus {
     /// returned list is empty on every publish that removes nobody.
     ///
     /// Only [`Event::PanePlacementCommitted`], [`Event::PaneAttentionRaised`],
-    /// [`Event::PaneAttentionCleared`], [`Event::Quit`] and
-    /// [`Event::Restarting`] reach a subscriber, as
+    /// [`Event::PaneAttentionCleared`], [`Event::PaneRemoved`], [`Event::Quit`]
+    /// and [`Event::Restarting`] reach a subscriber, as
     /// [`Delivery::PanePlacementCommitted`], [`Delivery::PaneAttentionRaised`],
-    /// [`Delivery::PaneAttentionCleared`], [`Delivery::Quit`] and
-    /// [`Delivery::Restarting`]. Every other event reaches no subscriber,
-    /// counts as missed by no desynced subscriber, and returns an empty list.
+    /// [`Delivery::PaneAttentionCleared`], [`Delivery::PaneRemoved`],
+    /// [`Delivery::Quit`] and [`Delivery::Restarting`]. Every other event
+    /// reaches no subscriber, counts as missed by no desynced subscriber, and
+    /// returns an empty list.
     /// The match names every [`Event`] variant and takes no wildcard arm.
     #[deny(
         clippy::wildcard_enum_match_arm,
@@ -392,12 +394,12 @@ impl EventBus {
                 Delivery::PaneAttentionCleared(*pane_attention_cleared),
                 None,
             ),
+            Event::PaneRemoved(pane_removed) => (Delivery::PaneRemoved(*pane_removed), None),
             Event::Quit(_) => (Delivery::Quit, Some(SessionEnding::Quit)),
             Event::Restarting => (Delivery::Restarting, Some(SessionEnding::Restarting)),
             Event::PaneCreated(_)
             | Event::PaneProcessExited(_)
             | Event::PaneClosing(_)
-            | Event::PaneRemoved(_)
             | Event::PaneFocused(_)
             | Event::LayoutChanged(_)
             | Event::FloatingPaneLayoutChanged(_)
@@ -624,10 +626,11 @@ impl EventBus {
             .retain(|subscriber| subscriber.subscriber_id != subscriber_id);
     }
 
-    /// Put `snapshot` and `notification_queue`, the session's notification
-    /// queue, on desynced subscriber `subscriber_id`'s queue and return it to
-    /// live delivery, reporting how many deliveries it missed and carrying the
-    /// command rejections it held.
+    /// Put `snapshot`, `notification_queue`, the session's notification
+    /// queue, and `held_panes`, every pane the session holds, on desynced
+    /// subscriber `subscriber_id`'s queue and return it to live delivery,
+    /// reporting how many deliveries it missed and carrying the command
+    /// rejections it held.
     ///
     /// Returns the snapshot's frame number on the queue
     /// ([`DeliverySender::try_send_frame`]) once the snapshot is queued.
@@ -640,6 +643,7 @@ impl EventBus {
         subscriber_id: SubscriberId,
         render_snapshot: Box<RenderSnapshot>,
         notification_queue: Box<NotificationQueue>,
+        held_panes: Vec<HeldPane>,
     ) -> Option<u64> {
         let subscriber_index = self.find_subscriber_index(subscriber_id)?;
         let subscriber = &mut self.subscribers[subscriber_index];
@@ -669,6 +673,7 @@ impl EventBus {
                 render_snapshot,
                 lag_report,
                 notification_queue,
+                held_panes,
                 held_command_rejections,
                 dropped_command_rejection_count,
             },
@@ -1079,8 +1084,9 @@ fn hold_command_rejection(
 /// paint images receives new RGBA records after it.
 ///
 /// A [`Delivery::Snapshot`] becomes [`SessionEvent::Resync`] carrying the count
-/// of missed deliveries, the session's notification queue, the held command
-/// rejections, and the count of held runs dropped for room. The connection
+/// of missed deliveries, the session's notification queue, the panes the
+/// session holds, the held command rejections, and the count of held runs
+/// dropped for room. The connection
 /// writer sends the snapshot's frame right after it, as a painted update.
 ///
 /// A [`Delivery::NotificationPosted`] becomes
@@ -1111,8 +1117,10 @@ fn hold_command_rejection(
 /// [`SessionEvent::PaneAttentionRaised`] carrying the same pane, tab, reason
 /// and raise time, and a [`Delivery::PaneAttentionCleared`] becomes
 /// [`SessionEvent::PaneAttentionCleared`] carrying the same pane, tab and
-/// client. A [`Delivery::Quit`] becomes [`SessionEvent::Quit`], and a
-/// [`Delivery::Restarting`] becomes [`SessionEvent::Restarting`].
+/// client. A [`Delivery::PaneRemoved`] becomes [`SessionEvent::PaneRemoved`]
+/// carrying the same pane. A [`Delivery::Quit`] becomes
+/// [`SessionEvent::Quit`], and a [`Delivery::Restarting`] becomes
+/// [`SessionEvent::Restarting`].
 ///
 /// The match names every [`Delivery`] variant and takes no wildcard arm.
 #[must_use]
@@ -1146,18 +1154,23 @@ pub fn build_wire_event(delivery: &Delivery) -> Option<SessionEvent> {
                 client_id: pane_attention_cleared.client_id,
             })
         }
+        Delivery::PaneRemoved(pane_removed) => Some(SessionEvent::PaneRemoved {
+            pane_id: pane_removed.pane_id,
+        }),
         Delivery::Quit => Some(SessionEvent::Quit),
         Delivery::Restarting => Some(SessionEvent::Restarting),
         Delivery::Frame(_) => None,
         Delivery::Snapshot {
             lag_report,
             notification_queue,
+            held_panes,
             held_command_rejections,
             dropped_command_rejection_count,
             ..
         } => Some(SessionEvent::Resync {
             dropped_event_count: lag_report.dropped_event_count,
             notification_queue: NotificationQueue::clone(notification_queue),
+            held_panes: held_panes.clone(),
             held_command_rejections: held_command_rejections.clone(),
             dropped_command_rejection_count: *dropped_command_rejection_count,
         }),

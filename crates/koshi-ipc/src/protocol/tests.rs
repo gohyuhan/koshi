@@ -474,6 +474,7 @@ pub(crate) fn list_all_ipc_results() -> Vec<IpcResult> {
             process_image_id: build_fixed_test_process_image_id(),
         },
         IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
             notification_queue: build_fixed_session_notification_queue(),
@@ -1029,6 +1030,10 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
             notification_queue: build_fixed_session_notification_queue(),
+            held_panes: vec![HeldPane {
+                pane_id: PaneId::from_uuid(build_fixed_test_uuid()),
+                is_waiting: false,
+            }],
             resume_token: None,
             pane_area: None,
         },
@@ -1043,6 +1048,10 @@ fn the_attach_wire_shape_belongs_to_this_protocol_version() {
                     "client_id": "00000000-0000-0000-0000-000000000001",
                     "session_id": "00000000-0000-0000-0000-000000000001",
                     "notification_queue": build_fixed_notification_queue_json(),
+                    "held_panes": [{
+                        "pane_id": "00000000-0000-0000-0000-000000000001",
+                        "is_waiting": false
+                    }],
                     "resume_token": null,
                     "pane_area": null
                 }
@@ -1723,6 +1732,7 @@ fn attached_response_round_trips() {
     let ipc_response = IpcResponse {
         request_id: Some(4),
         answer_result: IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id: ClientId::new(),
             session_id: SessionId::new(),
             notification_queue: build_fixed_session_notification_queue(),
@@ -1739,6 +1749,7 @@ fn an_attached_response_carrying_a_resume_token_keeps_the_secret_whole() {
     let ipc_response = IpcResponse {
         request_id: Some(4),
         answer_result: IpcResult::Attached {
+            held_panes: Vec::new(),
             client_id: ClientId::from_uuid(build_fixed_test_uuid()),
             session_id: SessionId::from_uuid(build_fixed_test_uuid()),
             notification_queue: build_fixed_session_notification_queue(),
@@ -1766,7 +1777,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
     // An attached answer written without `resume_token` decodes with
     // `resume_token: None`.
     let decoded_wire_message: IpcResponse = serde_json::from_str(
-        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"queued_entries":[]}}}}"#,
+        r#"{"request_id":4,"answer_result":{"Attached":{"client_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000001","notification_queue":{"owner":{"Session":"00000000-0000-0000-0000-000000000001"},"epoch":"00000000-0000-0000-0000-000000000001","revision":0,"queued_entries":[]},"held_panes":[]}}}"#,
     )
     .expect("an attached answer without the resume token field decodes");
 
@@ -1775,6 +1786,7 @@ fn an_attached_response_written_without_the_resume_token_decodes_as_no_token() {
         IpcResponse {
             request_id: Some(4),
             answer_result: IpcResult::Attached {
+                held_panes: Vec::new(),
                 client_id: ClientId::from_uuid(build_fixed_test_uuid()),
                 session_id: SessionId::from_uuid(build_fixed_test_uuid()),
                 notification_queue: serde_json::from_value(json!({
