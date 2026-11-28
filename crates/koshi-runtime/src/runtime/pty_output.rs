@@ -11,8 +11,9 @@
 //! the pane's PTY, and marks the view changed of every subscriber whose
 //! client shows the pane, and of every client of a floating pane's session
 //! when the pane's display title changes. The program facts the engine read
-//! (shell markers, bells and desktop notifications) become command lifecycle
-//! and pane attention events in byte order
+//! (shell markers, bells, desktop notifications and program status reports)
+//! become command lifecycle events, program status records and pane attention
+//! events in byte order
 //! (`Server::apply_program_facts`), and the `OSC 52` clipboard copies the
 //! engine read go to the clients that focus the pane. Bytes for a pane with no
 //! engine are dropped without touching any state.

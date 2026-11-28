@@ -3,7 +3,7 @@
 use super::*;
 
 /// The JSON form of a fresh terminal pane record with the nil uuid as its id.
-const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"pane_id":"00000000-0000-0000-0000-000000000000","spawn_spec":null,"working_directory":null,"attention":null}"#;
+const FRESH_TERMINAL_RECORD_JSON: &str = r#"{"pane_id":"00000000-0000-0000-0000-000000000000","spawn_spec":null,"working_directory":null,"attention":null,"program_status_records":[]}"#;
 
 /// The `PaneId` whose uuid is all zeros.
 fn build_nil_pane_id() -> PaneId {
@@ -20,6 +20,7 @@ fn a_new_record_has_empty_metadata() {
     assert_eq!(pane_record.spawn_spec, None);
     assert_eq!(pane_record.working_directory, None);
     assert_eq!(pane_record.attention, None);
+    assert_eq!(pane_record.program_status_records, Vec::new());
 }
 
 #[test]
@@ -107,7 +108,7 @@ fn a_record_without_a_pane_id_fails_to_deserialize() {
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `pane_id` at line 1 column 61"
+        "missing field `pane_id` at line 1 column 89"
     );
 }
 
@@ -120,7 +121,44 @@ fn a_record_without_attention_fails_to_deserialize() {
 
     assert_eq!(
         deserialization_error.to_string(),
-        "missing field `attention` at line 1 column 93"
+        "missing field `attention` at line 1 column 121"
+    );
+}
+
+#[test]
+fn a_record_without_program_status_records_fails_to_deserialize() {
+    let pane_record_json =
+        FRESH_TERMINAL_RECORD_JSON.replacen(r#","program_status_records":[]"#, "", 1);
+
+    let deserialization_error =
+        serde_json::from_str::<PaneRecord>(&pane_record_json).expect_err("missing field");
+
+    assert_eq!(
+        deserialization_error.to_string(),
+        "missing field `program_status_records` at line 1 column 110"
+    );
+}
+
+#[test]
+fn a_record_keeps_its_program_status_records_through_a_round_trip() {
+    let mut pane_record = PaneRecord::from_terminal_pane(build_nil_pane_id());
+    pane_record.program_status_records = vec![ProgramStatusRecord {
+        record_id: "deploy".to_string(),
+        program_status_state: koshi_core::program_status::ProgramStatusState::Done,
+        blocked_kind: None,
+        progress_percent: None,
+        app_name: Some("cargo".to_string()),
+        title: None,
+        message: Some("shipped".to_string()),
+        is_seen: true,
+        updated_at: std::time::SystemTime::UNIX_EPOCH,
+    }];
+
+    let pane_record_json = serde_json::to_string(&pane_record).expect("serialize");
+
+    assert_eq!(
+        serde_json::from_str::<PaneRecord>(&pane_record_json).expect("deserialize"),
+        pane_record
     );
 }
 

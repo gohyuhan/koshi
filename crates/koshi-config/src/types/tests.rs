@@ -91,6 +91,9 @@ fn default_server_and_client_configs_match_expected_settings() {
             should_raise_for_bell: true,
             should_raise_for_notify: true,
             should_raise_for_command_finished: true,
+            should_raise_for_program_blocked: true,
+            should_raise_for_program_done: true,
+            should_raise_for_program_failed: true,
         }
     );
     assert!(client_config.supports_image_protocols);
@@ -166,6 +169,9 @@ fn should_raise_for_reads_the_key_of_each_reason_kind() {
         AttentionReasonKind::Bell,
         AttentionReasonKind::Notify,
         AttentionReasonKind::CommandFinished,
+        AttentionReasonKind::ProgramBlocked,
+        AttentionReasonKind::ProgramDone,
+        AttentionReasonKind::ProgramFailed,
     ];
     for (attention_config, expected_answers) in [
         (
@@ -173,21 +179,42 @@ fn should_raise_for_reads_the_key_of_each_reason_kind() {
                 should_raise_for_bell: false,
                 ..AttentionConfig::default()
             },
-            [false, true, true],
+            [false, true, true, true, true, true],
         ),
         (
             AttentionConfig {
                 should_raise_for_notify: false,
                 ..AttentionConfig::default()
             },
-            [true, false, true],
+            [true, false, true, true, true, true],
         ),
         (
             AttentionConfig {
                 should_raise_for_command_finished: false,
                 ..AttentionConfig::default()
             },
-            [true, true, false],
+            [true, true, false, true, true, true],
+        ),
+        (
+            AttentionConfig {
+                should_raise_for_program_blocked: false,
+                ..AttentionConfig::default()
+            },
+            [true, true, true, false, true, true],
+        ),
+        (
+            AttentionConfig {
+                should_raise_for_program_done: false,
+                ..AttentionConfig::default()
+            },
+            [true, true, true, true, false, true],
+        ),
+        (
+            AttentionConfig {
+                should_raise_for_program_failed: false,
+                ..AttentionConfig::default()
+            },
+            [true, true, true, true, true, false],
         ),
     ] {
         assert_eq!(

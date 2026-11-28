@@ -1,9 +1,10 @@
 //! Pane attention: what a pane's program last asked a person to look at,
 //! and since when.
 //!
-//! A pane holds at most one [`Attention`]. A bell, a desktop notification, or
-//! a finished command that ran for [`MIN_ATTENTION_COMMAND_SECONDS`] or more
-//! sets it while no person watches the pane, and the first visit clears it.
+//! A pane holds at most one [`Attention`]. A bell, a desktop notification, a
+//! finished command that ran for [`MIN_ATTENTION_COMMAND_SECONDS`] or more, or
+//! a program status record that moves into `blocked`, `done` or `error` sets
+//! it while no person watches the pane, and the first visit clears it.
 //! Example: `cargo test` fails with exit code `101` after 12 seconds in a hidden
 //! pane, and the pane holds
 //! `AttentionReason::CommandFinished { exit_code: Some(101), elapsed_secs: Some(12) }`
@@ -12,6 +13,8 @@
 use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
+
+use crate::program_status::{BlockedKind, ProgramStatusState};
 
 /// The fewest whole seconds a command runs before its finish raises
 /// attention: `5`. A command that finishes after 4 seconds raises nothing.
@@ -61,10 +64,41 @@ pub enum AttentionReason {
         #[serde(deserialize_with = "Option::deserialize")]
         elapsed_secs: Option<u32>,
     },
+    /// `OSC 7501`: a program status record moved into `blocked`. The program
+    /// cannot continue until a person acts.
+    ProgramBlocked {
+        /// The record's id. Empty for the root record.
+        record_id: String,
+        /// What the program needs, or `None` when the report named no kind.
+        /// A message without `blocked_kind` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        blocked_kind: Option<BlockedKind>,
+        /// The record's message. A message without `message` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        message: Option<String>,
+    },
+    /// `OSC 7501`: a program status record moved into `done`. Work finished
+    /// that nobody looked at yet.
+    ProgramDone {
+        /// The record's id. Empty for the root record.
+        record_id: String,
+        /// The record's message. A message without `message` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        message: Option<String>,
+    },
+    /// `OSC 7501`: a program status record moved into `error`. The program
+    /// failed and stopped.
+    ProgramFailed {
+        /// The record's id. Empty for the root record.
+        record_id: String,
+        /// The record's message. A message without `message` is refused.
+        #[serde(deserialize_with = "Option::deserialize")]
+        message: Option<String>,
+    },
 }
 
-/// The kind of an [`AttentionReason`], with no title, no body and no exit
-/// code.
+/// The kind of an [`AttentionReason`], with no title, no body, no exit code,
+/// no record id and no message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AttentionReasonKind {
     /// [`AttentionReason::Bell`].
@@ -73,6 +107,12 @@ pub enum AttentionReasonKind {
     Notify,
     /// [`AttentionReason::CommandFinished`].
     CommandFinished,
+    /// [`AttentionReason::ProgramBlocked`].
+    ProgramBlocked,
+    /// [`AttentionReason::ProgramDone`].
+    ProgramDone,
+    /// [`AttentionReason::ProgramFailed`].
+    ProgramFailed,
 }
 
 impl AttentionReason {
@@ -84,6 +124,31 @@ impl AttentionReason {
             AttentionReason::Bell => AttentionReasonKind::Bell,
             AttentionReason::Notify { .. } => AttentionReasonKind::Notify,
             AttentionReason::CommandFinished { .. } => AttentionReasonKind::CommandFinished,
+            AttentionReason::ProgramBlocked { .. } => AttentionReasonKind::ProgramBlocked,
+            AttentionReason::ProgramDone { .. } => AttentionReasonKind::ProgramDone,
+            AttentionReason::ProgramFailed { .. } => AttentionReasonKind::ProgramFailed,
+        }
+    }
+
+    /// The id of the program status record that raised this reason, with the
+    /// state that raised it, or `None` for a bell, a notification and a
+    /// finished command. `ProgramDone { record_id: "deploy", message: None }`
+    /// gives `Some(("deploy", ProgramStatusState::Done))`.
+    #[must_use]
+    pub fn find_raising_program_status_record(&self) -> Option<(&str, ProgramStatusState)> {
+        match self {
+            AttentionReason::ProgramBlocked { record_id, .. } => {
+                Some((record_id, ProgramStatusState::Blocked))
+            }
+            AttentionReason::ProgramDone { record_id, .. } => {
+                Some((record_id, ProgramStatusState::Done))
+            }
+            AttentionReason::ProgramFailed { record_id, .. } => {
+                Some((record_id, ProgramStatusState::Error))
+            }
+            AttentionReason::Bell
+            | AttentionReason::Notify { .. }
+            | AttentionReason::CommandFinished { .. } => None,
         }
     }
 }

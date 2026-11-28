@@ -197,7 +197,12 @@ A session whose saved state is partly damaged still comes back. A pane whose
 screen could not be read comes back blank with a notice, and its program keeps
 running. When the layout could not be read, each program comes back in a tab of
 its own. When nothing could be brought back, the session starts one new shell
-with a notice, and every program it ran is ended. A client from the installed
+with a notice, and every program it ran is ended. The new shell shows
+`[koshi] The session could not be restored after the restart. This is a new
+shell; the previous panes are unavailable.`, and every client that attaches
+gets the error notification `the session could not be restored after the
+restart; a new shell started`. If the new shell clears its screen at startup,
+the notification still reports the failed restore. A client from the installed
 build can attach in each of these cases.
 
 `koshi update` names every session that did not move on standard error, and that
@@ -545,19 +550,30 @@ too: `koshi close-pane --pane pane-…` closes that pane inside its floating
 pane.
 
 The `attention` column names the reason a pane waits for a person: `bell`,
-`notify` or `command-finished` ([koshi.md](koshi.md#attention)). A pane that
-waits for nobody prints `-`. `--format json` writes `"attention": null` for
-that pane, and else the same kind with the time of the first signal:
+`notify`, `command-finished`, `program-blocked`, `program-done` or
+`program-failed` ([koshi.md](koshi.md#attention)). A pane that waits for
+nobody prints `-`. `--format json` writes `"attention": null` for that pane,
+and else the same kind with the time of the first signal:
 `"attention": {"kind": "notify", "raised_at": "2025-01-01T00:00:00Z"}`.
 
-Example: `htop` and `top` share one floating pane, `vim` is tiled, and
-`htop` rang a bell.
+The `program_status` column prints the pane's root program status record, the
+record a program reports with `OSC 7501` and no `id`: its state, then its
+blocked kind, its progress and its app name when the record holds them, such
+as `working 40% cargo`, `blocked question codex` or `done`. A pane with no
+root record prints `-`. `--format json` writes `"program_status": null` for
+that pane, and else
+`"program_status": {"state": "blocked", "blocked_kind": "question", "progress_percent": null, "app_name": "codex"}`.
+The listing never prints a record's title or message.
+
+Example: `htop` and `top` share one floating pane, `vim` and `codex` are
+tiled, `htop` rang a bell, and `codex` waits for an answer.
 
 ```text
-id      name  tab    tab_name  floating_pane       session    session_name  attention
-pane-…  vim   tab-…  editor    -                   session-…  work          -
-pane-…  htop  -      -         floating-pane-01a…  session-…  work          bell
-pane-…  top   -      -         floating-pane-01a…  session-…  work          -
+id      name   tab    tab_name  floating_pane       session    session_name  attention        program_status
+pane-…  vim    tab-…  editor    -                   session-…  work          -                -
+pane-…  codex  tab-…  editor    -                   session-…  work          program-blocked  blocked question codex
+pane-…  htop   -      -         floating-pane-01a…  session-…  work          bell             -
+pane-…  top    -      -         floating-pane-01a…  session-…  work          -                -
 ```
 
 `koshi list-sessions` names each session's machine in its `server` column:

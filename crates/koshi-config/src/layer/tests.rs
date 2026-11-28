@@ -200,6 +200,9 @@ fn attention_folds_onto_the_session_side_one_key_at_a_time() {
             should_raise_for_bell: Some(false),
             should_raise_for_notify: Some(false),
             should_raise_for_command_finished: None,
+            should_raise_for_program_blocked: Some(false),
+            should_raise_for_program_done: None,
+            should_raise_for_program_failed: None,
         }),
         ..Default::default()
     };
@@ -208,6 +211,9 @@ fn attention_folds_onto_the_session_side_one_key_at_a_time() {
             should_raise_for_bell: None,
             should_raise_for_notify: Some(true),
             should_raise_for_command_finished: None,
+            should_raise_for_program_blocked: None,
+            should_raise_for_program_done: Some(false),
+            should_raise_for_program_failed: None,
         }),
         ..Default::default()
     };
@@ -222,6 +228,9 @@ fn attention_folds_onto_the_session_side_one_key_at_a_time() {
                 should_raise_for_bell: false,
                 should_raise_for_notify: true,
                 should_raise_for_command_finished: true,
+                should_raise_for_program_blocked: false,
+                should_raise_for_program_done: false,
+                should_raise_for_program_failed: true,
             },
             ..ServerConfig::default()
         }

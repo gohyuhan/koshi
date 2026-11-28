@@ -106,11 +106,14 @@ first tab.
 
 ## Full example
 
-This uses every layout form, every pane setting, and every sizing key.
+This uses every top-level key, every layout form, every pane setting, and
+every sizing key. `lock` is commented out: a profile without it starts the
+first terminal with input unlocked.
 
 ```kdl
-// profile/dev.kdl — every layout form, pane setting, and sizing key.
+// profile/dev.kdl — every top-level key, layout form, pane setting, and sizing key.
 version 2
+// lock                                    // the first terminal starts with input locked
 
 tab {
     // a horizontal split: editor on the left (60%), a tools column (40%) right

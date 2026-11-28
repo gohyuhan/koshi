@@ -22,7 +22,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use koshi_core::discovery::{
-    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, SessionOverview, TabDiscovery,
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneProgramStatusDiscovery,
+    SessionOverview, TabDiscovery,
 };
 use koshi_core::event::RejectReason;
 use koshi_core::ids::{ClientId, FloatingPaneId, LayoutAreaId, PaneId, SessionId, TabId};
@@ -106,6 +107,10 @@ pub struct PaneRow {
     /// The kind of the reason the pane waits for a person and the time the
     /// wait began, or `None` for a pane that waits for nobody.
     pub attention: Option<PaneAttentionDiscovery>,
+    /// The pane's root program status record, its app name passed through
+    /// `sanitize_reported_text`, or `None` for a pane with no root record. An
+    /// app name that is empty after the filter reads as `None`.
+    pub program_status: Option<PaneProgramStatusDiscovery>,
 }
 
 /// The layout tree that holds the pane of a `list-panes` row.
@@ -853,6 +858,19 @@ pub fn build_pane_rows(session_overviews: &[SessionOverview]) -> Vec<PaneRow> {
                     session_id: session_overview.session.session_id,
                     session_name: sanitize_reported_text(&session_overview.session.session_name),
                     attention: pane_discovery.attention,
+                    program_status: pane_discovery
+                        .program_status
+                        .as_ref()
+                        .map(|program_status| PaneProgramStatusDiscovery {
+                            program_status_state: program_status.program_status_state,
+                            blocked_kind: program_status.blocked_kind,
+                            progress_percent: program_status.progress_percent,
+                            app_name: program_status
+                                .app_name
+                                .as_deref()
+                                .map(sanitize_reported_text)
+                                .filter(|app_name| !app_name.is_empty()),
+                        }),
                 })
             })
         })

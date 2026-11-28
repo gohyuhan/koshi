@@ -3,6 +3,7 @@
 
 use koshi_core::attention::AttentionReasonKind;
 use koshi_core::client::ClientOrigin;
+use koshi_core::program_status::{BlockedKind, ProgramStatusState};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
@@ -147,6 +148,7 @@ fn build_session_overview(
                 lifecycle: PaneLifecycle::Running,
                 focused_by_client_ids: Vec::new(),
                 attention: None,
+                program_status: None,
             });
         }
     }
@@ -265,6 +267,7 @@ fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
         session_id,
         session_name: "amber-fox".to_string(),
         attention: None,
+        program_status: None,
     }];
     for (pane_title, floating_pane_id) in floating_pane_placements {
         let pane_id = PaneId::new();
@@ -278,6 +281,7 @@ fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
             lifecycle: PaneLifecycle::Running,
             focused_by_client_ids: Vec::new(),
             attention: None,
+            program_status: None,
         });
         expected_pane_rows.push(PaneRow {
             pane_id,
@@ -286,6 +290,7 @@ fn floating_pane_rows_follow_the_tiled_rows_and_name_their_floating_pane() {
             session_id,
             session_name: "amber-fox".to_string(),
             attention: None,
+            program_status: None,
         });
     }
 
@@ -315,6 +320,7 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
                 attention: None,
+                program_status: None,
             },
             PaneRow {
                 pane_id: session_overviews[0].panes[1].pane_id,
@@ -326,6 +332,7 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
                 session_id: session_overviews[0].session.session_id,
                 session_name: "quiet-lake".to_string(),
                 attention: None,
+                program_status: None,
             },
             PaneRow {
                 pane_id: session_overviews[1].panes[0].pane_id,
@@ -337,6 +344,7 @@ fn pane_rows_carry_the_tab_and_session_they_belong_to() {
                 session_id: session_overviews[1].session.session_id,
                 session_name: "amber-fox".to_string(),
                 attention: None,
+                program_status: None,
             },
         ]
     );
@@ -458,6 +466,7 @@ fn a_pane_whose_child_set_no_title_yields_a_row_with_no_name() {
             session_id: session_overviews[0].session.session_id,
             session_name: "quiet-lake".to_string(),
             attention: None,
+            program_status: None,
         }]
     );
 }
@@ -2004,5 +2013,48 @@ fn a_pane_row_carries_the_attention_of_its_pane() {
             .map(|pane_row| pane_row.attention)
             .collect::<Vec<_>>(),
         [None, Some(pane_attention)]
+    );
+}
+
+#[test]
+fn a_pane_row_carries_the_root_program_status_of_its_pane() {
+    let mut session_overview = build_session_overview("quiet-lake", &[("editor", 2)]);
+    let program_status = PaneProgramStatusDiscovery {
+        program_status_state: ProgramStatusState::Working,
+        blocked_kind: None,
+        progress_percent: Some(40),
+        app_name: Some("cargo".to_string()),
+    };
+    session_overview.panes[1].program_status = Some(program_status.clone());
+
+    assert_eq!(
+        build_pane_rows(std::slice::from_ref(&session_overview))
+            .into_iter()
+            .map(|pane_row| pane_row.program_status)
+            .collect::<Vec<_>>(),
+        [None, Some(program_status)]
+    );
+}
+
+#[test]
+fn a_pane_row_filters_the_app_name_a_session_reports() {
+    let mut session_overview = build_session_overview("quiet-lake", &[("editor", 2)]);
+    for (pane_index, reported_app_name) in ["co\u{1b}[2Jdex", "\u{202e}"].into_iter().enumerate() {
+        session_overview.panes[pane_index].program_status = Some(PaneProgramStatusDiscovery {
+            program_status_state: ProgramStatusState::Blocked,
+            blocked_kind: Some(BlockedKind::Question),
+            progress_percent: None,
+            app_name: Some(reported_app_name.to_string()),
+        });
+    }
+
+    assert_eq!(
+        build_pane_rows(std::slice::from_ref(&session_overview))
+            .into_iter()
+            .map(|pane_row| pane_row
+                .program_status
+                .and_then(|program_status| program_status.app_name))
+            .collect::<Vec<_>>(),
+        [Some("co[2Jdex".to_string()), None]
     );
 }

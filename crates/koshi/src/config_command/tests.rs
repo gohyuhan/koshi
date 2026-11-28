@@ -245,6 +245,9 @@ attention {
     bell #false
     notify #true
     command-finished #false
+    program-blocked #false
+    program-done #true
+    program-failed #false
 }
 terminal {
     term "xterm-kitty"
@@ -336,6 +339,9 @@ update {
                     should_raise_for_bell: Some(false),
                     should_raise_for_notify: Some(true),
                     should_raise_for_command_finished: Some(false),
+                    should_raise_for_program_blocked: Some(false),
+                    should_raise_for_program_done: Some(true),
+                    should_raise_for_program_failed: Some(false),
                 }),
             },
             theme_name: Some("midnight".to_string()),

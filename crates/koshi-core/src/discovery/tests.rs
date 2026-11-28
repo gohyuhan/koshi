@@ -36,6 +36,7 @@ fn build_pane_discovery(working_directory: Option<PathBuf>) -> PaneDiscovery {
         lifecycle: PaneLifecycle::Running,
         focused_by_client_ids: Vec::new(),
         attention: None,
+        program_status: None,
     }
 }
 

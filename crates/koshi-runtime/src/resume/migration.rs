@@ -1356,7 +1356,8 @@ fn migrate_resume_four_to_five(resume_body: &mut Value) -> Result<(), StorageErr
 ///    and each saved-view record's `connection_token_hash` `<h>` becomes
 ///    `connection_token_hashes: [<h>]`.
 /// 10. Each pane record of each session's `panes.pane_record_by_id` gains
-///     `attention: null`: no pane waits for a person.
+///     `attention: null`, no pane waits for a person, and
+///     `program_status_records: []`, no pane holds a program status record.
 ///
 /// # Errors
 /// Returns an invalid-resume error when a session, a floating member, a tab,
@@ -1414,8 +1415,12 @@ fn migrate_resume_five_to_six(resume_body: &mut Value) -> Result<(), StorageErro
             pane_record_by_id,
             &format!("{panes_path}.pane_record_by_id"),
             |pane_record, record_path| {
-                get_json_object(pane_record, record_path)?
-                    .insert("attention".to_string(), Value::Null);
+                let pane_record_fields = get_json_object(pane_record, record_path)?;
+                pane_record_fields.insert("attention".to_string(), Value::Null);
+                pane_record_fields.insert(
+                    "program_status_records".to_string(),
+                    Value::Array(Vec::new()),
+                );
                 Ok(())
             },
         )?;

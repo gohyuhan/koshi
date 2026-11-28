@@ -185,7 +185,7 @@ there for 5 s.
 The session reads this block when it starts and when it restarts into a new
 build. It sets which signals from a program make its pane wait for a person.
 
-Three signals make a pane wait:
+Four signals make a pane wait:
 
 - A bell: the program writes `BEL` (`0x07`) outside an escape sequence.
   Example: `printf '\a'`. A run of bells in one read is one signal.
@@ -193,6 +193,10 @@ Three signals make a pane wait:
   Example: `printf '\033]9;build done\033\\'`.
 - A finished command that ran for 5 seconds or more, as the shell reports it
   with `OSC 133 ; C` at the start and `OSC 133 ; D` at the end.
+- A program status report (`OSC 7501`) that moves a record into `blocked`,
+  `done` or `error`. Example: `printf '\033]7501;state=blocked:kind=question\033\\'`.
+  A report into `idle` or `working` makes no pane wait, and neither does a
+  report that repeats the state its record holds.
 
 A signal raises nothing when a client whose terminal has keyboard focus types
 into that pane. A pane that waits holds one reason. A new signal replaces the
@@ -208,6 +212,10 @@ The wait ends at the first of these:
    reads the mouse.
 4. The program closes the `OSC 99` notification that set the reason, with
    `p=close`.
+5. The program status record that set the reason leaves the state that set
+   it: a report into another state, a `state=clear`, a new shell prompt
+   (`OSC 133 ; A`) for a `blocked` record, a terminal reset, or the removal
+   of the record a program wrote longest ago when a pane holds 64 records.
 
 `koshi input`, other `koshi` commands and a focus change that a closed pane
 causes end no wait. A close-pane key binding is one: its client's input lands
@@ -250,6 +258,9 @@ makes it wait.
 | `bell` | boolean — a bell makes the pane wait | `#true` | ≥ 0.7.0 |
 | `notify` | boolean — an `OSC 9`, `OSC 777` or `OSC 99` notification makes the pane wait | `#true` | ≥ 0.7.0 |
 | `command-finished` | boolean — a command that ran for 5 seconds or more makes the pane wait when it finishes | `#true` | ≥ 0.7.0 |
+| `program-blocked` | boolean — a program status record that moves into `blocked` makes the pane wait | `#true` | ≥ 0.7.0 |
+| `program-done` | boolean — a program status record that moves into `done` makes the pane wait | `#true` | ≥ 0.7.0 |
+| `program-failed` | boolean — a program status record that moves into `error` makes the pane wait | `#true` | ≥ 0.7.0 |
 
 ## `pane-clipboard-writes`
 
@@ -1110,6 +1121,9 @@ attention {
     bell #true
     notify #true
     command-finished #true
+    program-blocked #true
+    program-done #true
+    program-failed #true
 }
 
 pane-clipboard-writes {

@@ -6,11 +6,14 @@
 //! Each answer is built once into the rows and reports below. The JSON form
 //! serializes them, and the table cells read them.
 
+use std::fmt::Write as _;
+
 use super::*;
 use koshi_core::attention::AttentionReasonKind;
 use koshi_core::client::{compute_client_number, ClientOrigin};
 use koshi_core::geometry::PaneArea;
 use koshi_core::ids::LayoutAreaId;
+use koshi_core::program_status::{BlockedKind, ProgramStatusState};
 use koshi_link::discovery::PaneRowLayoutArea;
 
 /// Render a `list-sessions` answer.
@@ -257,6 +260,9 @@ struct PaneListingRow {
     /// The kind of the reason the pane waits for a person and the time the
     /// wait began, or `None` for a pane that waits for nobody.
     attention: Option<PaneAttentionReport>,
+    /// The pane's root program status record, or `None` for a pane with no
+    /// root record.
+    program_status: Option<PaneProgramStatusReport>,
 }
 
 /// A pane's wait for a person, as `list-panes` prints it: the reason's kind
@@ -267,6 +273,21 @@ struct PaneAttentionReport {
     kind: &'static str,
     /// When the pane began to wait, as [`format_utc_timestamp`] writes it.
     raised_at: String,
+}
+
+/// A pane's root program status record, as `list-panes` prints it: the state,
+/// the blocked kind, the progress and the app name, and never the title or
+/// the message.
+#[derive(Serialize)]
+struct PaneProgramStatusReport {
+    /// The state, as [`format_program_status_state`] names it.
+    state: &'static str,
+    /// The blocked kind, as [`format_blocked_kind`] names it, or `None`.
+    blocked_kind: Option<&'static str>,
+    /// 0 to 100, or `None` when the work is indeterminate.
+    progress_percent: Option<u8>,
+    /// The app name, such as `codex`, or `None`.
+    app_name: Option<String>,
 }
 
 /// One `list-clients` row, as both formats print it.
@@ -447,6 +468,14 @@ fn build_pane_listing_row(pane_row: &PaneRow) -> PaneListingRow {
                 kind: format_attention_reason_kind(pane_attention.reason_kind),
                 raised_at: format_utc_timestamp(pane_attention.raised_at),
             }),
+        program_status: pane_row.program_status.as_ref().map(|program_status| {
+            PaneProgramStatusReport {
+                state: format_program_status_state(program_status.program_status_state),
+                blocked_kind: program_status.blocked_kind.map(format_blocked_kind),
+                progress_percent: program_status.progress_percent,
+                app_name: program_status.app_name.clone(),
+            }
+        }),
     }
 }
 
@@ -554,6 +583,7 @@ const PANE_ROW_HEADERS: &[&str] = &[
     "session",
     "session_name",
     "attention",
+    "program_status",
 ];
 
 /// Column headers for `list-clients`, matching [`format_client_row_cells`].
@@ -624,7 +654,9 @@ fn format_tab_row_cells(tab: &TabListingRow) -> Vec<String> {
 /// One [`PaneListingRow`] as table cells, in [`PANE_ROW_HEADERS`] order. A pane
 /// the child never titled prints `-`. A floating pane prints `-` as its tab and
 /// tab name, and a tiled pane prints `-` as its floating pane. A pane that
-/// waits for nobody prints `-` as its attention.
+/// waits for nobody prints `-` as its attention. A pane with no root program
+/// status record prints `-` as its program status
+/// ([`format_program_status_cell`]).
 fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
     vec![
         pane.pane_id.clone(),
@@ -635,7 +667,29 @@ fn format_pane_row_cells(pane: &PaneListingRow) -> Vec<String> {
         pane.session_id.clone(),
         pane.session_name.clone(),
         format_optional_cell(pane.attention.as_ref().map(|attention| &attention.kind)),
+        pane.program_status
+            .as_ref()
+            .map_or_else(|| String::from("-"), format_program_status_cell),
     ]
+}
+
+/// A root program status record as one table cell: the state, then the
+/// blocked kind, the progress and the app name that it holds, each after one
+/// space. Examples: `working 40% cargo`, `blocked question codex`, `done`.
+fn format_program_status_cell(program_status: &PaneProgramStatusReport) -> String {
+    let mut program_status_cell = String::from(program_status.state);
+    if let Some(blocked_kind) = program_status.blocked_kind {
+        program_status_cell.push(' ');
+        program_status_cell.push_str(blocked_kind);
+    }
+    if let Some(progress_percent) = program_status.progress_percent {
+        let _ = write!(program_status_cell, " {progress_percent}%");
+    }
+    if let Some(app_name) = &program_status.app_name {
+        program_status_cell.push(' ');
+        program_status_cell.push_str(app_name);
+    }
+    program_status_cell
 }
 
 /// One [`ClientListingRow`] as table cells, in [`CLIENT_ROW_HEADERS`] order.
@@ -793,12 +847,38 @@ fn format_pane_lifecycle(pane_lifecycle: PaneLifecycle) -> &'static str {
 }
 
 /// The kind of a pane's wait for a person, as both formats name it: `bell`,
-/// `notify` or `command-finished`.
+/// `notify`, `command-finished`, `program-blocked`, `program-done` or
+/// `program-failed`.
 fn format_attention_reason_kind(attention_reason_kind: AttentionReasonKind) -> &'static str {
     match attention_reason_kind {
         AttentionReasonKind::Bell => "bell",
         AttentionReasonKind::Notify => "notify",
         AttentionReasonKind::CommandFinished => "command-finished",
+        AttentionReasonKind::ProgramBlocked => "program-blocked",
+        AttentionReasonKind::ProgramDone => "program-done",
+        AttentionReasonKind::ProgramFailed => "program-failed",
+    }
+}
+
+/// A program status state, as both formats name it: the OSC 7501 word
+/// `idle`, `working`, `done`, `blocked` or `error`.
+fn format_program_status_state(program_status_state: ProgramStatusState) -> &'static str {
+    match program_status_state {
+        ProgramStatusState::Idle => "idle",
+        ProgramStatusState::Working => "working",
+        ProgramStatusState::Done => "done",
+        ProgramStatusState::Blocked => "blocked",
+        ProgramStatusState::Error => "error",
+    }
+}
+
+/// A blocked kind, as both formats name it: the OSC 7501 word `permission`,
+/// `question` or `auth`.
+fn format_blocked_kind(blocked_kind: BlockedKind) -> &'static str {
+    match blocked_kind {
+        BlockedKind::Permission => "permission",
+        BlockedKind::Question => "question",
+        BlockedKind::Auth => "auth",
     }
 }
 

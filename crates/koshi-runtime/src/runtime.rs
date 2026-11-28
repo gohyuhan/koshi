@@ -29,6 +29,7 @@ pub mod painted_update;
 pub mod peer_input;
 pub(crate) mod placement_preview;
 pub(crate) mod presence_notice;
+pub(crate) mod program_status;
 pub mod pty_inbox;
 pub mod pty_output;
 pub mod reload;

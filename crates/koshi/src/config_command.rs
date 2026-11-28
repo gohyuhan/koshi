@@ -185,6 +185,24 @@ const CONFIG_FIELD_HELP: &[ConfigFieldHelp] = &[
         "Mark a pane whose command finishes after 5 seconds or more while nobody watches it.",
     ),
     build_config_field_help(
+        "koshi.attention.program-blocked",
+        "koshi.kdl",
+        "#true",
+        "Mark a pane whose program reports that it is blocked (OSC 7501) while nobody watches it.",
+    ),
+    build_config_field_help(
+        "koshi.attention.program-done",
+        "koshi.kdl",
+        "#true",
+        "Mark a pane whose program reports that it is done (OSC 7501) while nobody watches it.",
+    ),
+    build_config_field_help(
+        "koshi.attention.program-failed",
+        "koshi.kdl",
+        "#true",
+        "Mark a pane whose program reports an error (OSC 7501) while nobody watches it.",
+    ),
+    build_config_field_help(
         "koshi.remote-reconnect",
         "koshi.kdl",
         "#true",

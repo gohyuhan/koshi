@@ -528,7 +528,8 @@ fn an_unknown_pane_clipboard_writes_key_warns_with_the_nearest_key() {
 #[test]
 fn the_attention_section_records_each_key() {
     let (app_config_layer, parse_warnings) = parse_with_warnings(
-        "attention {\n    bell #false\n    notify #true\n    command-finished #false\n}",
+        "attention {\n    bell #false\n    notify #true\n    command-finished #false\n    \
+         program-blocked #false\n    program-done #true\n    program-failed #false\n}",
     );
     assert_eq!(
         app_config_layer.attention,
@@ -536,6 +537,9 @@ fn the_attention_section_records_each_key() {
             should_raise_for_bell: Some(false),
             should_raise_for_notify: Some(true),
             should_raise_for_command_finished: Some(false),
+            should_raise_for_program_blocked: Some(false),
+            should_raise_for_program_done: Some(true),
+            should_raise_for_program_failed: Some(false),
         })
     );
     assert_eq!(parse_warnings, Vec::<String>::new());
@@ -554,6 +558,9 @@ fn an_attention_section_sets_only_the_keys_it_lists() {
             should_raise_for_bell: None,
             should_raise_for_notify: None,
             should_raise_for_command_finished: Some(false),
+            should_raise_for_program_blocked: None,
+            should_raise_for_program_done: None,
+            should_raise_for_program_failed: None,
         })
     );
 }

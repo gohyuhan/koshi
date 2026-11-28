@@ -883,8 +883,8 @@ fn parse_pane_clipboard_write_config(
     partial_pane_clipboard_write_config
 }
 
-/// Reads the `attention { … }` block: `bell`, `notify` and
-/// `command-finished`, each a boolean.
+/// Reads the `attention { … }` block: `bell`, `notify`, `command-finished`,
+/// `program-blocked`, `program-done` and `program-failed`, each a boolean.
 fn parse_attention_config(
     config_node: &KdlNode,
     parse_problems: &mut ParseProblems,
@@ -899,6 +899,9 @@ fn parse_attention_config(
             "bell" => &mut partial_attention_config.should_raise_for_bell,
             "notify" => &mut partial_attention_config.should_raise_for_notify,
             "command-finished" => &mut partial_attention_config.should_raise_for_command_finished,
+            "program-blocked" => &mut partial_attention_config.should_raise_for_program_blocked,
+            "program-done" => &mut partial_attention_config.should_raise_for_program_done,
+            "program-failed" => &mut partial_attention_config.should_raise_for_program_failed,
             unknown_field_name => {
                 parse_problems.record_warning(
                     field_node.span(),
@@ -910,6 +913,9 @@ fn parse_attention_config(
                                 "attention.bell",
                                 "attention.notify",
                                 "attention.command-finished",
+                                "attention.program-blocked",
+                                "attention.program-done",
+                                "attention.program-failed",
                             ],
                         )
                     ),

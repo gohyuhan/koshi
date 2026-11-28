@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 use koshi_core::discovery::{
-    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle, SessionDiscovery,
-    SessionOverview, TabDiscovery,
+    ClientDiscovery, PaneAttentionDiscovery, PaneDiscovery, PaneLifecycle,
+    PaneProgramStatusDiscovery, SessionDiscovery, SessionOverview, TabDiscovery,
 };
 use koshi_core::ids::{LayoutAreaId, PaneId};
 use koshi_core::process::SpawnSpec;
@@ -129,7 +129,10 @@ fn list_pane_discoveries(
 /// attached client whose input the pane takes
 /// ([`Client::get_active_focused_pane_id`](koshi_session::client::Client::get_active_focused_pane_id)).
 /// `attention` holds the kind and the start time of the pane's wait for a
-/// person, and `None` for a pane that waits for nobody.
+/// person, and `None` for a pane that waits for nobody. `program_status`
+/// holds the state, the blocked kind, the progress and the app name of the
+/// pane's root program status record, and `None` for a pane with no root
+/// record.
 fn build_pane_discovery(
     session: &Session,
     layout_area_id: LayoutAreaId,
@@ -160,6 +163,16 @@ fn build_pane_discovery(
             .map(|attention| PaneAttentionDiscovery {
                 reason_kind: attention.reason.get_reason_kind(),
                 raised_at: attention.raised_at,
+            }),
+        program_status: pane_record
+            .program_status_records
+            .iter()
+            .find(|program_status_record| program_status_record.record_id.is_empty())
+            .map(|root_record| PaneProgramStatusDiscovery {
+                program_status_state: root_record.program_status_state,
+                blocked_kind: root_record.blocked_kind,
+                progress_percent: root_record.progress_percent,
+                app_name: root_record.app_name.clone(),
             }),
     })
 }

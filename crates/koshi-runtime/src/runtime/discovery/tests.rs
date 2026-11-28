@@ -19,11 +19,12 @@ use crate::runtime::pty_inbox::InboxSink;
 use koshi_core::attention::{Attention, AttentionReason, AttentionReasonKind};
 use koshi_core::client::ClientOrigin;
 use koshi_core::command::{Command, CommandEnvelope, CommandSource, NewPanePlacement};
-use koshi_core::discovery::{PaneAttentionDiscovery, PaneLifecycle};
+use koshi_core::discovery::{PaneAttentionDiscovery, PaneLifecycle, PaneProgramStatusDiscovery};
 use koshi_core::geometry::{Direction, PaneArea, Size};
 use koshi_core::ids::{ClientId, CommandId, LayoutAreaId, SessionId, TabId};
 use koshi_core::lock::LockMode;
 use koshi_core::process::ShellKind;
+use koshi_core::program_status::{BlockedKind, ProgramStatusRecord, ProgramStatusState};
 use koshi_pane::pane::state::PaneRecord;
 use koshi_pty::backend::state::PtyBackend;
 use koshi_session::client::ClientRegistry;
@@ -649,6 +650,68 @@ fn a_waiting_pane_reports_the_kind_and_the_start_of_its_wait_and_a_quiet_pane_no
                 Some(PaneAttentionDiscovery {
                     reason_kind: AttentionReasonKind::CommandFinished,
                     raised_at,
+                })
+            ),
+            (docs_pane_id, None),
+        ]
+    );
+}
+
+#[test]
+fn a_pane_reports_its_root_program_status_record_and_a_pane_without_one_none() {
+    let session_id = SessionId::new();
+    let mut session = build_empty_session(session_id);
+    let build_pane_id = register_session_tab_with_pane(&mut session, TabId::new(), "build", 0);
+    let docs_pane_id = register_session_tab_with_pane(&mut session, TabId::new(), "docs", 1);
+    let build_program_status_record = |record_id: &str, program_status_state| ProgramStatusRecord {
+        record_id: record_id.to_string(),
+        program_status_state,
+        blocked_kind: Some(BlockedKind::Question),
+        progress_percent: Some(40),
+        app_name: Some("codex".to_string()),
+        title: Some("Agent".to_string()),
+        message: Some("Which branch?".to_string()),
+        is_seen: false,
+        updated_at: SystemTime::UNIX_EPOCH,
+    };
+    session
+        .panes
+        .get_pane_record_mut_by_id(build_pane_id)
+        .expect("the build pane has a record")
+        .program_status_records = vec![
+        build_program_status_record("deploy", ProgramStatusState::Done),
+        build_program_status_record("", ProgramStatusState::Blocked),
+    ];
+    session
+        .panes
+        .get_pane_record_mut_by_id(docs_pane_id)
+        .expect("the docs pane has a record")
+        .program_status_records = vec![build_program_status_record(
+        "deploy",
+        ProgramStatusState::Error,
+    )];
+    let mut server = build_test_runtime();
+    server.session_by_id.insert(session_id, session);
+
+    let overview = server.build_overview().expect("one session is running");
+
+    assert_eq!(
+        overview
+            .panes
+            .iter()
+            .map(|pane_discovery| (
+                pane_discovery.pane_id,
+                pane_discovery.program_status.clone()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            (
+                build_pane_id,
+                Some(PaneProgramStatusDiscovery {
+                    program_status_state: ProgramStatusState::Blocked,
+                    blocked_kind: Some(BlockedKind::Question),
+                    progress_percent: Some(40),
+                    app_name: Some("codex".to_string()),
                 })
             ),
             (docs_pane_id, None),
